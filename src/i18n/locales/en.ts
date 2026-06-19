@@ -1,19 +1,16 @@
 import type { I18nStrings } from "@/i18n/types";
 
 const baseStrings = {
-  "site.title": "AstroPaper I18n",
-  "site.desc": "A fork of AstroPaper theme with support for I18n",
+  "site.title": "Java Guru",
+  "site.desc":
+    "Java Guru shares practical Java, Spring Boot, Database, System Design, Performance, and Clean Code knowledge for backend developers.",
 };
 
 const ENLocale: I18nStrings = {
   ...baseStrings,
-  "hero.title": "Mingalaba",
-  "hero.body": `
-        AstroPaper is a minimal, responsive, accessible and SEO-friendly Astro
-        blog theme. This theme follows best practices and provides accessibility
-        out of the box. Light and dark mode are supported by default. Moreover,
-        additional color schemes can also be configured.
-`,
+  "hero.title": "Java Guru",
+  "hero.body":
+    "Learn Java, Spring Boot, Database, System Design, Performance, and Clean Code through concise, practical, real-world engineering articles.",
   "hero.beforeReadme": "Read the blog posts or check",
   "hero.readme": "README",
   "hero.afterReadme": "for more info.",

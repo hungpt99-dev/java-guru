@@ -59,16 +59,7 @@ const recentPosts = sortedPosts.filter(({ data }) => !data.featured);
       <p>
         {t("hero.body")}
       </p>
-      <p class="mt-2">
-        {t("hero.beforeReadme")}
-        <LinkButton
-          class="underline decoration-dashed underline-offset-4 hover:text-accent"
-          href="https://github.com/satnaing/astro-paper#readme"
-        >
-          {t("hero.readme")}
-        </LinkButton>
-        {t("hero.afterReadme")}
-      </p>
+
       {
         // only display if at least one social link is enabled
         SOCIALS.length > 0 && (

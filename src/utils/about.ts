@@ -8,4 +8,4 @@ import { getEntry } from "astro:content";
  * @returns Promise resolving to the about page entry for the specified locale or undefined if not found.
  */
 export const getAboutForLocale = async (locale: LocaleKey) =>
-  getEntry("about", `about${locale}`);
+  getEntry("about", `about-${locale}`);
