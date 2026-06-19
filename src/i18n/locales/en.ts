@@ -3,14 +3,14 @@ import type { I18nStrings } from "@/i18n/types";
 const baseStrings = {
   "site.title": "Java Guru",
   "site.desc":
-    "Java Guru shares practical Java, Spring Boot, Database, System Design, Performance, and Clean Code knowledge for backend developers.",
+    "Learn Java, Spring Boot, Database, System Design, Performance, and Clean Code through concise, easy-to-understand articles grounded in real-world experience.",
 };
 
 const ENLocale: I18nStrings = {
   ...baseStrings,
   "hero.title": "Java Guru",
   "hero.body":
-    "Learn Java, Spring Boot, Database, System Design, Performance, and Clean Code through concise, practical, real-world engineering articles.",
+    "Learn Java, Spring Boot, Database, System Design, Performance, and Clean Code through concise, easy-to-understand articles grounded in real-world experience.",
   "hero.beforeReadme": "Read the blog posts or check",
   "hero.readme": "README",
   "hero.afterReadme": "for more info.",
