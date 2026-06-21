@@ -24,11 +24,13 @@ const title = `${pageTitle.charAt(0).toUpperCase() + pageTitle.slice(1)} | ${sit
 <Layout title={title}>
   <Header />
   <Breadcrumb />
-  <main id="main-content">
-    <section id="about" class="prose mb-28 max-w-3xl prose-img:border-0">
-      <h1 class="text-2xl tracking-wider sm:text-3xl">{frontmatter.title}</h1>
+  <main id="main-content" class="mx-auto w-full max-w-app px-4 pb-12">
+    <h1 class="inline-block text-2xl font-bold text-accent sm:text-3xl">
+      {frontmatter.title}
+    </h1>
+    <article id="about" class="prose mt-8 max-w-3xl">
       <slot />
-    </section>
+    </article>
   </main>
   <Footer />
 </Layout>
