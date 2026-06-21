@@ -9,6 +9,7 @@ import IconMenuDeep from "@/assets/icons/IconMenuDeep.svg";
 import LinkButton from "./LinkButton.astro";
 import { SITE } from "@/config";
 import { translateFor, getRelativeLocalePath } from "@/i18n/utils";
+import { DEFAULT_LOCALE } from "@/i18n/config";
 import LanguagePicker from "./LanguagePicker.astro";
 
 const { pathname } = Astro.url;
@@ -22,10 +23,18 @@ const currentPath =
   pathname.endsWith("/") && pathname !== "/" ? pathname.slice(0, -1) : pathname;
 
 const isActive = (path: string) => {
-  const currentPathArray = currentPath.split("/").filter(p => p.trim());
+  let normalizedPath = currentPath;
+  if (currentLocale && currentLocale !== DEFAULT_LOCALE) {
+    const localePrefix = `/${currentLocale}`;
+    if (normalizedPath.startsWith(localePrefix)) {
+      normalizedPath = normalizedPath.slice(localePrefix.length) || "/";
+    }
+  }
+
+  const currentPathArray = normalizedPath.split("/").filter(p => p.trim());
   const pathArray = path.split("/").filter(p => p.trim());
 
-  return currentPath === path || currentPathArray[0] === pathArray[0];
+  return normalizedPath === path || currentPathArray[0] === pathArray[0];
 };
 ---
 
@@ -104,7 +113,7 @@ const isActive = (path: string) => {
             SITE.showArchives && (
               <li class="col-span-3">
                 <LinkButton
-                  href="/archives"
+                  href={getRelativeLocalePath(currentLocale, "/archives")}
                   class:list={[
                     "focus-outline flex justify-center p-3 sm:p-1",
                     {
@@ -122,7 +131,7 @@ const isActive = (path: string) => {
           }
           <li class="col-span-1 flex items-center justify-center">
             <LinkButton
-              href="/search"
+              href={getRelativeLocalePath(currentLocale, "/search")}
               class:list={[
                 "focus-outline flex p-3 sm:p-1",
                 { "[&>svg]:stroke-accent": isActive("/search") },
