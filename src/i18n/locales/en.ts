@@ -18,6 +18,8 @@ const ENLocale: I18nStrings = {
   copied: "copied",
   by: "by",
   about: "About",
+  videos: "Videos",
+  "videos.desc": "Curated video tutorials and talks.",
   socialLinks: "Social Links",
   home: "Home",
   posts: "Posts",

@@ -18,6 +18,8 @@ const VILocale: I18nStrings = {
   copied: "đã sao chép",
   by: "bởi",
   about: "Giới thiệu",
+  videos: "Video",
+  "videos.desc": "Tổng hợp video hướng dẫn và chia sẻ kỹ thuật.",
   socialLinks: "Liên kết",
   home: "Trang chủ",
   posts: "Bài viết",

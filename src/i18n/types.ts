@@ -10,6 +10,8 @@ export interface I18nStrings {
   copied: string;
   by: string;
   about: string;
+  videos: string;
+  "videos.desc": string;
   socialLinks: string;
   home: string;
   posts: string;
