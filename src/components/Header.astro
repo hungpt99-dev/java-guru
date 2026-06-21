@@ -82,7 +82,7 @@ const navLinks = [
           id="menu-items"
           class:list={[
             "absolute top-full right-0 left-0 z-40 grid w-full grid-cols-3 place-content-center gap-2 border-t border-border bg-background px-4 py-4 shadow-lg",
-            "[&>li>a]:block [&>li>a]:px-4 [&>li>a]:py-3 [&>li>a]:text-center [&>li>a]:font-medium [&>li>a]:whitespace-nowrap hover:[&>li>a]:text-accent",
+            "[&>li>a]:block [&>li>a]:px-4 [&>li>a]:py-3 [&>li>a]:text-center [&>li>a]:font-medium [&>li>a]:whitespace-nowrap",
             "hidden",
             "lg:static lg:z-auto lg:mt-0 lg:flex lg:w-auto lg:items-center lg:gap-x-5 lg:border-t-0 lg:bg-transparent lg:px-0 lg:py-0 lg:shadow-none lg:[&>li>a]:px-2 lg:[&>li>a]:py-1",
           ]}
@@ -92,9 +92,10 @@ const navLinks = [
               <li class="col-span-3 lg:col-span-1">
                 <a
                   href={getRelativeLocalePath(Astro.currentLocale, path)}
-                  class:list={{
-                    "active-nav": isActive(path.replace(/\/$/, "")),
-                  }}
+                  class:list={[
+                    "hover:text-accent",
+                    { "active-nav": isActive(path.replace(/\/$/, "")) },
+                  ]}
                 >
                   {t(key)}
                 </a>
