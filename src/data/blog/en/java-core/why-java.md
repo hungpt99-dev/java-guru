@@ -51,7 +51,7 @@ At first, Java became famous because of its portability. But over time, it becam
 
 ## Java Is More Than Just a Programming Language
 
-When beginners hear "Java," they often think it is only a language with classes, objects, methods, and semicolons.
+When beginners hear “Java,” they often think it is only a language with classes, objects, methods, and semicolons.
 
 But in the real world, Java is much bigger than that.
 
@@ -151,7 +151,7 @@ JavaScript and TypeScript are like vehicles built for the web city. If you want 
 
 Go is like a clean, simple, efficient truck. It is great for cloud services, networking tools, infrastructure, and microservices. It starts fast and is easy to deploy.
 
-C# is like Java's close cousin, especially strong in the Microsoft world. It is excellent for .NET applications, enterprise systems, Windows development, Azure, and Unity game development.
+C# is like Java’s close cousin, especially strong in the Microsoft world. It is excellent for .NET applications, enterprise systems, Windows development, Azure, and Unity game development.
 
 Kotlin is like a modern version of the JVM experience. It is more concise than Java and very popular in Android development. It can also be used for backend development.
 

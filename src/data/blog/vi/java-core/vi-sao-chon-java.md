@@ -11,6 +11,7 @@ tags:
 ---
 
 Vì Sao Chọn Java?
+
 Hãy tưởng tượng bạn là một lập trình viên đang đứng trước một thành phố số khổng lồ.
 
 Trong thành phố đó có ngân hàng, bệnh viện, sân bay, sàn thương mại điện tử, hệ thống thanh toán, nền tảng giáo dục, mạng lưới logistics, dịch vụ xem phim trực tuyến, ứng dụng di động và hàng triệu người dùng đang hoạt động mỗi giây. Mọi thứ phải chạy ổn định. Tiền không được biến mất. Đơn hàng không được thất lạc. Tin nhắn phải được gửi đúng nơi. Hệ thống phải có khả năng phục hồi khi có lỗi xảy ra.
