@@ -145,7 +145,7 @@ Kotlin is like a modern version of the JVM experience. It is more concise than J
 
 So where does Java fit?
 
-Java is like a strong, reliable train system. It may not look as light as a bicycle or as new as a modern electric car, but it can carry huge weight, run for years, and support an entire city.
+Java is like a massive cargo ship. It may not look as light as a bicycle or as new as a modern electric car, but it can carry huge weight, run for years, and support an entire city.
 
 That is why Java remains important.
 
