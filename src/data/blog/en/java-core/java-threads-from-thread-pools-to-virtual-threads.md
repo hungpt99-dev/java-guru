@@ -19,9 +19,9 @@ Every Java backend developer eventually asks the same four questions:
 
 This article answers all four — and unlike most articles on the topic, every
 claim here is backed by a real, runnable example. The article is designed to be
-read next to the companion repository `java-lab`, a plain Maven project with
-**31 small, independent examples**, zero frameworks, and pure JDK concurrency
-APIs. Each section below maps a concept to an actual class in that repository,
+read next to the companion repository [`java-lab`](https://github.com/hungpt99-dev/java-lab),
+a plain Maven project with **31 small, independent examples**, zero frameworks,
+and pure JDK concurrency APIs. Each section below maps a concept to an actual class in that repository,
 shows the real code, and tells you exactly what to run and what to observe.
 
 All examples compile with Java 21+ (`maven.compiler.release` is set to `21` in
@@ -1384,7 +1384,8 @@ The central message, printed by the resource-limit example:
 
 Every example is a standalone class with a `main` method, runnable after
 `mvn clean compile` via `java -cp target/classes <fully.qualified.ClassName>`.
-The full runnable list (31 examples) lives in the repository `README.md`; the
+The full runnable list (31 examples) lives in the repository
+[`README.md`](https://github.com/hungpt99-dev/java-lab/blob/main/README.md); the
 table below maps each one to the article sections and its lesson.
 
 | Blog Section | Repository Example | What It Demonstrates |

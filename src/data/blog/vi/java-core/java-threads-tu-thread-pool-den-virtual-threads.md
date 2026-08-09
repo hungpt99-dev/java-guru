@@ -17,7 +17,7 @@ Mọi backend developer Java rồi cũng tự hỏi bốn câu giống nhau:
 - Vì sao Virtual Threads xử lý được concurrency khổng lồ nhưng không làm code tính toán (CPU-bound) nhanh hơn?
 - Vì sao lỗi concurrency hầu như **chỉ xuất hiện ở production**?
 
-Bài viết này trả lời cả bốn câu — và khác với hầu hết các bài viết khác về chủ đề này, mọi khẳng định ở đây đều dựa trên một ví dụ thật, chạy được. Bài viết được thiết kế để đọc cùng repository đồng hành `java-lab`, một dự án Maven thuần với **31 ví dụ nhỏ, độc lập**, không framework, chỉ dùng API concurrency thuần của JDK. Mỗi phần dưới đây gắn một khái niệm với một class cụ thể trong repository, trình bày code thật, và cho bạn biết chính xác chạy gì và quan sát gì.
+Bài viết này trả lời cả bốn câu — và khác với hầu hết các bài viết khác về chủ đề này, mọi khẳng định ở đây đều dựa trên một ví dụ thật, chạy được. Bài viết được thiết kế để đọc cùng repository đồng hành [`java-lab`](https://github.com/hungpt99-dev/java-lab), một dự án Maven thuần với **31 ví dụ nhỏ, độc lập**, không framework, chỉ dùng API concurrency thuần của JDK. Mỗi phần dưới đây gắn một khái niệm với một class cụ thể trong repository, trình bày code thật, và cho bạn biết chính xác chạy gì và quan sát gì.
 
 Tất cả ví dụ biên dịch với Java 21+ (`maven.compiler.release` được đặt là `21` trong `pom.xml`; Virtual Threads yêu cầu Java 21). Mọi con số đo đạc trong bài viết này được sinh ra khi chạy các ví dụ trên một máy 12 lõi với JDK 21 — hãy coi chúng là dữ liệu mẫu, không phải benchmark chuẩn.
 
@@ -1103,7 +1103,7 @@ Thông điệp trung tâm, được in bởi ví dụ resource-limit:
 
 ## Mã ví dụ trong repository này
 
-Mọi ví dụ là một class độc lập có `main`, chạy được sau `mvn clean compile` qua `java -cp target/classes <fully.qualified.ClassName>`. Danh sách chạy được đầy đủ (31 ví dụ) nằm trong `README.md` của repository; bảng dưới đây ánh xạ từng ví dụ với các mục của bài viết và bài học của nó.
+Mọi ví dụ là một class độc lập có `main`, chạy được sau `mvn clean compile` qua `java -cp target/classes <fully.qualified.ClassName>`. Danh sách chạy được đầy đủ (31 ví dụ) nằm trong [`README.md`](https://github.com/hungpt99-dev/java-lab/blob/main/README.md) của repository; bảng dưới đây ánh xạ từng ví dụ với các mục của bài viết và bài học của nó.
 
 | Mục bài viết | Ví dụ trong Repository | Điều nó minh họa |
 | ------------ | ---------------------- | ---------------- |
