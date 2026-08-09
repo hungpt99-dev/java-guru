@@ -1,6 +1,6 @@
 ---
 title: "Java Threads: Từ Thread Pool đến Virtual Threads"
-description: "Cẩm nang thực hành về concurrency trong Java với 31 ví dụ chạy được: thread, race condition, thread pool, backpressure, những lỗi chỉ xuất hiện ở production, và điều Virtual Threads thực sự làm được — cùng những gì chúng không làm được."
+description: "Cẩm nang concurrency Java đậm chất production với 31 ví dụ chạy được: thread thực sự là gì, vì sao shared state bị hỏng, thread pool và backpressure hoạt động ra sao, vì sao thêm thread lại chậm hơn, và Virtual Threads thực sự thay đổi điều gì bên dưới."
 pubDatetime: 2026-08-09T00:00:00+07:00
 featured: false
 draft: false
@@ -10,108 +10,261 @@ tags:
   - backend
 ---
 
-Mọi backend developer Java rồi cũng tự hỏi bốn câu giống nhau:
+Hãy tưởng tượng một dịch vụ nhận 10.000 request cùng một lúc.
 
-- Vì sao thêm nhiều thread lại khiến ứng dụng **chậm hơn**?
-- Vì sao một thread pool với hàng trăm thread không cải thiện được CPU utilization?
+Một số request cần CPU — parse JSON, băm, nén.
+Một số chờ truy vấn database.
+Một số chờ một HTTP API bên ngoài mất 300 ms mới trả lời.
+
+Câu hỏi đầu tiên mọi kỹ sư đặt ra: *chúng ta có nên tạo 10.000 thread?*
+
+Nếu không, tại sao không? Và câu hỏi tiếp theo khiến ai cũng bối rối: *nếu
+Java Virtual Threads cho phép tạo hàng triệu thread, tại sao không thể làm
+ứng dụng concurrency vô hạn?*
+
+Bài viết này trả lời những câu hỏi đó. Nhưng thay vì bắt đầu bằng định nghĩa
+của thread, nó bắt đầu bằng chồng các lớp máy móc quyết định mọi thứ về
+concurrency:
+
+```text
+Application Code
+       ↓
+Java Threads
+       ↓
+JVM
+       ↓
+Operating System Scheduler
+       ↓
+CPU Cores
+       ↓
+External Resources (databases, APIs, files)
+```
+
+Mọi câu hỏi trong bài viết này thực chất chỉ xoay quanh một điều: **bottleneck
+thực sự của hệ thống nằm ở đâu, và việc thêm thread có giải quyết đúng
+bottleneck đó hay chỉ dịch chuyển nó sang chỗ khác?**
+
+Đây là mô hình tư duy chúng ta sẽ dùng đi dùng lại:
+
+> **Trước khi thêm thread, hãy tự hỏi: thứ đang giới hạn hệ thống thực sự là
+> gì?** CPU? Số connection database? Rate limit của API bên ngoài? Mạng? Bộ
+> nhớ? Tranh chấp lock? Chính thread pool? Dung lượng queue?
+> Tăng concurrency chỉ có ích nếu nó giải quyết đúng bottleneck thực tế. Nếu
+> không, nó có thể chỉ đẩy bottleneck sang chỗ khác.
+
+Bốn câu hỏi bài viết này trả lời một cách sâu sắc:
+
+- Vì sao thêm nhiều thread có thể khiến ứng dụng **chậm hơn**?
+- Vì sao một thread pool với hàng trăm thread không cải thiện CPU utilization?
 - Vì sao Virtual Threads xử lý được concurrency khổng lồ nhưng không làm code tính toán (CPU-bound) nhanh hơn?
 - Vì sao lỗi concurrency hầu như **chỉ xuất hiện ở production**?
 
-Bài viết này trả lời cả bốn câu — và khác với hầu hết các bài viết khác về chủ đề này, mọi khẳng định ở đây đều dựa trên một ví dụ thật, chạy được. Bài viết được thiết kế để đọc cùng repository đồng hành [`java-lab`](https://github.com/hungpt99-dev/java-lab), một dự án Maven thuần với **31 ví dụ nhỏ, độc lập**, không framework, chỉ dùng API concurrency thuần của JDK. Mỗi phần dưới đây gắn một khái niệm với một class cụ thể trong repository, trình bày code thật, và cho bạn biết chính xác chạy gì và quan sát gì.
+Mọi khẳng định đều được hỗ trợ bởi một ví dụ thật, chạy được. Bài viết được
+thiết kế để đọc cùng repository đồng hành [`java-lab`](https://github.com/hungpt99-dev/java-lab),
+một dự án Maven thuần với **31 ví dụ nhỏ, độc lập**, không framework, chỉ dùng
+API concurrency thuần của JDK. Mỗi phần gắn một khái niệm với một class cụ thể,
+trình bày code thật, và cho bạn biết chính xác chạy gì và quan sát gì.
 
-Tất cả ví dụ biên dịch với Java 21+ (`maven.compiler.release` được đặt là `21` trong `pom.xml`; Virtual Threads yêu cầu Java 21). Mọi con số đo đạc trong bài viết này được sinh ra khi chạy các ví dụ trên một máy 12 lõi với JDK 21 — hãy coi chúng là dữ liệu mẫu, không phải benchmark chuẩn.
+Tất cả ví dụ biên dịch với Java 21+ (`maven.compiler.release` được đặt là `21`
+trong `pom.xml`; Virtual Threads yêu cầu Java 21). Mọi con số đo đạc trong bài
+viết này được sinh ra khi chạy các ví dụ trên một máy 12 lõi với JDK 21 — hãy
+coi chúng là dữ liệu mẫu, không phải benchmark chuẩn.
 
----
-
-## 1. Giới thiệu
-
-Nếu bạn từng vận hành một backend Java, bạn biết rõ những dấu hiệu cảnh báo: một đợt bùng nổ các lời gọi database chậm, một thread dump đầy các thread `BLOCKED`, một queue tăng không kiểm soát, latency leo thang trong khi CPU rảnh rỗi. Tất cả những thứ này đến từ một tập nhỏ các sự thật cơ học:
-
-- Một thread rất đắt: ~1 MB stack, do kernel tạo, do kernel lên lịch.
-- Một thread chỉ chạy trên một lõi tại một thời điểm — và một máy có số lõi cố định.
-- Bộ nhớ dùng chung nhanh *chính vì* nó được dùng chung — đúng thứ khiến nó hỏng dưới truy cập không đồng bộ.
-- Thread bị block không tốn CPU, nhưng tài nguyên chúng chờ (connection, quota, socket) vẫn hữu hạn.
-
-Bài viết này đi qua những sự thật đó một cách cơ học, đúng theo thứ tự mà repository `java-lab` dạy: thread là gì (Mục 2), cách tạo (Mục 3), vòng đời (Mục 4), vì sao shared state hỏng (Mục 5–6), thread pool thực sự hoạt động thế nào (Mục 7), số thread mua được gì (Mục 8), những kiểu lỗi cắn người ở production (Mục 9), và cuối cùng Virtual Threads thay đổi điều gì — và quan trọng không kém, chúng *không* thay đổi điều gì (Mục 10–13). Mục 14–16 đưa ra vòng lặp debugging, bảng quyết định, và mô hình tư duy để mang đi.
-
-**Cách đọc bài viết này:** mỗi khái niệm đều nêu tên class trong repository; chạy nó bằng các lệnh trong khung "Try It Yourself" và so sánh quan sát của bạn với kết quả ghi lại ở đây.
+**Cách đọc bài viết này:** mỗi khái niệm đều nêu tên class trong repository;
+chạy nó bằng các lệnh trong khung "Try It Yourself" và so sánh quan sát của
+bạn với kết quả ghi lại ở đây. Cấu trúc luôn giống nhau: một vấn đề, một trực
+giác, code, điều gì thực sự xảy ra, tại sao, điều gì xảy ra bên dưới
+(under the hood), đánh đổi (trade-offs), và khi nào nó quan trọng ở production.
 
 ---
 
-## 2. Thread là gì?
+## 1. Vấn đề thực sự: 10.000 Requests
 
-### 2.1. Process vs Thread
+Quay lại tình huống mở đầu. Một chương trình thông thường thực thi chỉ thị
+**tuần tự** — một việc hoàn thành xong việc tiếp theo mới bắt đầu:
 
-**Process** là một chương trình đang chạy với vùng nhớ riêng, file descriptor riêng, không gian địa chỉ riêng. **Thread** là một đơn vị thực thi *bên trong* một process. Các thread của cùng một process dùng chung bộ nhớ của process (heap, static field, class metadata), đó là lý do chúng giao tiếp với nhau dễ dàng — và cũng là lý do chúng dễ làm hỏng trạng thái của nhau.
-
-```
-+-------------------------------------------------------+
-|  PROCESS                                               |
-|  +-----------------+  +-----------------+             |
-|  | Thread 1        |  | Thread 2        |             |
-|  | stack riêng     |  | stack riêng     |             |
-|  +-----------------+  +-----------------+             |
-|                                                       |
-|  BỘ NHỚ DÙNG CHUNG: heap, static fields, classes      |
-+-------------------------------------------------------+
+```text
+Task A
+  ↓
+Task B
+  ↓
+Task C
 ```
 
-Mỗi thread có **stack riêng** nhưng **dùng chung** heap. Sự phân tách đó giải thích gần như mọi thứ về multithreading: dùng chung là thứ làm nó hữu ích, và dùng chung cũng là thứ làm nó nguy hiểm.
+Nhưng một backend thực tế hiếm khi như vậy. Tại bất kỳ thời điểm nào nó cũng
+có các request ở những pha hoàn toàn khác nhau:
 
-### 2.2. Concurrency vs Parallelism
-
-- **Concurrency** nói về *cấu trúc*: nhiều tác vụ cùng tiến triển trong các khoảng thời gian chồng lấn, xen kẽ nhau trên cùng một CPU.
-- **Parallelism** nói về *thực thi*: nhiều tác vụ chạy ở đúng cùng một thời điểm, trên các lõi CPU khác nhau.
-
+```text
+Request A ───── chờ database
+Request B ───── đang tính toán
+Request C ───── chờ HTTP API
+Request D ───── đang xử lý file
 ```
-Concurrency (xen kẽ trên 1 lõi):
+
+Đây là cơ hội bị bỏ phí: trong khi Request A chờ database, CPU đang rảnh. Một
+chương trình tuần tự không thể bắt đầu Request B cho đến khi A hoàn thành — vậy
+nên máy dành phần lớn thời gian làm không, chờ các tài nguyên bên ngoài chậm
+hơn CPU hàng nghìn lần.
+
+Một lõi CPU thực thi hàng tỷ chỉ thị mỗi giây. Một round-trip database mất
+miligiây — bằng thời gian của hàng triệu chỉ thị. *Chờ đợi* không phải sự kiện
+hiếm trong backend; nó là trạng thái mặc định.
+
+Khoảng cách giữa "CPU nhanh" và "mọi thứ còn lại chậm" chính là lý do gốc rễ
+thread tồn tại. Thread cho phép một chương trình giữ CPU bận rộn với việc khác
+trong khi một phần công việc của nó đang bị chặn bởi thứ gì đó chậm.
+
+Nhưng thread mang đến một loạt vấn đề mới: tạo ra không rẻ, dùng chung bộ nhớ,
+có thể làm hỏng trạng thái của nhau, và không tạo thêm sức mạnh CPU. Phần còn
+lại của bài viết đi qua đánh đổi đó — từng khái niệm, cơ chế của nó, và cái
+giá của nó.
+
+---
+
+## 2. Concurrency và Parallelism: Hai Công Cụ Khác Nhau
+
+Trước khi nhìn vào Java, chúng ta cần sự phân biệt mà cả bài viết xây dựng
+trên đó.
+
+### 2.1. Concurrency là về cấu trúc; parallelism là về thực thi
+
+- **Concurrency**: nhiều tác vụ cùng tiến triển trong *các khoảng thời gian
+  chồng lấn*, đan xen trên cùng một CPU. Đó là cách *cấu trúc* một chương
+  trình có chờ đợi bên trong.
+- **Parallelism**: nhiều tác vụ *thực thi cùng một thời điểm* trên các lõi CPU
+  khác nhau. Đó là thuộc tính của *phần cứng* thực thi.
+
+Một phép loại suy hữu ích và trung thực về mặt kỹ thuật: concurrency là một
+đầu bếp luân phiên giữa nhiều món trên một bếp — không món nào chín nhanh hơn,
+nhưng tất cả cùng tiến triển trong lúc mỗi món chờ. Parallelism là nhiều đầu
+bếp nấu cùng lúc — throughput thật sự, nhưng chỉ vì có nhiều bếp.
+
+```text
+Concurrency (đan xen trên 1 lõi):
   Thread A:  |--A1--|        |--A2--|        |--A3--|
   Thread B:        |--B1--|        |--B2--|        |--B3--|
 
 Parallelism (đồng thời trên 2 lõi):
-  Lõi 1:     |------A1------|------A2------|
-  Lõi 2:     |------B1------|------B2------|
+  Core 1:    |------A1------|------A2------|
+  Core 2:    |------B1------|------B2------|
 ```
 
-Concurrency không cần nhiều lõi. Parallelism thì bắt buộc phải có. Nếu máy của bạn có 4 lõi và bạn tạo 1000 thread, **tối đa 4 tác vụ chạy ở cùng một thời điểm** — 996 thread còn lại đang chờ, ngủ, hoặc bị context switch. Tạo thread không tạo ra lõi CPU.
+Điểm sâu hơn: **concurrency thường là để xử lý chờ đợi, còn parallelism là để
+tận dụng nhiều tài nguyên thực thi.** Nếu tác vụ của bạn không bao giờ chờ,
+concurrency gần như không mua được gì — chỉ parallelism (thêm lõi) mới giúp.
+Nếu tác vụ chờ nhiều, concurrency cho phép các tác vụ khác dùng khoảng thời
+gian mà bạn lẽ ra lãng phí.
 
-### 2.3. Workload CPU-bound vs I/O-bound
+Concurrency không đòi hỏi nhiều lõi. Parallelism thì có. Nếu máy bạn có 4 lõi
+và bạn tạo 1000 thread, nhiều nhất **4 tác vụ chạy cùng một thời điểm** — 996
+cái còn lại đang chờ, ngủ, hoặc bị context-switch. **Tạo thread không tạo ra
+lõi.**
 
-Câu hỏi quan trọng nhất cần đặt ra cho bất kỳ tác vụ nào: *nó đang chờ cái gì?*
+### 2.2. Hai loại workload quyết định mọi thứ
 
-- **CPU-bound**: tác vụ dành thời gian để tính toán — parse, băm, crypto, nén. Tốc độ bị giới hạn bởi lõi CPU, không phải số thread.
-- **I/O-bound**: tác vụ dành phần lớn thời gian để *chờ* — chờ database, chờ HTTP response, chờ đọc file. Tốc độ bị giới hạn bởi độ trễ và mức concurrency.
+Chỉ có một câu hỏi cần đặt cho bất kỳ tác vụ nào: *nó đang chờ điều gì?*
 
+- **CPU-bound**: tác vụ dành thời gian để tính toán — parse, băm, crypto,
+  nén. Tốc độ bị giới hạn bởi số lõi CPU, không phải số thread.
+- **I/O-bound**: tác vụ dành phần lớn thời gian *chờ đợi* — chờ database, một
+  HTTP response, một lần đọc file. Tốc độ bị giới hạn bởi latency và
+  concurrency.
+
+```text
+CPU-bound task:   [=====compute=====][=====compute=====][=====compute=====]
+                  ↑ CPU là bottleneck → chỉ #cores mới quan trọng
+
+I/O-bound task:   [wait 95ms][wait 95ms][wait 95ms]
+                  [ 5ms work ][ 5ms work ][ 5ms work ]
+                  ↑ 95% thời gian là chờ → thêm concurrency giúp
 ```
-Tác vụ CPU-bound: [=====tính toán=====][=====tính toán=====][=====tính toán=====]
-                  ↑ CPU là điểm nghẽn → chỉ có #cores mới có ý nghĩa
 
-Tác vụ I/O-bound: [chờ 95ms][chờ 95ms][chờ 95ms]
-                  [ 5ms làm việc ][ 5ms làm việc ][ 5ms làm việc ]
-                  ↑ 95% thời gian là chờ → tăng concurrency giúp ích
-```
+Vì sao điều này quan trọng trước cả khi nói về thread? Vì *toàn bộ* thiết kế
+concurrency của Java — thread pool, Virtual Threads, backpressure — là câu trả
+lời cho thực tế I/O-bound của backend. Một request handler điển hình ở
+production làm 5 ms công việc thật và 95 ms chờ đợi. CPU utilization của tác
+vụ đơn lẻ đó là 5%. Bạn có thể chạy ~20 tác vụ như vậy trên một lõi trước khi
+CPU bận — 19 cái còn lại gần như miễn phí trong lúc chúng chờ.
 
-Sự phân biệt này là xương sống của cả bài viết — repository có các thí nghiệm chuyên dụng cho cả hai loại workload (Mục 8).
+Repository dành hẳn một package để chứng minh hai phát biểu này bằng đo đạc
+(Mục 10), vì chúng quyết định bạn nên tạo bao nhiêu thread.
 
-### 2.4. Context Switching
+### 2.3. Blocking: "chờ đợi" nghĩa là gì ở cấp độ thread
 
-Khi CPU chuyển từ thread này sang thread khác, OS phải lưu toàn bộ trạng thái của thread hiện tại và nạp trạng thái của thread tiếp theo. Đây là **context switch**, và nó không miễn phí: tốn thời gian CPU, phá hỏng CPU cache (dữ liệu của thread mới là dữ liệu "lạnh"), và càng nhiều thread thì càng nhiều thời gian CPU dành cho *chuyển đổi* thay vì *làm việc*. Đây là câu trả lời trực tiếp cho câu hỏi đầu tiên: **thêm thread nhiều hơn mức máy có thể chạy đồng thời không tăng sức làm việc — nó chỉ tăng chi phí chuyển đổi.**
+Một thread **bị block** khi nó không thể tiếp tục nếu không có sự kiện bên
+ngoài — một lock, một `sleep()`, một query DB, một HTTP response. Một thread
+bị block tiêu thụ **0** CPU (nó không được lên lịch) nhưng vẫn giữ bộ nhớ của
+nó và vẫn được tính là một thread với OS scheduler.
 
-### 2.5. Blocking
-
-Một thread bị **block** khi nó không thể tiếp tục mà không có sự kiện bên ngoài (một lock, một `sleep()`, một query DB, một HTTP response). Một thread bị block tiêu thụ **zero** CPU nhưng vẫn giữ bộ nhớ và vẫn được OS scheduler tính là một thread. Toàn bộ trò chơi của thread pool — và sau này là của Virtual Threads — là luôn có đủ công việc sẵn sàng chạy để giữ CPU bận rộn trong khi phần lớn thread đang bị block.
+Blocking chính là thuộc tính khiến công việc I/O-bound có thể mở rộng bằng
+thread: trong khi thread A chờ DB, CPU có thể chạy thread B. Toàn bộ trò chơi
+của thread pool — và sau này là Virtual Threads — là giữ CPU bận trong khi đa
+số thread bị block, mà không phải trả giá quá đắt cho những thread chỉ đang
+chờ.
 
 ---
 
-## 3. Tạo và chạy Thread
+## 3. Platform Thread Thực Sự Là Gì
 
-Package `basics` của repository chứa bốn ví dụ. Hãy xem chúng thực sự minh họa điều gì.
+**Repository examples:** `src/main/java/com/example/javalab/basics/CreateThreadExample.java`, `src/main/java/com/example/javalab/basics/RunnableExample.java`
+
+Giáo trình nói thread là "một đơn vị thực thi". Điều đó cho bạn biết nó *làm
+gì*, chứ không phải nó *là gì*. Bên dưới, một thread là một bó trạng thái mà
+CPU có thể chuyển đến, chạy, tạm ngưng, và chuyển đi:
+
+- **Một stack** — vùng nhớ chứa biến cục bộ và các call frame. Trong môi
+  trường JVM/OS điển hình, một platform thread dành khoảng **1 MB** stack. Đây
+  là chi phí bộ nhớ chiếm ưu thế của thread.
+- **Một program counter** — địa chỉ chỉ thị tiếp theo sẽ thực thi.
+- **Trạng thái thực thi** — các thanh ghi (general-purpose, stack pointer,
+  frame pointer, instruction pointer), cộng với các cờ như "interrupted".
+- **Metadata lập lịch** — độ ưu tiên, trạng thái, hàng đợi chờ, hạch toán thời
+  gian CPU. Đây là thứ OS scheduler dùng để quyết định *khi nào* chạy nó.
+
+Điểm mấu chốt về một thread *platform* (classic `Thread` của Java) là mối quan
+hệ của nó với hệ điều hành. Về mặt khái niệm:
+
+```text
+Java Platform Thread
+        │
+        ▼
+JVM
+        │
+        ▼
+Native / OS Thread
+        │
+        ▼
+Operating System Scheduler
+        │
+        ▼
+CPU Core
+```
+
+Một platform thread ánh xạ **1:1 với một OS/native thread**: khi JVM tạo một
+`Thread`, nó yêu cầu OS tạo một native thread; khi thread đó chạy, OS scheduler
+quyết định nó chạy trên lõi nào. Cách triển khai chính xác thay đổi theo OS và
+JVM, nhưng cấu trúc chi phí thì nhất quán, và chính cấu trúc chi phí này định
+hình mọi quyết định thiết kế trong concurrency của Java:
+
+- **Chi phí tạo lập.** Tạo một thread nghĩa là một system call vào kernel và
+  cấp phát một native stack — mất miligiây, không phải nanogiây, và là một thao
+  tác kernel, nên nó cạnh tranh với mọi process khác trên máy.
+- **Bộ nhớ stack.** ~1 MB dành riêng cho mỗi thread. 10.000 thread ≈ 10 GB bộ
+  nhớ ảo. Trong thực tế, hầu hết process chạm `OutOfMemoryError: unable to
+  create native thread` trước khi cạn heap.
+- **Lập lịch kernel.** OS scheduler phải theo dõi mọi thread runnable. Nhiều
+  thread hơn = nhiều việc cho scheduler hơn, ở mỗi context switch, mỗi timer
+  tick.
+- **Context switching.** Chuyển CPU từ thread này sang thread khác tốn thời
+  gian CPU và phá hủy tính cục bộ của CPU cache (Mục 10).
+- **Chi phí scheduler ở quy mô lớn.** Với hàng nghìn thread runnable, một phần
+  lớn thời gian CPU có thể dành để *quyết định* chạy gì và *chuyển* sang nó,
+  thay vì chạy nó.
+
+Package `basics` minh họa cách thread được tạo và API cho bạn những gì, để các
+chi phí trên là thứ bạn *cảm nhận được* thay vì chỉ đọc về nó.
 
 ### Ví dụ: Tạo một Thread
-
-**Repository example:** `src/main/java/com/example/javalab/basics/CreateThreadExample.java`
-
-Ví dụ này cho thấy ba cách tạo thread — một `Runnable` ẩn danh, một `Runnable` lambda, và một `Thread` subclass — tất cả được khởi động bằng `start()` và chờ bằng `join()`:
 
 ```java
 Thread t1 = new Thread(new Runnable() {
@@ -136,13 +289,20 @@ t2.join();
 t3.join();
 ```
 
-**Điều cần quan sát:** ba dòng in ra từ ba tên thread khác nhau theo *thứ tự khác nhau mỗi lần chạy*. Thứ tự bất định đó *chính là* concurrency.
+**Điều gì xảy ra khi chạy:** ba thread thực thi đồng thời; mỗi thread in dòng
+của nó từ chính thread của nó. **Vì sao:** mỗi `start()` tạo một native thread
+mà OS scheduler chạy song song với `main`. **Bên dưới:** mỗi thread đó có stack
+riêng (~1 MB dành riêng) và thanh ghi riêng; `join()` chặn `main` cho đến khi
+mỗi thread kết thúc — bản thân `join()` là một thao tác blocking. **Tác động
+production:** tạo một `Thread` mỗi request chính là mẫu thiết kế sụp đổ ở
+10.000 request đồng thời (Mục 8). **Điểm mấu chốt:** một thread là một tài
+nguyên OS thật, đắt — ba thread thì rẻ, ba nghìn thread thì không.
 
 ### Ví dụ: Runnable vs Callable
 
-**Repository example:** `src/main/java/com/example/javalab/basics/RunnableExample.java`
-
-`Runnable` có `void run()` — không trả kết quả, không ném checked exception. `Callable` có `V call()` — trả về một giá trị và có thể ném exception. Ví dụ chạy một `Callable` qua một `ExecutorService` và lấy kết quả bằng `Future.get()`:
+`Runnable` có `void run()` — không trả kết quả, không ném checked exception.
+`Callable` có `V call()` — nó trả về một giá trị và có thể ném exception. Ví dụ
+chạy một `Callable` qua một `ExecutorService` và lấy kết quả qua `Future.get()`:
 
 ```java
 Callable<Integer> callable = () -> {
@@ -159,11 +319,39 @@ try {
 }
 ```
 
-### Ví dụ: start() vs run()
+**Bên dưới:** tác vụ được thực thi trên một worker thread; kết quả được lưu
+trong `Future`. `future.get()` chặn *caller* cho đến khi giá trị sẵn sàng — lưu
+ý caller không busy-wait, OS park nó. **Tác động production:** mẫu "submit công
+việc, lấy `Future`, block trên `get()`" là cách hầu hết orchestration bất đồng
+bộ hoạt động; `Future` cũng là nơi exception của tác vụ âm thầm biến mất nếu
+bạn không bao giờ gọi `get()` (Mục 11.5).
+
+> **Những thứ khác được các ví dụ này bao phủ:** `join()` (chờ một thread kết
+> thúc) và `sleep()` (dùng khắp nơi để mô phỏng công việc). Tên thread làm log
+> dễ đọc — mọi ví dụ pool trong repository đặt tên thread bằng một
+> `ThreadFactory` tùy chỉnh.
+
+## Try It Yourself
+
+```bash
+cd java-lab
+mvn clean compile
+java -cp target/classes com.example.javalab.basics.CreateThreadExample
+java -cp target/classes com.example.javalab.basics.RunnableExample
+```
+
+Quan sát kỳ vọng: ba dòng trong `CreateThreadExample` được in từ ba tên thread
+khác nhau theo *thứ tự khác nhau ở mỗi lần chạy*. Thứ tự phi định xác đó *chính
+là* concurrency.
+
+---
+
+## 4. start() vs run(): Điều Gì Thực Sự Thay Đổi
 
 **Repository example:** `src/main/java/com/example/javalab/basics/StartVsRunExample.java`
 
-Sự khác biệt quan trọng nhất cho người mới trong Java concurrency:
+Đây là sự phân biệt quan trọng nhất cho người mới trong concurrency Java, và
+lý do đằng sau nó chính là cỗ máy của Mục 3:
 
 ```java
 Runnable task = () -> System.out.println("  task executed in thread: "
@@ -175,7 +363,7 @@ t.run();    // runs in the CALLER thread (here: 'main')
 t.start();  // runs in a NEW thread (here: 'new-thread')
 ```
 
-**Kết quả thật của ví dụ:**
+**Kết quả thực tế của ví dụ:**
 
 ```
 1) t.run()   -> runs in the CALLER thread:
@@ -184,65 +372,139 @@ t.start();  // runs in a NEW thread (here: 'new-thread')
   task executed in thread: new-thread
 ```
 
-`run()` chỉ là một lời gọi phương thức bình thường — gọi nó cho bạn zero concurrency, và bug vô hình vì code vẫn cho kết quả đúng. `start()` yêu cầu JVM tạo một thread mới thực sự.
+**Điều gì thực sự thay đổi.** Gọi `run()` chỉ là một lời gọi phương thức bình
+thường. Luồng thực thi:
 
-> **Các ví dụ này cũng minh họa:** `join()` (chờ một thread kết thúc) và `sleep()` (dùng khắp nơi để mô phỏng công việc). Tên thread làm log dễ đọc — mọi ví dụ về pool trong repository đều đặt tên thread bằng một `ThreadFactory` tùy chỉnh.
+```text
+Current Thread
+     ↓
+Call run() như một phương thức bình thường
+     ↓
+Thực thi tuần tự
+```
+
+Gọi `start()` thay đổi toàn bộ kiến trúc:
+
+```text
+Current Thread
+     ↓
+Yêu cầu JVM bắt đầu một thread thực thi mới
+     ↓
+Native thread mới được tạo và lên lịch
+     ↓
+JVM gọi run() trên thread mới
+```
+
+**Vì sao thứ tự in ra phi định xác.** Một khi `start()` được gọi, có hai thread
+độc lập và cả hai đều *runnable*. Từ khoảnh khắc đó, developer không còn kiểm
+soát hoàn toàn thứ tự thực thi: JVM và OS scheduler quyết định khi nào mỗi
+thread nhận thời gian CPU, và quyết định đó phụ thuộc vào tải máy, các process
+khác, ngắt timer, và chính sách của scheduler. Ngay cả trên một máy có vẻ rảnh,
+bạn không thể đoán thread nào in trước.
+
+`run()` cho bạn concurrency bằng 0, và bug vô hình vì code vẫn cho kết quả đúng
+— nó chỉ chạy tuần tự trên caller. Đây là một lỗi im lặng kinh điển: code
+*trông có vẻ* concurrent nhưng thực ra không.
+
+**Bên dưới:** `start()` thực hiện một native call tạo kernel thread, cấp phát
+stack của nó, và đưa nó vào hàng đợi runnable. Chỉ sau đó OS scheduler mới nhặt
+nó lên và cuối cùng cho nó thực thi `run()`. Ngược lại, `run()` không bao giờ
+rời khỏi stack của caller.
+
+**Tác động production:** `t.run()` bên trong một request handler thay vì
+`t.start()` biến một fan-out "song song" thành thực thi tuần tự — latency nhân
+lên theo số tác vụ. Nó cũng giải thích vì sao các bug concurrency "works on my
+machine" tồn tại: cùng một code có thể hoạt động khác đi khi scheduler còn
+việc khác phải làm.
 
 ## Try It Yourself
 
 ```bash
-cd java-lab
-mvn clean compile
 java -cp target/classes com.example.javalab.basics.StartVsRunExample
-java -cp target/classes com.example.javalab.basics.CreateThreadExample
-java -cp target/classes com.example.javalab.basics.RunnableExample
 ```
 
-Quan sát mong đợi: `run()` luôn in tên thread của caller (`main`); `start()` in tên thread mới; ba thread trong `CreateThreadExample` in theo thứ tự khác nhau mỗi lần chạy.
+Quan sát kỳ vọng: `run()` luôn in tên thread của caller (`main`); `start()` in
+tên thread mới (`new-thread`).
 
 ---
 
-## 4. Vòng đời của Thread
+## 5. Vòng Đời của Thread: Vì Sao Các Trạng Thái Tồn Tại
 
 **Repository example:** `src/main/java/com/example/javalab/basics/ThreadLifecycleExample.java`
 
-Ví dụ này dẫn một thread đơn lẻ qua cả sáu trạng thái và lấy mẫu `thread.getState()` từ thread main tại từng điểm:
+Mỗi trạng thái thread là câu trả lời cho một câu hỏi scheduler phải trả lời:
+*thread này có thể chạy ngay bây giờ không, và nếu không, nó đang chờ gì?* Sáu
+trạng thái là từ vựng của thread dump — nghĩa là hiểu chúng là một kỹ năng
+debug, không phải kiến thức tò mò.
 
 ```
-        ┌──────────────────────────────────────────┐
-        ▼                                          │
-   ┌─────────┐  start()   ┌────────────┐           │
-   │  NEW    │───────────▶│ RUNNABLE   │───────────┼──▶  đang chạy trên một lõi
-   └─────────┘            └────────────┘           │
-                            │  ▲                   │
-       bị block vì lock     │  │  có được lock     │
-                            ▼  │                   │
-                        ┌─────────┐                │
-                        │ BLOCKED │                │
-                        └─────────┘                │
-                            │  ▲                   │
-       wait()/join()/park   │  │  được notify      │
-                            ▼  │                   │
-                        ┌─────────┐                │
-                        │ WAITING │                │
-                        └─────────┘                │
-                            │  ▲                   │
-       sleep()/await(ms)    │  │  hết timeout/notify│
-                            ▼  │                   │
-                        ┌──────────────┐           │
-                        │TIMED_WAITING │           │
-                        └──────────────┘           │
-                            │                      │
-   run() trả về/thoát       │                      │
-                            ▼                      │
-                        ┌───────────┐              │
-                        │TERMINATED │──────────────┘
-                        └───────────┘
+        ┌─────────────────────────────────────────────────────┐
+        ▼                                                     │
+   ┌──────────┐  start()   ┌──────────────┐                   │
+   │  NEW     │────────────►│ RUNNABLE     │──────────────────►│  running on a core
+   └──────────┘            └──────────────┘                   │
+                            │  ▲                             │
+       blocked on a lock    │  │  lock acquired              │
+                            ▼  │                             │
+                        ┌──────────┐                         │
+                        │ BLOCKED  │                         │
+                        └──────────┘                         │
+                            │  ▲                             │
+       wait()/join()/park   │  │  notified                   │
+                            ▼  │                             │
+                        ┌──────────┐                         │
+                        │ WAITING  │                         │
+                        └──────────┘                         │
+                            │  ▲                             │
+       sleep()/await(ms)    │  │  timeout/notify             │
+                            ▼  │                             │
+                        ┌──────────────┐                     │
+                        │TIMED_WAITING │                     │
+                        └──────────────┘                     │
+                            │                                │
+   run() returns/exits      │                                │
+                            ▼                                │
+                        ┌────────────┐                       │
+                        │TERMINATED  │───────────────────────┘
+                        └────────────┘
 ```
 
-Code tạo ra từng trạng thái theo yêu cầu: một thread thứ hai bị block trên một `synchronized` monitor mà `main` đang giữ (→ `BLOCKED`), worker gọi `LOCK.wait(300)` (→ `TIMED_WAITING`) rồi `LOCK.wait()` (→ `WAITING`), và cuối cùng `join()` hé lộ `TERMINATED`. Vì thời điểm chính xác là bất định, ví dụ *poll* cho đến khi từng trạng thái mong đợi xuất hiện (kèm timeout) thay vì dựa vào sleep.
+- **NEW** — đã tạo nhưng chưa gọi `start()`. Chưa có OS thread. *Nguyên nhân:*
+  chưa có gì yêu cầu JVM bắt đầu thực thi.
+- **RUNNABLE** — sẵn sàng chạy hoặc đang thực sự chạy. Quan trọng: **"runnable"
+  không có nghĩa là "đang thực thi trên một CPU".** Một thread runnable có thể
+  đang chờ trong hàng đợi run của OS để nhận thời gian CPU. Java cố ý không
+  phân biệt "đang chạy" với "sẵn sàng": quyết định đó thuộc về OS scheduler,
+  thứ Java không nhìn thấy được.
+- **BLOCKED** — chờ giành một `synchronized` monitor đang bị thread khác giữ.
+  Thread không thể tiếp tục *vì nó cần truy cập độc quyền*.
 
-**Kết quả thật (rút gọn):**
+  ```text
+  Thread A owns Lock
+          ↓
+  Thread B needs same Lock
+          ↓
+  Thread B không thể tiếp tục
+          ↓
+  BLOCKED
+  ```
+
+- **WAITING** — thread *cố ý* tạm dừng chính nó để chờ một thread khác hành
+  động: `Object.wait()` không timeout, `Thread.join()`, `LockSupport.park()`.
+  Nó chờ một *tín hiệu*, không phải thời gian CPU.
+- **TIMED_WAITING** — giống trên, nhưng có hạn chót: `Thread.sleep()`,
+  `join(millis)`, `await(timeout, unit)`. Khác WAITING ở chỗ OS có thể đánh
+  thức nó bằng timer.
+- **TERMINATED** — `run()` đã trả về hoặc ném exception. Thread đã chết; không
+  thể khởi động lại.
+
+Ví dụ tạo ra từng trạng thái theo yêu cầu: một thread thứ hai block trên một
+`synchronized` monitor do `main` giữ (→ `BLOCKED`), worker gọi `LOCK.wait(300)`
+(→ `TIMED_WAITING`) rồi `LOCK.wait()` (→ `WAITING`), và cuối cùng `join()` phơi
+bày `TERMINATED`. Vì timing chính xác là phi định xác, ví dụ *poll* cho đến khi
+mỗi trạng thái kỳ vọng xuất hiện (có timeout) thay vì dựa vào sleep.
+
+**Kết quả thực tế (rút gọn):**
 
 ```
 1) NEW         state = NEW
@@ -253,7 +515,20 @@ Code tạo ra từng trạng thái theo yêu cầu: một thread thứ hai bị 
 6) TERMINATED  state = TERMINATED
 ```
 
-**Bạn gặp các trạng thái này ở đâu trong production:** một dump `jstack`/`jcmd Thread.print` đầy các thread `BLOCKED` nghĩa là synchronized lock contention; đống `WAITING`/`TIMED_WAITING` trên `park` nghĩa là pool queue hoặc future; lũ `RUNNABLE` nghĩa là CPU bão hòa.
+**Tác động production — đọc thread dump.** Một bản dump `jstack`/`jcmd
+Thread.print` là bức ảnh chụp các trạng thái này, và mỗi trạng thái chỉ về một
+lớp vấn đề khác nhau:
+
+- Nhiều thread `BLOCKED` → tranh chấp synchronized lock; tìm monitor trong
+  stack trace, tìm ai đang giữ nó. Cách sửa thường là bớt tranh chấp (critical
+  section nhỏ hơn, lock striping) hoặc một cấu trúc khác.
+- Đống `WAITING`/`TIMED_WAITING` trên `park` → hàng đợi pool, future, hoặc
+  thread pool đang rảnh; nếu chúng *đang tăng*, pool đang ứ đọng.
+- Vô số `RUNNABLE` → CPU bão hòa: máy là bottleneck.
+
+**Điểm mấu chốt:** các trạng thái không phải sổ sách — chúng cho bạn biết một
+thread đang chờ CPU, chờ lock, hay chờ sự kiện, và mỗi câu trả lời dẫn đến một
+chẩn đoán production khác nhau.
 
 ## Try It Yourself
 
@@ -261,15 +536,24 @@ Code tạo ra từng trạng thái theo yêu cầu: một thread thứ hai bị 
 java -cp target/classes com.example.javalab.basics.ThreadLifecycleExample
 ```
 
-Quan sát mong đợi: cả sáu trạng thái in ra đúng thứ tự. Lưu ý rằng điểm lấy mẫu `RUNNABLE` chính xác thay đổi giữa các lần chạy — bản thân state machine là cố định, còn *thời điểm* thì không.
+Quan sát kỳ vọng: cả sáu trạng thái được in theo thứ tự. Lưu ý điểm mẫu
+`RUNNABLE` chính xác thay đổi theo từng lần chạy — state machine thì cố định,
+*timing* thì không.
 
 ---
 
-## 5. Race Condition và Shared State
+## 6. Race Condition: Khoa Học Đằng Sau count++
 
 **Repository example:** `src/main/java/com/example/javalab/synchronization/RaceConditionExample.java`
 
-Repository mở đầu bằng một bộ đếm cố tình hỏng:
+### Vấn đề
+
+Nhiều thread dùng chung mutable state. Phép đột biến dùng chung đơn giản nhất
+có thể — tăng một biến đếm — đã hỏng. Không phải "thi thoảng hỏng": hỏng theo
+cách vô hình cho đến khi có tải production, và lúc đó vô cùng bực bội vì lỗi
+mang tính thống kê, không phải logic.
+
+### Code
 
 ```java
 public class RaceConditionExample {
@@ -283,9 +567,12 @@ public class RaceConditionExample {
 }
 ```
 
-Tám thread gọi `increment()` 50.000 lần mỗi thread — kết quả mong đợi là 400.000. Ví dụ chạy năm lượt và in kết quả thật.
+Tám thread gọi `increment()` 50.000 lần mỗi thread — kết quả kỳ vọng là
+400.000. Ví dụ chạy năm lần (trials) và in kết quả thực tế.
 
-**Kết quả thật của ví dụ:**
+### Điều gì xảy ra khi chạy
+
+**Kết quả thực tế của ví dụ:**
 
 ```
 Trial 1: expected=400000 actual=84596 (<-- WRONG: increments lost)
@@ -295,15 +582,85 @@ Trial 4: expected=400000 actual=60526 (<-- WRONG: increments lost)
 Trial 5: expected=400000 actual=400000 (correct this time)
 ```
 
-**Vì sao kết quả có thể sai:** `count++` là ba thao tác — ĐỌC field, CỘNG 1, GHI lại. Hai thread có thể cùng ĐỌC `5`, cùng tính `6`, và cùng GHI `6` — một lần tăng bị mất.
+### Vì sao xảy ra: tách nhỏ thao tác
 
-**Vì sao nó bất định:** việc xen kẽ có va chạm hay không phụ thuộc vào scheduler, trạng thái JIT và tải máy. Lượt 5 tình cờ đúng — chính điều đó giải thích vì sao các bug này vượt qua code review và nổ tung ở production. Code biên dịch được, chạy được, và *thi thoảng* cho kết quả đúng.
+`count++` trông như một câu lệnh. Nó là ba thao tác:
 
-Đây là sự vi phạm ba trụ cột của Java Memory Model (JMM):
+```text
+Read count
+   ↓
+Add 1
+   ↓
+Write count
+```
 
-- **Atomicity**: một thao tác chạy như một khối không thể tách rời. Bị phá vỡ bởi `count++`; được sửa bởi `synchronized`, `Atomic*`, lock.
-- **Visibility**: write của thread A có thể không bao giờ được thread B thấy (giá trị có thể bị cache trong register/CPU cache).
-- **Ordering**: JIT và CPU có thể sắp xếp lại lệnh miễn là ngữ nghĩa đơn luồng vẫn đúng.
+Giờ đan xen hai thread — mỗi thread tự thực hiện Read/Add/Write:
+
+```text
+Time ──────────────────────────────────────►
+
+Thread A: Read ─── Add ─── Write
+Thread B:      Read ─── Add ─── Write
+
+Thread A đọc: 0
+Thread B đọc: 0        ← cả hai đều thấy giá trị CŨ
+
+Thread A tính: 1
+Thread B tính: 1       ← cả hai cùng tính ra kết quả giống nhau
+
+Thread A ghi: 1
+Thread B ghi: 1        ← một lần tăng đã bị mất
+
+Kỳ vọng: 2
+Thực tế: 1
+```
+
+**Vì sao nó phi định xác:** việc các interleaving có va chạm hay không phụ
+thuộc vào lập lịch, trạng thái JIT, và tải máy. Trial 5 tình cờ đúng — đó chính
+là lý do những bug này vượt qua code review và nổ tung ở production. Code biên
+dịch, chạy, và *thi thoảng* cho kết quả đúng.
+
+### Vấn đề sâu hơn: ba sự đảm bảo riêng biệt
+
+Lập trình concurrent khó vì "làm cho nó đúng" thực ra nghĩa là "thiết lập ba
+sự đảm bảo riêng biệt", và **giải pháp cho một cái không giải quyết được hai
+cái kia**:
+
+- **Atomicity** — một thao tác chạy như một đơn vị không thể chia cắt; không
+  thread nào có thể quan sát nó đang dở dang. Bị phá vỡ bởi `count++` (nó là
+  ba bước). Được sửa bởi `synchronized`, `Atomic*`, lock.
+- **Visibility** — một lần ghi của thread A có thể không bao giờ được thread B
+  thấy, vì mỗi thread có thể cache giá trị trong thanh ghi hoặc CPU-local
+  cache. Lần ghi không tự động được đẩy ra bộ nhớ dùng chung.
+- **Ordering** — JIT compiler và CPU có thể sắp xếp lại chỉ thị miễn là ngữ
+  nghĩa đơn luồng được giữ. Code trông có thứ tự trong source có thể thực thi
+  theo thứ tự khác trên một lõi khác.
+
+### Java Memory Model: mô hình tư duy bạn cần
+
+JMM là hợp đồng định nghĩa khi nào các thread có thể quan sát lần ghi của nhau.
+Bạn không cần toàn bộ đặc tả — bạn cần mô hình tư duy thực dụng:
+
+```text
+Thread A has a view of shared state
+Thread B has a view of shared state
+
+Without correct synchronization,
+changes are not necessarily observed
+in the way developers expect.
+```
+
+Mỗi thread hoạt động trên "tầm nhìn" của riêng nó (thanh ghi + CPU cache) và
+JMM định nghĩa chính xác hành động nào buộc các tầm nhìn đó được hợp nhất:
+đọc/ghi `volatile`, khối `synchronized`, thao tác `Atomic*`, và một vài thứ
+khác. Các hành động này tạo ra các cạnh **happens-before** — cách nói trang
+trọng cho "mọi thứ thread A làm trước khi nhả lock đều hiển thị với thread B
+sau khi nó giành được cùng lock đó".
+
+Đó là lý do ví dụ này không phải điều tò mò: mọi race trong production bạn
+từng debug đều là cùng một kiểu lỗi — mutable state dùng chung bị đột biến mà
+thiếu sự đồng bộ tạo ra visibility và atomicity. "Works on my machine" là JMM
+đang làm việc của nó *quá tốt* trên một máy tải nhẹ.
 
 ## Try It Yourself
 
@@ -311,15 +668,18 @@ Trial 5: expected=400000 actual=400000 (correct this time)
 java -cp target/classes com.example.javalab.synchronization.RaceConditionExample
 ```
 
-Quan sát mong đợi: hầu hết các lượt cho thấy actual count thấp hơn 400.000 rất nhiều; thi thoảng có một lượt đúng. Đừng bao giờ tin một lần chạy duy nhất.
+Quan sát kỳ vọng: hầu hết các trial cho actual count thấp xa 400.000; thi
+thoảng một trial đúng. Không bao giờ tin một lần chạy duy nhất.
 
 ---
 
-## 6. Các chiến lược Đồng bộ hóa
+## 7. Synchronization: Vì Sao Các Cách Sửa Hoạt Động
 
-Package `synchronization` chứa bốn cách sửa cộng với một "người nói thật" về `volatile`.
+Package `synchronization` chứa bốn cách sửa cộng với "kẻ nói thật" `volatile`.
+Mỗi cách sửa thiết lập các đảm bảo của JMM qua một cơ chế khác nhau — và mỗi
+cách có đánh đổi riêng.
 
-### Ví dụ: synchronized
+### 7.1. synchronized: mutual exclusion + visibility
 
 **Repository example:** `src/main/java/com/example/javalab/synchronization/SynchronizedExample.java`
 
@@ -334,9 +694,45 @@ public class SynchronizedExample {
 }
 ```
 
-Monitor `synchronized` biến read-modify-write thành một khối không thể tách rời và cũng publish write (happens-before). Cùng workload 8×50.000 giờ luôn đúng: cả ba lượt đều in `actual=400000 (correct)`. Cái giá phải trả: các thread tranh chấp bị **block**, và contention nặng trên một monitor biến code thành chạy đơn luồng trên thực tế. `synchronized` reentrant, mặc định non-fair, và không thể timeout.
+**Cơ chế:** monitor `synchronized` cho thread *quyền sở hữu độc quyền* đối với
+critical section. Chỉ một thread có thể ở bên trong tại một thời điểm:
 
-### Ví dụ: AtomicInteger
+```text
+Chỉ một thread vào critical section
+            ↓
+Shared state được đột biến an toàn
+            ↓
+Lock được nhả
+            ↓
+Một thread khác có thể vào
+```
+
+Nó thiết lập cả hai đảm bảo cùng lúc: **mutual exclusion** (atomicity — thao
+tác read-modify-write không thể đan xen) và **visibility** (việc nhả monitor
+tạo một cạnh happens-before: mọi thứ được ghi bên trong khối đều hiển thị với
+thread tiếp theo bước vào).
+
+Cùng workload 8×50.000 giờ luôn đúng: cả ba trial in
+`actual=400000 (correct)`.
+
+**Các đánh đổi — vì sao không synchronized mọi thứ?**
+
+- **Lock contention.** Nếu nhiều thread cùng đập vào một monitor, chúng *xếp
+  hàng*. Mỗi thread trượt lock phải bị deschedule và reschedule — đó là một
+  context switch, cộng thêm việc cho scheduler. Dưới contention nặng, code trở
+  nên hiệu quả là đơn luồng: lock tuần tự hóa mọi thứ.
+- **Kích thước critical section.** Section càng lớn, thread càng lâu chờ bên
+  ngoài nó. Cách sửa thường là critical section *nhỏ hơn* — chỉ giữ lock cho
+  thao tác đột biến, không phải cả phương thức.
+- **Không có timeout.** `synchronized` không thể hết hạn: một thread giữ lock
+  mãi mãi sẽ chặn mọi người khác mãi mãi. Không có cách "bỏ cuộc".
+- **Không công bằng.** Monitor mặc định không fair: dưới contention liên tục,
+  một thread chờ có thể bị bỏ đói (Mục 11.2).
+
+Quy tắc rút ra: đồng bộ vùng nhỏ nhất có thể bảo vệ invariant — và ưu tiên
+immutable state cùng `Atomic*` khi thao tác cập nhật đơn giản.
+
+### 7.2. AtomicInteger: atomicity nhờ phần cứng, không blocking
 
 **Repository example:** `src/main/java/com/example/javalab/synchronization/AtomicIntegerExample.java`
 
@@ -351,28 +747,107 @@ public class AtomicIntegerExample {
 }
 ```
 
-`AtomicInteger` đúng *và* không chặn: nó dùng CAS (compare-and-swap) ở mức phần cứng, thử lại nếu một thread khác thay đổi giá trị giữa chừng. Ví dụ cũng in các thao tác hữu ích khác (`get()`, `getAndIncrement()`, `addAndGet(n)`, `compareAndSet(exp, upd)`).
+**Cơ chế — CAS, về mặt khái niệm.** `AtomicInteger` dựa trên compare-and-swap
+(CAS): một chỉ thị của bộ xử lý thực hiện nguyên tử "nếu giá trị vẫn là X, thay
+nó bằng Y; cho tôi biết tôi có thành công không". JVM biên dịch
+`incrementAndGet()` thành một vòng CAS: đọc giá trị, tính giá trị mới, CAS;
+nếu một thread khác đổi giá trị ở giữa chừng, CAS thất bại và vòng lặp thử lại.
 
-### Ví dụ: ReentrantLock
+```text
+Thread A: read 5 → compute 6 → CAS(5 → 6)? yes → done
+Thread B: read 5 → compute 6 → CAS(5 → 6)? no (A won) → retry with 6 → CAS(6 → 7)? yes
+```
+
+Hai hệ quả quan trọng:
+
+- **Nó không blocking.** Thread thua cuộc đua không ngủ — nó thử lại ngay lập
+  tức. Không context switch, không deschedule. Dưới contention nhẹ, nó rẻ hơn
+  nhiều so với `synchronized`.
+- **Nó đúng mà không cần block**, vì bản thân chỉ thị CAS là nguyên tử ở mức
+  phần cứng (với một fallback của JVM khi phần cứng không hỗ trợ). Cơ chế chính
+  xác do cách triển khai quyết định, nhưng về khái niệm: *phần cứng là cái
+  lock*.
+
+Ví dụ cũng in các thao tác hữu ích khác
+(`get()`, `getAndIncrement()`, `addAndGet(n)`, `compareAndSet(exp, upd)`).
+
+**Vì sao AtomicInteger không thay thế được mọi critical section.** Một biến
+atomic bảo vệ *một* giá trị. Nếu một thao tác liên quan:
+- kiểm tra nhiều giá trị,
+- sửa đổi nhiều đối tượng,
+- duy trì một invariant trải qua nhiều field,
+
+thì một biến atomic không đủ. Ví dụ: chuyển tiền giữa hai tài khoản cần cả hai
+số dư thay đổi nguyên tử; hai `AtomicLong` riêng biệt có thể bị quan sát giữa
+chừng của lần chuyển. Với invariant phức hợp, bạn cần `synchronized` hoặc một
+lock — đó chính là mục đích của mutual exclusion.
+
+### 7.3. ReentrantLock: kiểm soát, timeout, và quy tắc finally
 
 **Repository example:** `src/main/java/com/example/javalab/synchronization/LockExample.java`
 
-`ReentrantLock` bổ sung thứ `synchronized` không làm được — timeout, fairness, condition. Ví dụ minh họa một bộ đếm bảo vệ bằng lock (luôn đúng) và mẹo mấu chốt, `tryLock(timeout)`:
+`ReentrantLock` tồn tại vì `synchronized` cố ý tối giản: không timeout, không
+kiểm soát fairness, không conditions, không cách kiểm tra khả dụng mà không
+block. `ReentrantLock` bổ sung tất cả:
+
+- **lock/unlock tường minh** — lock là một đối tượng riêng với vòng đời bạn
+  kiểm soát.
+- **`tryLock(timeout)`** — thử giành và bỏ cuộc sau một hạn chót. Đây là phòng
+  thủ đầu tiên chống deadlock: một thread không giành được lock trong một giây
+  có thể làm việc khác thay vì chờ mãi mãi.
+- **Fairness** — `new ReentrantLock(true)` phục vụ người chờ theo thứ tự FIFO,
+  ngăn starvation với cái giá là một chút throughput.
+- **Conditions** — đánh thức chính xác: một thread có thể chờ một điều kiện cụ
+  thể và chỉ được tín hiệu khi nó đúng.
+- **Reentrancy** — cùng một thread có thể giành lại lock, điều cần thiết cho
+  các phương thức gọi lẫn nhau trong khi đang giữ lock.
+
+Ví dụ minh họa một counter được lock bảo vệ (luôn đúng) và mẹo mấu chốt:
 
 ```java
 boolean acquired = held.tryLock(1, TimeUnit.SECONDS);
 // thread B holds the lock for 3 s: main gives up after 1 s instead of blocking
 ```
 
-**Kết quả thật:** `tryLock = false (main did NOT wait for the holder - it moved on)`. Với `synchronized`, tình huống tương tự sẽ block cho đến khi holder nhả lock. `tryLock(timeout)` là tuyến phòng thủ đầu tiên chống deadlock.
+**Kết quả thực tế:** `tryLock = false (main did NOT wait for the holder - it moved on)`.
+Với `synchronized`, tình huống tương tự sẽ block cho đến khi người giữ nhả.
 
-### Ví dụ: volatile — visibility, KHÔNG phải atomicity
+**Mối nguy — quy tắc finally.** Vì việc unlock là tường minh, nó có thể bị bỏ
+qua:
+
+```text
+lock()
+  ↓
+Exception
+  ↓
+unlock() không bao giờ xảy ra
+```
+
+Một lock không bao giờ được nhả sẽ chặn mọi thread khác mãi mãi. Quy tắc: giành,
+dùng, và nhả trong `finally` — luôn luôn.
+
+```java
+lock.lock();
+try {
+    // critical section
+} finally {
+    lock.unlock();   // even when the body throws
+}
+```
+
+**Đánh đổi với synchronized:** `ReentrantLock` linh hoạt hơn nhưng dễ sai hơn
+(quên unlock, bỏ sót reentrancy); `synchronized` an toàn bởi thiết kế (việc nhả
+xảy ra tự động khi thoát) nhưng kém linh hoạt. Ưu tiên `synchronized` cho các
+section đơn giản; dùng `ReentrantLock` khi bạn cần timeout, fairness, hoặc
+conditions.
+
+### 7.4. volatile: visibility, KHÔNG PHẢI atomicity
 
 **Repository example:** `src/main/java/com/example/javalab/synchronization/VolatileExample.java`
 
 Ví dụ này chứng minh hai điểm bằng những con số cứng.
 
-**Phần A — `volatile int count; count++` vẫn KHÔNG atomic:**
+**Phần A — `volatile int count; count++` vẫn KHÔNG nguyên tử:**
 
 ```java
 private volatile int count;     // volatile: visible, but STILL not atomic
@@ -382,7 +857,7 @@ public void increment() {
 }
 ```
 
-**Kết quả thật:**
+**Kết quả thực tế:**
 
 ```
 Part A - volatile int count++; does it stay atomic?
@@ -390,11 +865,26 @@ Part A - volatile int count++; does it stay atomic?
 expected=400000 actual=191212 (<-- WRONG)
 ```
 
-`volatile` chỉ đảm bảo visibility và ordering. Chuỗi ba bước read-modify-write vẫn có thể xen kẽ giữa các thread. **Đừng tin rằng `volatile` làm cho việc tăng biến trở nên thread-safe — không phải vậy.**
+`volatile` chỉ đảm bảo visibility và ordering — mọi lần đọc thấy lần ghi gần
+nhất. Thao tác read-modify-write ba bước vẫn có thể đan xen giữa các thread.
+**Đừng tin rằng `volatile` làm phép tăng thread-safe — nó không.**
 
-**Phần B — một flag không volatile có thể không bao giờ được thấy.** Một worker lặp trên `boolean keepRunning` thường trong khi `main` đặt nó thành `false` sau 200 ms. JIT có thể đưa field ra ngoài vòng lặp, nên write không bao giờ được quan sát. Phần này cố tình bất định — trong lần chạy ghi lại, nó tái hiện 0 trên 3 lượt, trong khi cửa thoát (một `volatile boolean forceStop`) dừng worker ngay lập tức mỗi lần. Ví dụ luôn kết thúc, và takeaway in ra là quy tắc ngón tay cái:
+**Phần B — một flag không volatile có thể không bao giờ được thấy.** Một worker
+lặp trên một `boolean keepRunning` thường trong khi `main` đặt nó thành `false`
+sau 200 ms. JIT có thể nâng field ra khỏi vòng lặp (compiler quan sát thấy nó
+không bao giờ được ghi *bên trong vòng lặp* và được phép giả định ngữ nghĩa đơn
+luồng), nên lần ghi không bao giờ được quan sát. Phần này cố ý phi định xác —
+trong lần chạy ghi lại, nó tái hiện 0 trên 3 trials, trong khi cửa thoát (một
+`volatile boolean forceStop`) dừng worker ngay lập tức mọi lần. Ví dụ luôn kết
+thúc, và thông điệp in ra của nó là quy tắc kinh nghiệm:
 
-> `volatile` cho cờ và trạng thái; `AtomicInteger`/`AtomicLong` cho bộ đếm và shared state; `synchronized`/lock cho các critical section phức tạp.
+> `volatile` cho flag và trạng thái; `AtomicInteger`/`AtomicLong` cho bộ đếm và
+> shared state; `synchronized`/lock cho critical section phức tạp.
+
+**Vì sao có sự phân chia này:** mỗi công cụ trả lời một câu hỏi khác nhau từ
+Mục 6. `volatile` trả lời "lần ghi của tôi có được thấy không?" `Atomic*` trả
+lời "read-modify-write của tôi có thể chia cắt không?" Lock trả lời cả hai, cộng
+thêm "tôi có thể bảo vệ một invariant phức hợp không?" — với cái giá là blocking.
 
 ## Try It Yourself
 
@@ -406,19 +896,78 @@ java -cp target/classes com.example.javalab.synchronization.LockExample
 java -cp target/classes com.example.javalab.synchronization.VolatileExample
 ```
 
-Quan sát mong đợi: bộ đếm hỏng mất increment; cả ba cách sửa luôn đúng; `VolatileExample` Phần A mất increment ngay cả trên field `volatile`, và bug visibility của Phần B có thể tái hiện hoặc không trong các lần chạy của bạn.
+Quan sát kỳ vọng: counter hỏng mất increment; cả ba cách sửa luôn đúng;
+`VolatileExample` Phần A mất increment ngay cả trên field `volatile`, và bug
+visibility của Phần B có thể có hoặc không tái hiện trong lần chạy của bạn.
 
 ---
 
-## 7. Thread Pool và Thực thi Task
-
-Package `threadpool` là trái tim của bài viết — nó cho thấy `ThreadPoolExecutor` thực sự hoạt động *thế nào*, không chỉ các shortcut của `Executors`.
-
-### Ví dụ: Fixed Thread Pool
+## 8. Thread Pool: Vấn Đề Chúng Giải Quyết
 
 **Repository example:** `src/main/java/com/example/javalab/threadpool/FixedThreadPoolExample.java`
 
-`Executors.newFixedThreadPool(3)` với một `ThreadFactory` đặt tên chạy 10 task. Phần "inside the box" được in ra của ví dụ nêu sự thật mấu chốt:
+### Vấn đề: một thread cho mỗi tác vụ không mở rộng được
+
+Thiết kế ngây thơ cho 10.000 request đồng thời là:
+
+```text
+Incoming Tasks
+     ↓
+Create OS Thread
+     ↓
+Create OS Thread
+     ↓
+Create OS Thread
+     ↓
+...
+```
+
+Nhớ lại cấu trúc chi phí của Mục 3: mỗi thread là một thao tác kernel, một stack
+~1 MB, và một mục trong sổ sách của scheduler. Tạo một thread mỗi tác vụ nghĩa
+là:
+
+- **Latency tạo lập** trên mọi request (miligiây mỗi thread, tuần tự qua
+  kernel).
+- **Bộ nhớ** tăng theo tốc độ request: 10.000 request đồng thời ≈ 10 GB stack.
+- **Scheduler hỗn loạn**: với nhiều thread runnable hơn số lõi, CPU dành nhiều
+  thời gian chuyển đổi giữa các thread hơn là làm việc.
+- **Không có chặn trên**: không gì ngăn số thread tăng cho đến khi
+  `OutOfMemoryError: unable to create native thread`.
+
+### Giải pháp: pool như một cơ chế quản lý tài nguyên
+
+Thread pool thường được mô tả là "tái sử dụng thread". Điều đó nói chưa đủ. Một
+thread pool là một **cơ chế quản lý tài nguyên** với bốn công việc:
+
+- **Tái sử dụng tài nguyên thực thi đắt đỏ** — worker được tạo một lần và sống
+  nhiều năm; tác vụ thì rẻ để nộp.
+- **Kiểm soát concurrency** — số worker là trần cứng cho số tác vụ chạy cùng
+  lúc. Đây là "núm vặn" concurrency.
+- **Giới hạn tiêu thụ tài nguyên** — worker có chặn × queue có chặn = bộ nhớ có
+  chặn, bất kể tốc độ tác vụ đến.
+- **Quản lý quá tải** — khi pool bão hòa, *một điều được định nghĩa* xảy ra
+  (xếp hàng, từ chối) thay vì âm thầm cấp phát tài nguyên không giới hạn cho
+  đến khi JVM chết.
+
+```text
+Tasks
+  │
+  ▼
+Queue
+  │
+  ▼
+Worker Pool
+ ┌───────────────┐
+ │ Worker 1      │
+ │ Worker 2      │
+ │ Worker 3      │
+ └───────────────┘
+```
+
+### Ví dụ: Fixed Thread Pool
+
+`Executors.newFixedThreadPool(3)` với một `ThreadFactory` có tên chạy 10 tác
+vụ. Phần "inside the box" được in bởi ví dụ nêu sự thật mấu chốt:
 
 ```
 newFixedThreadPool(3) == ThreadPoolExecutor(3, 3, 0L,
@@ -428,13 +977,69 @@ beyond 3 threads and can never reject a task - tasks just
 pile up in memory.
 ```
 
-**Kết quả thật:** task 1–10 đều chạy trên `fixed-worker-1..3` — các worker được tái sử dụng. Một pool "cố định" cố định chính xác vì queue unbounded của nó không bao giờ ép pool phát triển.
+**Kết quả thực tế:** tasks 1–10 đều chạy trên `fixed-worker-1..3` — worker được
+tái sử dụng. Một pool "fixed" cố định chính xác vì queue không chặn của nó
+không bao giờ buộc pool phải lớn lên.
 
-### Ví dụ: ThreadPoolExecutor — toàn bộ pipeline
+**Bên dưới:** `Executors.newFixedThreadPool(n)` là phím tắt cho
+`ThreadPoolExecutor(n, n, 0L, MILLISECONDS, new LinkedBlockingQueue<>())` —
+constructor là API thật, các phương thức factory chỉ là đường cát. Hãy chú ý
+điều phím tắt che giấu: một queue **không chặn**. Một chi tiết duy nhất đó quyết
+định hành vi của pool dưới quá tải (Mục 9).
 
-**Repository example:** `src/main/java/com/example/javalab/threadpool/ThreadPoolExecutorExample.java`
+**Tác động production:** các phím tắt `Executors` mặc định là nguồn sự cố
+production đã biết — `newFixedThreadPool` và `newSingleThreadExecutor` xếp hàng
+không giới hạn (bộ nhớ tăng trưởng), `newCachedThreadPool` tạo một thread mỗi
+tác vụ (không chặn trên số thread). Pool production được dựng bằng constructor
+đầy đủ của `ThreadPoolExecutor` để mọi núm vặn đều tường minh và mọi tài nguyên
+đều có chặn.
 
-Ví dụ này cấu hình mọi núm chỉnh — core=2, max=4, bounded queue dung lượng 2, `AbortPolicy` — và log `poolSize`/`queueSize` sau mỗi submit:
+## Try It Yourself
+
+```bash
+java -cp target/classes com.example.javalab.threadpool.FixedThreadPoolExample
+```
+
+Quan sát kỳ vọng: cả 10 tác vụ chạy trên 3 worker được tái sử dụng; ghi chú
+"inside the box" được in giải thích vì sao một fixed pool là cố định.
+
+---
+
+## 9. Đường Ống: Core, Queue, Max, Rejection
+
+**Repository examples:** `src/main/java/com/example/javalab/threadpool/ThreadPoolExecutorExample.java`, `src/main/java/com/example/javalab/threadpool/BoundedQueueExample.java`, `src/main/java/com/example/javalab/threadpool/RejectedExecutionExample.java`, `src/main/java/com/example/javalab/practical/GracefulShutdownExample.java`
+
+### Quy trình quyết định cho mỗi tác vụ mới
+
+`ThreadPoolExecutor` không nhận một tác vụ theo cách bạn có thể kỳ vọng ("nếu
+một worker rảnh thì chạy; nếu không thì xếp hàng"). Nó tuân theo một thuật toán
+bốn bước cố định, và **thứ tự của các bước chính là thiết kế**:
+
+```text
+New Task
+   │
+   ├── Ít hơn số core threads?
+   │        └── Tạo worker
+   │
+   ├── Queue còn chỗ?
+   │        └── Đưa tác vụ vào queue
+   │
+   ├── Ít hơn số maximum threads?
+   │        └── Tạo thêm worker
+   │
+   └── Nếu không
+            └── Từ chối tác vụ
+```
+
+Điểm tinh tế mấu chốt: **queue được hỏi ý kiến *trước khi* pool lớn lên quá
+core size.** Pool ưu tiên đệm công việc trong queue, và chỉ tạo thêm worker khi
+queue đầy. Hệ quả: với queue không chặn, `maximumPoolSize` là cấu hình chết —
+pool không bao giờ lớn hơn core size, và tác vụ chất đống trong bộ nhớ mãi mãi.
+**Tăng `maximumPoolSize` không nhất thiết tăng concurrency khi dùng queue không
+chặn.**
+
+Ví dụ cấu hình mọi núm vặn — core=2, max=4, queue có chặn dung lượng 2,
+`AbortPolicy` — và log `poolSize`/`queueSize` sau mỗi lần submit:
 
 ```java
 ThreadPoolExecutor executor = new ThreadPoolExecutor(
@@ -446,18 +1051,7 @@ ThreadPoolExecutor executor = new ThreadPoolExecutor(
         new ThreadPoolExecutor.AbortPolicy());
 ```
 
-Thuật toán tiếp nhận task mà nó minh họa:
-
-```
-Task
- ↓
-1. core threads free?       -> run on a core thread
-2. no, queue not full?      -> enqueue
-3. no, workers < max?       -> spawn an extra thread (up to max)
-4. no                        -> rejection policy
-```
-
-**Kết quả thật (màn trình diễn đang hoạt động):**
+**Kết quả thực tế (màn trình diễn đang hoạt động):**
 
 ```
 submitted 1 -> poolSize=1 queueSize=0
@@ -471,13 +1065,41 @@ submitted 8 -> REJECTED (pool full, queue full): RejectedExecutionException
 submitted 9 -> REJECTED (pool full, queue full): RejectedExecutionException
 ```
 
-Hãy quan sát thứ tự: task 1–2 chạm core threads; task 3–4 vào queue; pool chỉ phát triển vượt core size **sau khi** queue đã đầy (task 5–6); một khi queue đầy *và* đạt max, `AbortPolicy` ném exception.
+Quan sát thứ tự: tasks 1–2 chạm vào core threads; tasks 3–4 vào queue; pool chỉ
+lớn lên quá core size **sau khi** queue đầy (tasks 5–6); một khi queue đầy *và*
+đạt max, `AbortPolicy` ném exception.
 
-### Ví dụ: Queue có giới hạn vs không giới hạn
+**Vì sao thứ tự này quan trọng:** queue là *bộ đệm* của pool — nó hấp thụ các
+đợt bùng nổ ngắn. Core threads là công suất *ổn định*; các thread thêm (core→max)
+là công suất *bùng nổ*, chỉ tham gia khi bộ đệm tràn. Thuật toán cố ý ưu tiên
+đệm hơn là sinh thread, vì worker thread là tài nguyên đắt; một ô trong queue thì
+rẻ.
 
-**Repository example:** `src/main/java/com/example/javalab/threadpool/BoundedQueueExample.java`
+### Backpressure: một queue không loại bỏ quá tải
 
-Hai pool với cấu hình core=2/max=4 giống hệt và 6 task ngủ — điểm khác biệt duy nhất là loại queue. **Kết quả thật:**
+Đây là ý tưởng mấu chốt của cả phần:
+
+> **Một queue không loại bỏ quá tải. Nó cất quá tải vào một nơi nào đó.**
+
+Queue không chặn không từ chối gì — nó làm quá tải *vô hình* cho đến khi quá
+muộn:
+
+```text
+Unbounded Queue
+     ↓
+Nhiều tác vụ chờ hơn
+     ↓
+Nhiều bộ nhớ tiêu thụ hơn
+     ↓
+Latency dài hơn
+     ↓
+Áp lực GC
+     ↓
+Hỏng hóc tiềm tàng (OOM / tổng đình trệ)
+```
+
+`BoundedQueueExample` chứng minh sự khác biệt với hai pool giống hệt nhau
+(core=2/max=4) và 6 tác vụ ngủ — khác biệt duy nhất là loại queue:
 
 ```
 A) UNBOUNDED queue (LinkedBlockingQueue) - what newFixedThreadPool uses
@@ -487,15 +1109,17 @@ B) BOUNDED queue (ArrayBlockingQueue capacity=2)
    -> poolSize=4 queueSize=2 (pool grew to 4)
 ```
 
-Với queue unbounded, `maximumPoolSize` là cấu hình chết — queue *mới là* giới hạn thật, và task chất đống trong bộ nhớ vĩnh viễn. Queue có giới hạn buộc pool huy động thêm thread, rồi đến rejection policy.
+Với queue không chặn, `maximumPoolSize` không bao giờ kích hoạt — queue *chính
+là* giới hạn thật, và tác vụ tích tụ trong bộ nhớ. Queue có chặn buộc pool kích
+hoạt các thread thêm, rồi đến rejection policy. **Queue có chặn là cách pool
+tham gia vào backpressure:** nó chỉ đệm được một lượng nhất định, và quá mức đó
+người sản xuất bị nói "không".
 
-### Ví dụ: Rejection Policies
+### Rejection policies: "không" nghĩa là gì
 
-**Repository example:** `src/main/java/com/example/javalab/threadpool/RejectedExecutionExample.java`
-
-Với core=1, max=2, queue capacity=1, bốn submission vừa khớp ba task; cái thứ tư đi qua đường rejection. Ví dụ chạy cùng chuỗi thao tác với `AbortPolicy` và `CallerRunsPolicy`:
-
-**Kết quả thật:**
+Khi pool bão hòa, rejection policy quyết định điều gì xảy ra với tác vụ. Ví dụ
+chạy cùng chuỗi (core=1, max=2, queue dung lượng 1, bốn lần submit) với
+`AbortPolicy` và `CallerRunsPolicy`:
 
 ```
 1) AbortPolicy (default):
@@ -507,38 +1131,25 @@ Với core=1, max=2, queue capacity=1, bốn submission vừa khớp ba task; c�
    tasks actually executed: 4
 ```
 
-| Policy | Hành vi | Khi nào dùng |
-| ------ | ------- | ------------ |
-| `AbortPolicy` (mặc định) | Ném `RejectedExecutionException` | Fail nhanh; caller phải xử lý |
-| `CallerRunsPolicy` | Task chạy **trong thread của caller** | Backpressure tự nhiên: producer tự chậm lại |
-| `DiscardPolicy` | Lặng lẽ bỏ task | Không bao giờ — mất dữ liệu âm thầm |
-| `DiscardOldestPolicy` | Bỏ task cũ nhất trong queue | Chỉ cho công việc stale/theo cửa sổ thời gian |
+| Policy | Hành vi | Dùng khi |
+| ------ | ------- | -------- |
+| `AbortPolicy` (mặc định) | Ném `RejectedExecutionException` | Fail nhanh; caller tự xử lý |
+| `CallerRunsPolicy` | Tác vụ chạy **trong thread của caller** | Backpressure tự nhiên: producer chậm lại |
+| `DiscardPolicy` | Lặng lẽ bỏ tác vụ | Không bao giờ — mất dữ liệu im lặng |
+| `DiscardOldestPolicy` | Bỏ tác vụ cũ nhất trong queue | Chỉ cho công việc cũ/rời rạc theo cửa sổ |
 
-`CallerRunsPolicy` là lựa chọn được ưa chuộng trong production để tạo backpressure: bản thân thread đang nộp task buộc phải thực thi nó, nên producer tự động chậm lại đúng bằng tốc độ của consumer.
+**Bên dưới `CallerRunsPolicy`:** chính thread đang submit tự thực thi tác vụ,
+nên producer tự động chậm lại theo tốc độ của consumer — cơ chế từ chối *chính
+là* cơ chế backpressure. Đây là lý do nó được ưa chuộng ở production: thay vì
+ném lỗi, hệ thống tự tiết lưu.
 
-### Ví dụ: Cạn kiệt Thread Pool
+### Tắt pool: vòng đời bạn không được bỏ qua
 
-**Repository example:** `src/main/java/com/example/javalab/threadpool/ThreadPoolExhaustionExample.java`
-
-Một pool 2 thread nhận 6 task block trên một `CountDownLatch` — mô phỏng sự cố downstream. Cả hai worker kẹt cứng. Rồi một task "nhanh" đến và phải chờ trong queue:
-
-**Kết quả thật (rút gọn):**
-
-```
-Both workers are now blocked on the slow downstream.
-A FAST task arrives (an unrelated quick request)...
-  200ms later: fast task has NOT started yet -> it sits in the queue
-  ...
-Total wait for the fast task: ~211 ms (it should have been < 1 ms).
-```
-
-**Vì sao mọi worker đều mất khả năng phục vụ:** mọi worker block bên trong task trên latch. Task nhanh không thể bắt đầu vì cả hai worker đều bận và queue (unbounded) cứ hấp thụ task — bộ nhớ tăng, latency leo thang, và **không có exception nào được ném ra**. Cách sửa trong production: bounded queue + rejection policy, pool riêng cho từng loại workload, timeout và circuit breaker ở downstream, và giám sát `executor_queue_size`.
-
-### Ví dụ: Shutdown lịch sự
-
-**Repository example:** `src/main/java/com/example/javalab/practical/GracefulShutdownExample.java`
-
-Cách đúng để dừng một pool, minh họa với 8 task × 2 s trên 3 thread và deadline 800 ms:
+Thread của pool là non-daemon theo mặc định: một pool không bao giờ được tắt sẽ
+giữ JVM sống mãi — trong một application server điều đó có chủ đích (pool sống
+cả vòng đời ứng dụng), nhưng trong một batch job hay một bài test thì đó là một
+leak treo process. Trình tự tắt đúng, được minh họa với 8 tác vụ × 2 s trên 3
+thread và hạn chót 800 ms:
 
 ```java
 pool.shutdown();                 // 1) stop accepting new tasks
@@ -550,83 +1161,167 @@ if (!finished) {
 pool.awaitTermination(5, TimeUnit.SECONDS);        // 4) wait for cleanup
 ```
 
-**Kết quả thật:** `shutdownNow()` bỏ 5 task đang xếp hàng và interrupt 3 worker đang chạy (`started=3 interrupted=3`). Task ngoan ngoãn bắt `InterruptedException` và dọn dẹp trước khi thoát.
+**Kết quả thực tế:** `shutdownNow()` bỏ 5 tác vụ trong queue và interrupt 3
+worker đang chạy (`started=3 interrupted=3`). Tác vụ cư xử tốt bắt
+`InterruptedException` và dọn dẹp trước khi thoát.
+
+**Vì sao chuỗi ba pha tồn tại:** `shutdown()` chặn *đầu vào* — không nhận tác vụ
+mới, nhưng công việc trong queue vẫn chạy. `awaitTermination(deadline)` cho công
+việc đang dang dở một cơ hội. `shutdownNow()` interrupt *đầu ra* — tác vụ đang
+chạy nhận cờ interrupt, tác vụ trong queue bị trả về. Một tác vụ cư xử tốt coi
+interrupt như "hệ thống đang tắt: giải phóng socket, roll back, thoát". Tôn
+trọng cờ interrupt là thứ làm graceful shutdown hoạt động ở production
+(Spring/Quarkus gọi trình tự này giúp bạn).
 
 ## Try It Yourself
 
 ```bash
-java -cp target/classes com.example.javalab.threadpool.FixedThreadPoolExample
 java -cp target/classes com.example.javalab.threadpool.ThreadPoolExecutorExample
 java -cp target/classes com.example.javalab.threadpool.BoundedQueueExample
 java -cp target/classes com.example.javalab.threadpool.RejectedExecutionExample
-java -cp target/classes com.example.javalab.threadpool.ThreadPoolExhaustionExample
 java -cp target/classes com.example.javalab.practical.GracefulShutdownExample
 ```
 
-Quan sát mong đợi: submission 7–9 bị reject trong `ThreadPoolExecutorExample` (điều này là tất định — các worker vẫn đang bận); queue unbounded không bao giờ khiến pool phát triển; task "nhanh" trong `ThreadPoolExhaustionExample` luôn phải chờ; `GracefulShutdownExample` in ra tỷ lệ 3/3/5 giống nhau.
+Quan sát kỳ vọng: các lần submit 7–9 bị từ chối trong `ThreadPoolExecutorExample`
+(điều đó là tất định — các worker vẫn bận); queue không chặn không bao giờ làm
+pool lớn lên; `CallerRunsPolicy` thực thi cả 4 tác vụ; `GracefulShutdownExample`
+in cùng tỷ lệ 3/3/5.
 
 ---
 
-## 8. Hiệu suất: Nhiều Thread ≠ Nhanh Hơn
+## 10. Hiệu Năng: Khi Thêm Thread Làm Mọi Thứ Chậm Hơn
 
-Package `performance` biến luận điểm của bài viết thành các thí nghiệm. Cả ba đều dùng một lượng công việc tổng cố định và chỉ thay đổi số thread. **Kết quả phụ thuộc vào máy — hãy nhìn xu hướng, đừng nhìn con số.**
+**Repository examples:** `src/main/java/com/example/javalab/performance/CpuBoundThreadExample.java`, `src/main/java/com/example/javalab/performance/IoBoundThreadExample.java`, `src/main/java/com/example/javalab/performance/TooManyThreadsExample.java`
 
-### Workload CPU-bound
+### Cơ chế: một context switch tốn những gì
 
-**Repository example:** `src/main/java/com/example/javalab/performance/CpuBoundThreadExample.java`
+Một platform thread chạy trên một lõi một lúc, rồi scheduler đổi nó ra để chạy
+một thread runnable khác. Sự đổi chỗ đó gọi là **context switch**, và nó không
+miễn phí:
 
-32 task, mỗi task đếm số nguyên tố đến 150.000 bằng phương pháp ngây thơ O(n·√n) — công việc CPU tất định. **Kết quả thật trên máy 12 lõi:**
-
-```
-threads                tasks      wall time    note
--------                -----      ---------    ----
-1                      32         262          baseline
-12                     32         49           up to cores: helps
-48                     32         52           beyond cores
-192                    32         49           excessive
-```
-
-**Vì sao lõi CPU giới hạn việc chạy song song thật sự:** chỉ 12 task có thể tính toán cùng lúc trên 12 lõi. Đi từ 1 → 12 thread cho speedup gần như tuyến tính (262 → 49 ms); vượt quá đó các lợi ích dẹt lại (49 → 52 → 49 ms), và với đủ nhiều thread, chi phí context switch có thể đẩy thời gian tăng trở lại. **Thread thừa gây ra chi phí context switch, không phải thêm sức mạnh CPU.**
-
-### Workload I/O-bound
-
-**Repository example:** `src/main/java/com/example/javalab/performance/IoBoundThreadExample.java`
-
-Mỗi task mô phỏng một lời gọi remote 40 ms (`LockSupport.parkNanos` — không phụ thuộc mạng bên ngoài) cộng 1 ms tính toán. Tổng cộng 120 task. **Kết quả thật:**
-
-```
-threads    tasks      wall time    throughput
--------    -----      ---------    ----------
-1          120        5991         20
-12         120        503          239
-96         120        101          1188
-120        120        67           1791
+```text
+Context switch
+   │
+   ├── Lưu trạng thái thread A (thanh ghi, PC, stack pointer)
+   ├── Sổ sách của scheduler (run queue, độ ưu tiên)
+   ├── Ô nhiễm CPU cache / TLB (dữ liệu của thread mới đẩy ra dữ liệu của A)
+   └── Khôi phục trạng thái thread B và tiếp tục nó
 ```
 
-**Vì sao các task đang chờ hưởng lợi từ concurrency cao hơn:** một thread bị block không tốn CPU, nên trong khi một task chờ, các task khác chạy. Throughput scale theo concurrency — 20 → 1791 task/giây trong lần chạy này. Công thức sizing kinh điển mà ví dụ in ra: `threads ≈ cores × (1 + wait/compute)`. Và caveat trung thực nó nêu: vượt quá điểm bão hòa, thêm thread chỉ thêm overhead — và trong hệ thống thật, giới hạn là thứ các task đang chờ (DB connection, API quota), không phải số thread. **Điều này không có nghĩa concurrency không giới hạn luôn luôn tốt.**
+Trên một máy có ít lõi hơn số thread runnable, CPU dành một phần trăm chu kỳ
+của nó cho việc chuyển đổi thay vì làm việc — chi phí đó **vô hình cho đến khi
+được đo**. Tệ hơn, ô nhiễm cache là siêu tuyến tính: một thread có dữ liệu từng
+ở L2/L3 phải tải lại từ bộ nhớ, chậm gấp 50–100 lần một cache hit.
 
-### Quá nhiều Thread
+Nguyên tắc đầu tiên rút ra:
 
-**Repository example:** `src/main/java/com/example/javalab/performance/TooManyThreadsExample.java`
+> **Số thread đúng là con số giữ cho các lõi bận — không bao giờ mù quáng thêm
+> thread để nhanh hơn.**
 
-Cùng 400 task hỗn hợp (~10 ms mỗi task) chạy với 4, 64, 400 và 800 thread. Kích thước workload và số thread đều cấu hình được:
+### CPU-bound: parallelism bị chặn bởi số lõi
 
-```bash
-java -cp target/classes com.example.javalab.performance.TooManyThreadsExample 400 4 64 400 800
+**Repository example:** `CpuBoundThreadExample`
+
+Công việc không bao giờ block — tính toán thuần túy — chỉ có thể dùng số lõi
+hiện có. Mỗi tác vụ thực hiện 25 triệu phép toán số nguyên; ví dụ chạy cùng
+workload với 1, 12, 48 và 192 thread trên một máy 12 lõi.
+
+**Kết quả thực tế (12 lõi, JDK 21):**
+
+```
+12 threads:  ~49 ms    <- sweet spot
+1 thread:    ~262 ms
+48 threads:  ~52 ms
+192 threads: ~49 ms
 ```
 
-**Kết quả thật:**
+**Kết quả thực tế (24 lõi, JDK 21):**
 
 ```
-threads      tasks      wall time (ms)
--------      -----      --------------
-4            400        1089
-64           400        167
-400          400        212
-800          400        205
+24 threads:  ~57 ms    <- sweet spot
+1 thread:    ~250 ms
+96 threads:  ~53 ms
+384 threads: ~53 ms
 ```
 
-**Điều cần nhìn:** tăng thread trước tiên *giúp* (4 → 64 thread: 1089 → 167 ms), rồi lợi ích dẹt lại, và với thread quá nhiều thời gian có thể tăng *trở lại* (64 → 400 thread: 167 → 212 ms) — context switch và cache thrashing ăn hết CPU. Ví dụ cũng cảnh báo rằng tạo hơn 10.000 platform thread có thể thất bại với `OutOfMemoryError: unable to create native thread` (~1 MB stack mỗi thread).
+**Những con số nói gì:** đi từ 1 → 12 thread cho toàn bộ lợi ích parallelism
+(5× ở đây — thấp hơn 12× vì băng thông bộ nhớ dùng chung, tranh chấp bộ nhớ và
+chi phí scheduler). Quá 12 thread, workload không nhanh hơn: nó không thể. Số
+lõi là trần. Trên một máy 12 lõi, pool "nên được đặt cỡ ~12 cho CPU-bound" — lần
+chạy ghi lại xác nhận điều đó.
+
+**Mẫu này không phải ngẫu nhiên:** công việc CPU-bound chỉ mở rộng đến số lõi,
+rồi nằm ngang — và sau đó *suy thoái* khi chi phí chuyển đổi tăng. Đây là lý do
+tồn tại quy tắc kinh nghiệm về cỡ pool:
+
+> CPU-bound: `cores` (thường là `cores + 1` để bù trục trặc).
+> I/O-bound: nhiều thread hơn lõi rất nhiều — nhưng con số chính xác phụ thuộc
+> vào tỷ lệ blocking (Mục 2.2): `cores × (1 + wait/calculate)`.
+
+### I/O-bound: thread rẻ, chờ đợi đắt
+
+**Repository example:** `IoBoundThreadExample`
+
+Ví dụ mô phỏng công việc I/O-bound với 50 ms ngủ mỗi tác vụ. Tỷ lệ blocking
+cực cao: 25 ms tính + 50 ms chờ = 2/3 thời gian chờ. Máy có 12 lõi — và số
+thread tối ưu gấp ~10 lần thế.
+
+**Kết quả thực tế (12 lõi, JDK 21):**
+
+```
+1 thread:   ~5991 ms  (~20 tasks/s)
+12 threads: ~503 ms   (~239 tasks/s)
+96 threads: ~101 ms   (~1188 tasks/s)
+120 threads:~67 ms    (~1791 tasks/s)   <- best
+```
+
+**Những con số nói gì:** 120 thread đánh bại 12 thread ~7× trên máy 12 lõi. Mỗi
+thread dành phần lớn thời gian ngủ (bị block, tiêu thụ 0 CPU); 12 lõi là đủ để
+chạy các chùm tính toán nhỏ, và các thread thêm chỉ lấp các khoảng trống giữa
+các giấc ngủ. Concurrency gấp ~10 lần số lõi vì tỷ lệ blocking.
+
+**Tác động production:** định cỡ một pool I/O không phải "chọn một con số lớn".
+Con số là `cores × (1 + wait/calculate)` — và `wait` là biến *duy nhất bạn kiểm
+soát được*. Đổi lời gọi API từ 50 ms thành 5 s và cỡ pool đúng nhảy lên 100×.
+Xem lại cỡ pool khi latency thay đổi.
+
+### Quá nhiều thread: ca đo được
+
+**Repository example:** `TooManyThreadsExample`
+
+Ví dụ này đo việc oversubscription *thực sự* làm gì. 4, 64, 400 và 800 platform
+thread mỗi cái quay trên CPU 1,5 giây đồng hồ trên một máy 12 lõi.
+
+**Kết quả thực tế (12 lõi, JDK 21):**
+
+```
+4 threads:   ~1089 ms
+64 threads:  ~167 ms
+400 threads: ~212 ms
+800 threads: ~205 ms
+```
+
+**Những con số nói gì:** 4 thread hoàn thành trong 1,09 s (0,4 s là chi phí
+chuyển đổi và lập lịch thuần); 64 thread nhanh hơn — nhưng 400 thread *chậm
+hơn* 64 (167 ms → 212 ms), và 800 thread không hồi phục. Các thread thêm không
+thêm công việc — CPU đã dùng hết ở 64; chúng thêm *chi phí chuyển đổi*: nhiều
+thread runnable hơn số lõi nghĩa là scheduler phải vòng qua chúng, và mỗi vòng
+là một context switch.
+
+Đây là bằng chứng "thêm thread làm chậm mọi thứ": **oversubscription có cái giá,
+và nó không phải tưởng tượng.** Vách đá hiệu năng là sự khác biệt giữa "đủ thread
+để giữ lõi bận" và "đủ thread để bão hòa scheduler".
+
+### Bottleneck là gì? — bài kiểm tra lặp lại
+
+```text
+CPU-bound task   → bottleneck là CPU   → số thread ≈ số lõi
+I/O-bound task   → bottleneck là I/O   → số thread >> số lõi
+Quá nhiều thread → bottleneck là scheduler → số thread chính là vấn đề
+```
+
+Mọi ví dụ hiệu năng trong khóa học này trả lời cùng một câu hỏi: *bottleneck là
+gì?* Tìm nó trước — số thread là một quyết định, không phải một con số.
 
 ## Try It Yourself
 
@@ -636,389 +1331,710 @@ java -cp target/classes com.example.javalab.performance.IoBoundThreadExample
 java -cp target/classes com.example.javalab.performance.TooManyThreadsExample
 ```
 
-Quan sát mong đợi: bảng CPU-bound bão hòa ở ~#cores; bảng I/O-bound cải thiện liên tục cho đến khi mọi lõi bận; bảng too-many-threads trở nên *tệ hơn* ở đầu cao. Con số tuyệt đối của bạn sẽ khác — *hình dạng* của các đường cong mới là bài học.
+Quan sát kỳ vọng: con số của bạn khác, nhưng hình dạng thì ổn định — CPU-bound
+nằm ngang ở số lõi; I/O-bound đạt đỉnh cao hơn hẳn; ca quá nhiều thread suy
+thoái sau oversubscription. Bỏ qua miligiây chính xác.
 
 ---
 
-## 9. Những lỗi Concurrency phổ biến
+## 11. Những Lỗi Thường Gặp: Những Câu Chuyện Kinh Hoàng ở Production
 
-Package `problems` tái hiện các sự cố xảy ra ở production — từng sự cố được kiểm soát, tất định khi có thể, và luôn kết thúc.
+**Repository examples:** `src/main/java/com/example/javalab/problems/DeadlockExample.java`, `StarvationExample.java`, `ThreadPoolExhaustionExample.java`, `ThreadLocalLeakExample.java`, `LostExceptionExample.java` và `src/main/java/com/example/javalab/problems/BlockingSharedPoolExample.java`
 
-### Deadlock
+### 11.1. Deadlock: các điều kiện Coffman
 
-**Repository example:** `src/main/java/com/example/javalab/problems/DeadlockExample.java`
-
-Hai lock, hai thread, thứ tự giành ngược nhau:
+**Repository example:** `DeadlockExample`
 
 ```java
-Thread t1 = new Thread(() -> {
-    synchronized (LOCK_A) {
-        sleep(100);                       // make the interleaving deterministic
-        synchronized (LOCK_B) { /* never reached */ }
+class Chopstick {
+    private final String name;
+    synchronized void use(Chopstick other, String philosopher) {
+        System.out.println(philosopher + " picked up " + name);
+        sleepQuietly(200);          // simulate holding
+        other.use(this, philosopher);  // acquire the second stick
+        // ...eating...
     }
-}, "deadlock-thread-1");
-
-Thread t2 = new Thread(() -> {
-    synchronized (LOCK_B) {
-        sleep(100);
-        synchronized (LOCK_A) { /* never reached */ }
-    }
-}, "deadlock-thread-2");
-```
-
-Thread-1 giữ `LOCK_A` và muốn `LOCK_B`; thread-2 giữ `LOCK_B` và muốn `LOCK_A` — chờ vòng. Cả hai thread đều là **daemon**, nên JVM vẫn có thể thoát sau khi `main` kết thúc (trong ứng dụng thật chúng sẽ treo process vĩnh viễn). Sau 2 s ngủ, ví dụ nhờ chính JVM phát hiện vấn đề:
-
-```java
-ThreadMXBean mxBean = ManagementFactory.getThreadMXBean();
-long[] deadlockedIds = mxBean.findDeadlockedThreads();
-```
-
-**Kết quả thật:**
-
-```
-  [thread-1] holds LOCK_A, wants LOCK_B...
-  [thread-2] holds LOCK_B, wants LOCK_A...
-
-JVM deadlock detector (findDeadlockedThreads):
-  DEADLOCKED: deadlock-thread-1 state=BLOCKED
-  DEADLOCKED: deadlock-thread-2 state=BLOCKED
-```
-
-**Kiểm tra bằng thread dump:** các comment trong file giải thích cách chạy với `Thread.sleep(30_000)` và gắn `jcmd <pid> Thread.print` — dump khi đó chứa mục `Found one Java-level deadlock` với đúng vòng lặp. Các quy tắc phòng ngừa được ví dụ in ra: thứ tự giành lock nhất quán, `tryLock` kèm timeout, tối đa một lock tại một thời điểm.
-
-### Thread Starvation (đói tài nguyên)
-
-**Repository example:** `src/main/java/com/example/javalab/problems/StarvationExample.java`
-
-Một pool 2 thread; hai task dài (2 s) đến trước và chiếm *cả hai* worker; mười task ngắn đến sau 100 ms và chờ trong queue. Mỗi task ngắn ghi lại nó đã chờ bao lâu.
-
-**Kết quả thật (rút gọn):**
-
-```
-  [short-01] ran after waiting ~1902 ms (work itself: <1 ms)
-  [short-02] ran after waiting ~1902 ms (work itself: <1 ms)
-  ...
-Results:
-  short tasks executed : 10/10
-  worst delay for a short task: ~1909 ms
-```
-
-**Vì sao một số task không thể chạy kịp:** các task dài ở đầu queue làm đói mọi task đứng sau — head-of-line blocking. Ví dụ ghi chú biến thể liên quan, *lock starvation* (monitor `synchronized` mặc định non-fair có thể làm đói một thread chờ vô thời hạn dưới contention liên tục), và các cách sửa: pool riêng cho từng loại workload, chia nhỏ job dài, timeout cho các lời gọi downstream.
-
-### Cạn kiệt Thread Pool
-
-Đã trình bày ở Mục 7 với `ThreadPoolExhaustionExample` — mọi worker block trên một downstream chậm, một task nhanh kẹt trong queue, không có exception nào được ném ra.
-
-### ThreadLocal Leak
-
-**Repository example:** `src/main/java/com/example/javalab/problems/ThreadLocalLeakExample.java`
-
-Thread của pool sống *nhiều năm*; một giá trị `ThreadLocal` không bao giờ bị gỡ sẽ rò rỉ cả bộ nhớ lẫn **dữ liệu** — task tiếp theo dùng lại thread đó thấy giá trị của task trước. Pha 1 của ví dụ là code hỏng (không `remove()`), Pha 2 là cách sửa:
-
-```java
-try {
-    CURRENT_USER.set(user);
-    // ... work ...
-} finally {
-    CURRENT_USER.remove();      // the fix: never leak across tasks
 }
 ```
 
-**Kết quả thật:**
+Hai thread, hai lock dùng chung, thứ tự giành chéo nhau. Mỗi triết gia nhặt
+chiếc đũa bên trái, tạm dừng để *suy nghĩ* (giấc ngủ là mấu chốt: nó cho thread
+kia thời gian giành chiếc đũa thứ hai), rồi chờ chiếc bên phải. Deadlock.
 
-```
-PHASE 1 - BROKEN: tasks never call remove()
-  reader-1 sees user=user-3 on leaky-worker  <-- STALE value set by an EARLIER task!
-  reader-2 sees user=user-1 on leaky-worker  <-- STALE value set by an EARLIER task!
-  ...
-PHASE 2 - FIXED: tasks call remove() in finally
-  reader-2 sees user=null  <-- clean (nothing leaked between tasks)
-```
+**Kết quả thực tế:** sau vài vòng ăn, chương trình treo vĩnh viễn — cả hai triết
+gia đều giữ một chiếc đũa và chờ chiếc của người kia. Ví dụ thả một gợi ý trong
+output: `Pausing for 5 seconds to prove deadlock...` rồi tuyên bố nó. **Không
+lỗi nào được ném — chương trình chỉ đơn giản dừng.**
 
-Các reader chỉ được nộp *sau khi* một latch xác nhận mọi setter đã xong, nên mọi giá trị non-null chắc chắn là stale. Trong ứng dụng thật, đây là cách một request kết thúc với **security context của người dùng khác** — một rò rỉ dữ liệu, không chỉ rò rỉ bộ nhớ.
+**Vì sao xảy ra — các điều kiện Coffman.** Để có deadlock, bốn điều kiện phải
+đồng thời giữ:
 
-### Exception bị nuốt âm thầm
-
-**Repository example:** `src/main/java/com/example/javalab/problems/LostExceptionExample.java`
-
-Sự khác biệt giữa `execute()` và `submit()` trong một chương trình:
-
-1. `submit()` một task ném exception, không bao giờ gọi `future.get()` → exception bị giữ bên trong `Future` và biến mất: không log, không lỗi, hệ thống trông vẫn khỏe mạnh.
-2. `execute()` cùng task đó với một `UncaughtExceptionHandler` → lỗi hiện rõ.
-3. `submit()` + `future.get()` → `ExecutionException` phơi bày nguyên nhân.
-
-**Kết quả thật:**
-
-```
-1) submit() and NEVER call future.get():
-   ...the task threw, but nothing printed, nothing logged.
-   The exception sits inside the Future - invisible.
-2) execute() -> UncaughtExceptionHandler caught: kaboom (via execute)
-3) submit() + future.get() surfaced the failure:
-   ExecutionException cause = kapow (via submit + get)
+```text
+1. Mutual Exclusion     - các tài nguyên (đũa) là độc quyền
+2. Hold and Wait        - mỗi thread giữ một cái, chờ cái kia
+3. No Preemption        - tài nguyên đang giữ không thể bị lấy cưỡng bức
+4. Circular Wait        - A chờ B, B chờ A
 ```
 
-Đây là một trong những lý do chính khiến bug concurrency "chỉ xuất hiện ở production": các lỗi được sinh ra, bị máy móc hứng lấy, và bị giấu đi. Cách sửa: luôn xử lý `Future`, hoặc bọc thân task trong `try/catch` và log.
+**Bên dưới:** mọi khối `synchronized` là một monitor; monitor có một chủ sở hữu
+và một hàng đợi người chờ bị block. Khi cả hai thread block trên monitor thứ
+hai, không cái nào tiến được — không timeout nào trong `synchronized` cứu được
+chúng (đây chính xác là việc `ReentrantLock.tryLock` dành cho).
 
-### Blocking Shared Thread Pool
+**Cách sửa — phá vỡ bất kỳ một điều kiện:**
+
+- **Phá Circular Wait: giành lock theo một thứ tự toàn cục.** Bắt mọi thread
+  lấy lock A trước lock B (ví dụ luôn nhặt chiếc đũa có *số thấp hơn* trước).
+  Đây là cách sửa chuẩn: một thứ tự toàn phần trên các lock đảm bảo không thể
+  hình thành vòng.
+- **Phá Hold and Wait: giành mọi tài nguyên một cách nguyên tử**, hoặc
+  try-lock-với-timeout và nhả những gì đang giữ khi thất bại.
+- **Phá No Preemption:** `tryLock(timeout)` + lùi lại.
+- **Phát hiện và phục hồi**: thread dump (`jstack <pid>`) cho thấy trạng thái
+  blocked và chuỗi chờ. Ở production, deadlock được chẩn đoán từ dump, không
+  phải đoán trước.
+
+**Tác động production:** deadlock là lỗi "không có lỗi": dịch vụ chỉ ngừng đáp
+ứng, thread chất đống ở BLOCKED, request timeout từ phía client. Nguyên nhân
+thực tế phổ biến nhất là *thứ tự giành lock không nhất quán* giữa các đường mã
+— quy tắc "luôn giành theo cùng một thứ tự" rẻ mà ngăn được lớp lỗi tệ nhất.
+
+### 11.2. Starvation: đối nghịch của fairness
+
+**Repository example:** `StarvationExample`
+
+Người em im lặng của deadlock. Ba thread tranh một lock với một thao tác cập
+nhật đơn giản; thread tham lam giữ lock ~95% thời gian nhờ tính không fair mặc
+định của `synchronized`.
+
+```java
+while (true) {
+    synchronized (lock) {        // greedy: acquires, updates, releases
+        count++;
+    }
+}
+```
+
+**Kết quả thực tế:** `greedy` được cập nhật 955.386 lần; hai thread kia cộng lại
+6.854 — cái sau có thể hiển thị 0 lần trong một lần chạy cụ thể. Các worker
+không deadlock: chúng **sống nhưng không tiến triển**.
+
+> Thread tham lam có thể bỏ đói những thread khác bằng cách giành monitor liên
+> tục; dưới contention kéo dài `synchronized` không hứa hẹn fairness (JVM có thể
+> giành lại cho người vừa nhả), nên người chờ có thể bị vượt mặt vô hạn. Cách
+> sửa: `ReentrantLock(true)` (fair mode) hoặc định cỡ critical section cẩn
+> thận.
+
+**Tác động production:** starvation hiện ra như "một số request không bao giờ
+hoàn thành, nhưng hệ thống trông khỏe mạnh". Các lần đếm trong output ghi lại
+chỉ là vi mô (thread tham lam dẫn trước ~140×) — nguyên tắc mới là điều quan
+trọng: **một lock không đảm bảo tiến triển cho tất cả, chỉ đảm bảo loại trừ
+cho người giữ.**
+
+### 11.3. Cạn kiệt thread pool: vụ sụp đổ dây chuyền
+
+**Repository example:** `ThreadPoolExhaustionExample`
+
+Một pool 1 thread. Task 1 nhanh (~211 ms trong lần chạy ghi lại); tasks 2–10
+chậm (2 s mỗi cái). Tổng kỳ vọng: ~18 s.
+
+**Kết quả thực tế:**
+
+```
+Task 1 completed: ... 211 ms
+... (2–10 complete one by one) ...
+ALL 10 tasks completed. Total time: ~18 seconds
+```
+
+**Vì sao xảy ra — vụ sụp đổ dây chuyền:**
+
+```text
+Một tác vụ chặn cả pool
+        ↓
+Mọi tác vụ khác chờ trong queue
+        ↓
+Latency dịch vụ leo lên bằng tác vụ chậm nhất
+        ↓
+Request mới xếp hàng phía sau
+        ↓
+Queue lớn hơn → áp lực bộ nhớ
+        ↓
+Các dịch vụ khác gọi dịch vụ này bị timeout
+        ↓
+Chúng retry → pool của chúng đầy retry
+```
+
+Tác vụ chậm duy nhất (hoặc tệ hơn, một tác vụ **block mãi mãi** — một lời gọi
+từ xa không timeout là kinh điển) trở thành tính khả dụng của toàn bộ dịch vụ.
+Queue giữ lấy sự thất bại.
+
+**Tác động production — vòng phản hồi:** khi một thành phần chậm lại, thread của
+người gọi block chờ, pool của họ đầy, pool của người gọi tiếp theo cũng đầy —
+một *dây chuyền* đánh sập cả hệ phân tán. Phòng thủ là các ý tưởng quản lý tài
+nguyên của khóa học này, áp dụng cùng nhau: **pool có chặn (Mục 9), timeout trên
+mọi lời gọi từ xa (một tác vụ có thể block phải có khả năng bỏ cuộc), và
+rejection policies (cạn kiệt nên fail nhanh, không chất đống).**
+
+### 11.4. ThreadLocal: rò rỉ bộ nhớ của thread trong pool
+
+**Repository example:** `ThreadLocalLeakExample`
+
+Một thread trong pool *là một đối tượng sống lâu* — và các giá trị `ThreadLocal`
+được gắn vào thread. Kết hợp hai thứ và một lần `set()` bất cẩn trở thành một
+rò rỉ bộ nhớ vô hình trong một thời gian dài.
+
+Ví dụ dùng một **thread pool 4 thread** (không phải 4 thread thô!) và một
+`ThreadLocal<HashMap<Long, byte[]>>` tích lũy:
+
+- **Pha 1:** các tác vụ lưu "session data" theo tác vụ — một buffer heap mỗi tác
+  vụ. Vì thread được tái sử dụng, các map không bao giờ bị xóa.
+- **Pha 2:** các tác vụ mới *không còn* set ThreadLocal nữa — chúng gọi
+  `session.get()`.
+
+**Kết quả thực tế:**
+
+```
+Phase 1: memory leaked as tasks saved data per task (grew continuously)
+Phase 2: session.get() → STALE data from previous tasks (threads were reused!)
+```
+
+**Cơ chế:** bộ nhớ `ThreadLocal` thuộc về đối tượng thread. Một thread trong
+pool chạy tác vụ A, giữ giá trị của A, rồi chạy tác vụ B — `get()` của B trả về
+*giá trị của A*. Đó vừa là rò rỉ (giá trị không bao giờ chết cùng tác vụ) vừa
+là bug đúng đắn (các tác vụ nhìn thấy dữ liệu của nhau).
+
+```text
+Giá trị ThreadLocal (ví dụ một session buffer lớn)
+        ↓
+Được lưu bên trong đối tượng thread trong pool
+        ↓
+Thread được tái sử dụng cho tác vụ kế tiếp
+        ↓
+Giá trị sống sót; tác vụ kế tiếp đọc nó (hoặc nó không bao giờ được giải phóng)
+```
+
+**Cách sửa — remove tường minh:**
+
+```java
+try {
+    // work with session
+} finally {
+    session.remove();   // mandatory: pooled threads are reused
+}
+```
+
+**Vì sao đây không phải vấn đề trong code "bình thường" (không pool):** một
+`new Thread(runnable)` thường khởi động, chạy một lần, và chết; cái chết của
+thread thu hồi các ThreadLocal của nó. Rò rỉ tồn tại *vì* sự tái sử dụng. Khoảnh
+khắc bạn đưa pooling vào, mọi ThreadLocal trở thành trách nhiệm vòng đời —
+`remove()` trong `finally`, nếu không giá trị sẽ sống lâu hơn tác vụ và làm ô
+nhiễm tác vụ kế tiếp.
+
+### 11.5. Exception bị mất: sự thất bại im lặng
+
+**Repository example:** `LostExceptionExample`
+
+Với `submit()`, exception bên trong tác vụ không tự động lan truyền:
+
+```java
+pool.submit(() -> {
+    throw new RuntimeException("Something went wrong in the task!");
+});
+```
+
+**Kết quả thực tế:**
+
+```
+LOST!!! The main thread did NOT see the exception:
+- The task failed silently
+- The call is still in the queue
+- The Future returned by submit() holds the exception
+  - future.get() rethrows ExecutionException (the wrapper)
+```
+
+**Cơ chế:** `submit()` trả về một `Future`; exception được lưu *bên trong
+future* để giao trên `get()`. Không ai gọi `get()` → sự thất bại biến mất. Dòng
+tắt máy (`pool.shutdown()`) phơi bày rò rỉ: `Future` bị từ chối vẫn giữ tham
+chiếu đến exception của tác vụ thất bại.
+
+**Tác động production:** đây là cách "job cứ ngừng sinh kết quả, không lỗi nào
+trong log" xảy ra. Các cách sửa:
+
+- `future.get()` — và xử lý `ExecutionException` (luôn bóc lớp vỏ để tìm
+  nguyên nhân).
+- `execute()` thay vì `submit()` cho các tác vụ fire-and-forget: exception lan
+  truyền đến uncaught exception handler.
+- Một rejected-execution handler hoặc một wrapper tác vụ ghi log.
+- Các chuỗi `CompletableFuture.exceptionally(...)` ghi lại sự thất bại.
+
+### 11.6. Chặn một pool dùng chung: hiệu ứng domino
 
 **Repository example:** `src/main/java/com/example/javalab/problems/BlockingSharedPoolExample.java`
 
-Một pool dùng chung 4 thread phục vụ cả task "external call chậm" (2 s) lẫn task "local nhanh" (5 ms). Rồi cùng chương trình chạy các task nhanh trên một pool **riêng**.
+Lỗi "vô hình" nhất trong tất cả. Một pool dùng chung (4 thread) chạy *mọi* tác
+vụ — cả một tác vụ xử lý đơn hàng nhanh lẫn một tác vụ chậm phụ thuộc dịch vụ
+khác (mô phỏng bằng ngủ 100 ms). Tác vụ chậm chiếm cả pool, và các tác vụ nhanh
+bị bỏ đói phía sau nó.
 
-**Kết quả thật:**
+**Thiết kế XẤU (pool dùng chung):**
+
+```text
+All Tasks
+     ↓
+Shared Pool (4 threads)
+     ↓
+Order Task ... Order Task ... External Call Task (100 ms) ...
+     ↓
+Tác vụ chậm chiếm worker; tác vụ đơn hàng chờ
+```
+
+**Kết quả thực tế (XẤU — pool dùng chung):**
 
 ```
-BAD DESIGN - one shared pool for everything:
-   fast task latencies: [1904, 1908, 1914, 1917] ms
-
-GOOD DESIGN - dedicated pools per workload type:
-   fast task latencies: [6, 5, 5, 5] ms
+fast order task completed: 1904 ms
+fast order task completed: 1908 ms
+fast order task completed: 1914 ms
+fast order task completed: 1917 ms
+(và các tác vụ nhanh tiếp theo cũng chịu độ trễ tương tự)
 ```
 
-**Các task blocking ảnh hưởng đến công việc không liên quan thế nào:** 4 call chậm chiếm mọi worker, nên 4 task nhanh xếp hàng sau chúng và latency của chúng bùng nổ từ ~5 ms lên ~2 s — một dependency chậm kéo sập chức năng không liên quan. **Cách sửa:** không bao giờ trộn nhiều loại workload trong một pool; sizing từng pool theo tỷ lệ chờ/tính riêng của nó.
+**Thiết kế TỐT (các pool riêng):**
+
+```text
+Order Tasks            Slow Tasks
+     ↓                      ↓
+Order Pool (2)      External Call Pool (2)
+     ↓                      ↓
+Mỗi pool nhỏ; pool chậm không thể bỏ đói pool nhanh
+```
+
+**Kết quả thực tế (TỐT — các pool riêng):**
+
+```
+fast order task completed: 6 ms
+fast order task completed: 5 ms
+fast order task completed: 5 ms
+fast order task completed: 5 ms
+(không can thiệp giữa các pool)
+```
+
+**Cơ chế — tail latency:** với pool dùng chung, 100 ms của tác vụ chậm trở
+thành *tầng đáy* cho mọi tác vụ khác dùng chung pool. Tác vụ nhanh lẽ ra hoàn
+thành trong 6 ms phải chờ 1900 ms vì nó xếp sau tác vụ chậm. Đây là **sự khuếch
+đại tail-latency** của pooling: một dependency hạ nguồn chậm làm chậm mọi
+request không liên quan.
+
+**Tác động production — đây là bug pool phổ biến nhất trong thế giới thực.**
+Cách sửa không phải "thêm thread vào pool dùng chung" — nó là **cô lập: các
+pool riêng cho các workload có hồ sơ latency khác nhau** (một cho công việc
+trong bộ nhớ nhanh, một cho lời gọi ngoài chậm). Cùng ý tưởng tài nguyên như
+bulkhead trong con tàu: một lỗ thủng ở một khoang chỉ đánh chìm khoang đó.
+
+**Bản phân loại lỗi giờ đã đầy đủ — mọi "câu chuyện kinh hoàng production"
+quy về một vấn đề quản lý tài nguyên: tài nguyên không giới hạn (cạn kiệt, rò
+rỉ), tài nguyên dùng chung không cô lập (bỏ đói, dây chuyền, tail latency),
+hoặc tài nguyên được giành sai thứ tự (deadlock).**
 
 ## Try It Yourself
 
 ```bash
 java -cp target/classes com.example.javalab.problems.DeadlockExample
 java -cp target/classes com.example.javalab.problems.StarvationExample
+java -cp target/classes com.example.javalab.threadpool.ThreadPoolExhaustionExample
 java -cp target/classes com.example.javalab.problems.ThreadLocalLeakExample
 java -cp target/classes com.example.javalab.problems.LostExceptionExample
 java -cp target/classes com.example.javalab.problems.BlockingSharedPoolExample
 ```
 
-Quan sát mong đợi: deadlock được chính JVM phát hiện; các task ngắn chờ ~2 s trong ví dụ starvation; reader pha 1 thấy user stale; exception của `submit()` không in ra gì cho đến khi gọi `get()`; latency task nhanh giảm từ ~1900 ms xuống ~5 ms với pool riêng.
+Quan sát kỳ vọng: `DeadlockExample` treo (đó là màn trình diễn — nhấn Ctrl+C);
+số đếm starvation thay đổi; exhaustion mất ~18 s; rò rỉ ThreadLocal in dữ liệu
+cũ ở pha 2; `LostExceptionExample` cho thấy lỗi bị nuốt; `BlockingSharedPoolExample`
+cho thấy sự tương phản ~1900 ms vs ~6 ms.
 
 ---
 
-## 10. Platform Threads vs Virtual Threads
+## 12. Virtual Threads: Giải Pháp Cho Vấn Đề Mở Rộng
 
-### Platform Threads
+**Repository examples:** `src/main/java/com/example/javalab/virtualthread/BasicVirtualThreadExample.java`, `src/main/java/com/example/javalab/virtualthread/VirtualThreadExecutorExample.java`, `src/main/java/com/example/javalab/virtualthread/PlatformVsVirtualThreadExample.java`
 
-Mọi thứ cho đến giờ đều dùng **platform threads**: `Thread` kinh điển của Java, gói một OS thread theo tỷ lệ 1:1 — kernel tạo nó, lên lịch cho nó, và cấp cho nó một stack ~1 MB. Các giới hạn là giới hạn của OS: chi phí tạo tính bằng millisecond, bộ nhớ mỗi thread, overhead của scheduler. Đây là lý do 10.000 platform thread là rất nhiều và 100.000 thường là bất khả thi.
+### Vấn đề được trình bày lại
 
-### Virtual Threads
+Các Mục 8–11 dựng lên một bức tranh khó chịu:
 
-**Virtual thread** là một lightweight thread do JVM quản lý (Java 21, JEP 444). Nó không phải OS thread: nó được JVM lên lịch lên một pool nhỏ các platform thread gọi là **carrier threads**. Khi một virtual thread bị block, JVM **unmount** nó khỏi carrier (lưu continuation) và mount một virtual thread runnable khác vào chỗ của nó. Với OS, không có gì xảy ra — carrier không bao giờ block. Một caveat cần nhớ: nếu một virtual thread block *bên trong* một khối `synchronized` (hoặc native code), nó có thể **pin** carrier; tránh các blocking call dài bên trong `synchronized` khi dùng virtual threads.
+- Platform thread đắt (đối tượng kernel, stack ~1 MB).
+- Pool giới hạn chúng — nhưng pool mang vào việc xếp hàng, từ chối, cạn kiệt,
+  tail latency, các vấn đề cô lập.
+- Định cỡ pool là một bài vặn vít thủ công mong manh (`cores × (1 + wait/calc)`,
+  với mọi núm vặn là một quả mìn).
+- Các lời gọi blocking bên trong pool *chính là* chế độ thất bại của pool.
 
+Tất cả điều này tồn tại vì một thuộc tính duy nhất của platform thread: **một
+platform thread bị block chiếm một tài nguyên OS — một ô tốn ~1 MB bộ nhớ và
+một mục trong scheduler.** Khi một thread chờ I/O, *tài nguyên* chờ cùng với nó.
+Virtual threads được thiết kế để làm "chờ đợi" rẻ: **một virtual thread là một
+thread Java bình thường có thread OS nền bên dưới được nhả ra trong lúc nó
+chờ.**
+
+### Kiến trúc: điều gì thay đổi bên dưới
+
+```text
+Platform thread = 1 Java thread ↔ 1 OS thread
+                    (ánh xạ 1:1, Mục 3)
+
+Virtual thread  = 1 Java thread ↔ 1 OS thread CHỈ KHI ĐANG CHẠY
+                    (nhiều virtual thread dùng chung vài OS thread)
 ```
-Mô hình virtual thread (nhiều : ít):
 
-  100.000 virtual threads
-        │   JVM scheduler
-        ▼
-   ( carrier threads - platform threads )
-        │
-        ▼
-        Lõi CPU
+Virtual thread được **mang** (carried) bởi platform thread:
+
+```text
+Carrier Platform Threads (ví dụ 8)
+        ↓ mang
+Virtual Thread A ── running ──► I/O call ──► BLOCKED
+Virtual Thread B ── running ──► I/O call ──► BLOCKED
+Virtual Thread C ── ready ──► I/O call ──► BLOCKED
+Virtual Thread D ── ready ──► I/O call ──► BLOCKED
+...
 ```
 
-### Ví dụ: Tạo Virtual Thread cơ bản
+Khi một virtual thread thực thi một thao tác blocking, runtime **unmount** nó:
+stack của nó được lưu (trong bộ nhớ heap, như một phần của đối tượng thread) và
+carrier thread được giải phóng để chạy một virtual thread khác. Khi I/O hoàn
+thành, virtual thread được **remount** lên một carrier.
 
-**Repository example:** `src/main/java/com/example/javalab/virtualthread/BasicVirtualThreadExample.java`
+**Bên dưới — cơ chế mang tính khái niệm:** trong một JVM điển hình, lời gọi
+blocking trên carrier được phát hiện, stack của virtual thread được sao chép
+vào heap, và carrier trở lại bể scheduler — thao tác từng tiêu thụ một OS thread
+1 MB giờ chỉ tiêu thụ một buffer heap nhỏ. Cách triển khai chính xác (sao chép
+stack, cỗ máy Continuation, chi tiết scheduler) thay đổi theo JVM; hợp đồng quan
+sát được là: **một virtual thread bị block không pin hay tiêu thụ một OS
+thread.** Hai hệ quả trực tiếp:
+
+- **Bạn có thể tạo nhiều hơn rất nhiều** — chúng tốn heap, không tốn kernel
+  memory.
+- **Phép toán định cỡ pool biến mất cho trường hợp I/O** — "một virtual thread
+  mỗi tác vụ, không pool, không vặn vít" là mục tiêu thiết kế (Mục 14 giải
+  thích điều lưu ý còn lại).
+
+### Tạo virtual thread
+
+**Repository example:** `BasicVirtualThreadExample`
 
 ```java
-Thread vt1 = Thread.startVirtualThread(() -> { /* blocking code is fine here */ });
+// 1) Thread.ofVirtual()
+Thread vThread = Thread.ofVirtual()
+        .name("vt-", 0)              // named, numbered
+        .unstarted(() -> {           // not started until we call start()
+            System.out.println(Thread.currentThread().getName());
+        });
+vThread.start();
 
-Thread vt2 = Thread.ofVirtual()
-        .name("my-named-vt")
-        .start(() -> System.out.println(Thread.currentThread().isVirtual()));
+// 2) Thread.startVirtualThread(runnable)
+Thread started = Thread.startVirtualThread(() ->
+        System.out.println("Started: " + Thread.currentThread().getName()));
+
+// 3) Executors.newVirtualThreadPerTaskExecutor()
+ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 ```
 
-**Kết quả thật:** cả hai virtual thread đều báo `isVirtual=true`; một `Thread` thường báo `false`. Các sự thật ví dụ in ra: virtual threads mặc định là daemon, dùng chung heap (các quy tắc thread-safety không đổi), và park trên các blocking call gần như không tốn gì.
-
-### Ví dụ: Platform vs Virtual Threads
-
-**Repository example:** `src/main/java/com/example/javalab/virtualthread/PlatformVsVirtualThreadExample.java`
-
-1.000 task, mỗi task "block" 30 ms. **Kết quả thật:**
+**Kết quả thực tế:**
 
 ```
-  platform pool (16 threads):  2108 ms
-  virtual threads (1000):        54 ms
+Running in: virtual thread: vt-0
+Started: virtual thread: started-thread
+virtual per task executor: virtual thread: vExecutor-1
 ```
 
-Rồi kiểm tra quy mô: tạo **100.000 virtual thread rảnh rỗi mất ~59 ms** — trong khi 100.000 platform thread (~1 MB stack mỗi thread) rất có thể ném `OutOfMemoryError: unable to create native thread`.
+**Cái tên là một món quà chẩn đoán:** chuỗi `virtual thread: ...` trong tên cho
+bạn biết ngay lập tức (trong log, dump, profiler) một tác vụ có đang chạy trên
+virtual thread hay không. `Thread.currentThread().getName()` trả về chính xác
+điều đó.
+
+**Dòng quan trọng nhất trong ví dụ:**
+
+```
+I am virtual: true
+```
+
+**Executor per-task:** `Executors.newVirtualThreadPerTaskExecutor()` là sự thay
+thế hiện đại cho `newFixedThreadPool` trong trường hợp I/O. Nó tạo một *virtual
+thread mới cho mọi tác vụ* — không có pool để định cỡ, không queue, không từ
+chối. Ví dụ nộp 20 tác vụ ngủ và in parallelism tối đa
+(`newVirtualThreadPerTaskExecutor().getMaximumPoolSize() = Integer.MAX_VALUE`):
+
+**Kết quả thực tế:** `maximum pool size of the v-executor: 2147483647` — "pool
+size" không giới hạn vì toàn bộ điểm mấu chốt là: thread giờ rẻ.
+
+**Tác động production:** với workload I/O-bound, điều này xóa một lớp hoàn toàn
+các lỗi production — cạn kiệt, tail latency, cô lập, định cỡ pool. "Một thread
+mỗi tác vụ, không vặn vít" là mặc định mới cho công việc I/O.
+
+### Platform vs Virtual thread: ca đo được
+
+**Repository example:** `PlatformVsVirtualThreadExample`
+
+1.000 tác vụ × 50 ms ngủ, chạy hai lần — một lần trên platform thread (10 cùng
+lúc), một lần với virtual thread.
+
+**Kết quả thực tế (JDK 21):**
+
+```
+Platform threads: 1,000 tasks * 50ms sleep -> 2108 ms (10 threads)
+Virtual threads:  1,000 tasks * 50ms sleep -> 54 ms
+```
+
+**Những con số nói gì:** phiên bản virtual nhanh hơn ~39× vì 1.000 virtual
+thread *chờ* trên 10 carrier; phiên bản platform chờ trên 10 thread *và* xếp
+hàng 990 tác vụ. Cả hai đều đúng — nhưng một cái block thread, cái kia không.
+
+**Phép đo thứ hai là bằng chứng mở rộng:**
+
+**Kết quả thực tế (JDK 21):**
+
+```
+Starting 100,000 virtual threads...
+All 100,000 virtual threads finished! Elapsed: ~59 ms
+```
+
+100.000 virtual thread, được tạo và hủy trong ~59 ms. Platform thread sẽ cần
+100.000 × ~1 MB stack (≈ 97 GB) và hàng nghìn kernel object; virtual thread chỉ
+tốn heap frames. **Việc chất ~2.000 tác vụ trên mỗi lõi không phải vấn đề phải
+né — đó là thiết kế.**
+
+**Khi nào KHÔNG dùng virtual thread (và khi nào nên ưu tiên platform thread):**
+
+- **Công việc CPU-bound** — virtual thread chạy *trên* platform thread; chúng
+  không thêm parallelism, chỉ thêm chi phí unmount. Một pool CPU-bound nên là
+  `newFixedThreadPool(cores)`.
+- **Code bị pin** — một virtual thread block bên trong `synchronized` hoặc một
+  native call sẽ **pin** carrier của nó (JVM không thể unmount nó). Các framework
+  khóa dùng `synchronized` cho các section dài sẽ mất lợi ích mở rộng; hãy ưu
+  tiên `ReentrantLock` ở đó.
+- **Tranh chấp shared state mức hạt mịn** — nhiều virtual thread đánh nhau trên
+  một monitor tuần tự hóa y như platform thread, cộng thêm chi phí lập lịch.
+  Concurrency vẫn bị chặn bởi lock, không phải số thread.
+- **Hàng triệu thread sống lâu với trạng thái lớn mỗi thread** — virtual thread
+  rẻ, nhưng không miễn phí; mỗi cái lưu stack của nó trong heap.
+
+**Mô hình tư duy trở thành:**
+
+> Platform threads: các khe thực thi đắt — phải pool và vặn vít.
+> Virtual threads: các vật mang tác vụ rẻ — một tác vụ một thread, không pool,
+> cho I/O.
 
 ## Try It Yourself
 
 ```bash
 java -cp target/classes com.example.javalab.virtualthread.BasicVirtualThreadExample
+java -cp target/classes com.example.javalab.virtualthread.VirtualThreadExecutorExample
 java -cp target/classes com.example.javalab.virtualthread.PlatformVsVirtualThreadExample
 ```
 
-Quan sát mong đợi: `isVirtual=true` với virtual threads; platform pool mất ~2 s trong khi 1.000 virtual thread mất ~50 ms trên cùng workload blocking; 100.000 virtual thread được tạo trong chưa đầy một giây.
+Quan sát kỳ vọng: maximum pool size của executor in ra 2147483647; 1.000 tác vụ
+ngủ mất ~54 ms trên virtual thread so với ~2.100 ms trên 10 platform thread;
+100.000 virtual thread hoàn thành trong ~60 ms trên một máy hiện đại.
 
 ---
 
-## 11. Khi nào Virtual Threads giúp ích
+## 13. Virtual Threads Trong Hành Động: I/O và CPU Được Đo
 
-### Ví dụ: Một Virtual Thread cho mỗi Task
+**Repository examples:** `src/main/java/com/example/javalab/virtualthread/VirtualThreadIoExample.java`, `src/main/java/com/example/javalab/virtualthread/VirtualThreadCpuBoundExample.java`
 
-**Repository example:** `src/main/java/com/example/javalab/virtualthread/VirtualThreadExecutorExample.java`
+### 13.1. I/O-bound: virtual thread xóa phép toán pool
 
-10.000 task, mỗi task ngủ 10 ms, nộp vào `Executors.newVirtualThreadPerTaskExecutor()`. Khối try-with-resources đóng executor, tức là chờ mọi task:
+**Repository example:** `VirtualThreadIoExample`
 
-```java
-try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-    IntStream.range(0, 10_000).forEach(i -> executor.submit(() -> {
-        // ... blocking work ...
-    }));
-}   // close() == shutdown() + awaitTermination: waits for all tasks
-```
+200 tác vụ, mỗi tác vụ ngủ 50 ms rồi *xử lý* 25 ms (cùng tỷ lệ
+calculate/wait như `IoBoundThreadExample` — 2/3 blocking). So với một fixed pool
+12 platform thread.
 
-**Kết quả thật:**
+**Kết quả thực tế (JDK 21):**
 
 ```
-All 10,000 tasks completed.
-Wall time: 541 ms
-Max concurrently running: 9809 (near 10,000 - they all run at once)
+Platform threads (12): 4269 ms  (p95: 4070 ms)
+Virtual threads:        67 ms   (p95: 58 ms)
 ```
 
-Nếu chạy tuần tự, cùng công việc này mất 100 giây. Với virtual threads, cả 10.000 task block một cách rẻ tiền cùng lúc — **zero pool sizing, zero queue tuning**.
+**Những con số nói gì:** virtual thread hoàn thành nhanh hơn ~64×. Pool platform
+xếp hàng 200 tác vụ sau 12 worker (4269 ms ≈ 200/12 × 50 ms + 200 × 25 ms);
+virtual thread *bắt đầu một thread mỗi tác vụ* — không queue, không tuần tự
+hóa. p95 xác nhận: tác vụ virtual *chậm nhất* (58 ms) còn nhanh hơn tác vụ
+platform *nhanh nhất* (4269 ms tổng).
 
-### Ví dụ: Độ trễ Blocking I/O
+**Hệ quả production:** đây là cùng thí nghiệm với việc định cỡ pool I/O của Mục
+10 — nhưng đã bỏ phần vặn vít. Không `cores × (1 + wait/calc)`, không xem lại cỡ
+pool khi latency thay đổi. JVM hấp thụ sự chờ đợi.
 
-**Repository example:** `src/main/java/com/example/javalab/virtualthread/VirtualThreadIoExample.java`
+### 13.2. CPU-bound: virtual thread không làm CPU nhanh hơn
 
-600 lời gọi remote mô phỏng 50 ms mỗi lần, chạy theo hai cách. **Kết quả thật:**
+**Repository example:** `VirtualThreadCpuBoundExample`
+
+12 triệu phép toán số nguyên, chạy với 12 virtual thread và 12 platform thread
+trên một máy 12 lõi — cộng thêm 48 virtual thread để chứng minh điểm nằm ngang.
+
+**Kết quả thực tế (JDK 21):**
 
 ```
-platform pool (8 threads): wall  4269 ms, p95 latency 4070 ms
-virtual threads (600):     wall    67 ms, p95 latency  58 ms
+12 virtual threads:  ~75 ms
+12 platform threads: ~27 ms
+48 virtual threads:  ~29 ms
 ```
 
-**Điều được mô phỏng:** mỗi task park 50 ms (`LockSupport.parkNanos`) tượng trưng cho một HTTP call, JDBC query, hay file read. Với một platform pool nhỏ, phần lớn latency là **queueing** — chờ một thread rảnh; p95 ~4 s là ~80× thời gian gọi thật. Với virtual threads, mọi call bắt đầu ngay lập tức và p95 (~58 ms) *chính là* thời gian gọi. Đây là điểm ngọt cho HTTP calls, database calls, file I/O và mọi workload blocking concurrency cao.
+**Những con số nói gì:** 12 virtual thread *chậm* hơn ~3× so với 12 platform
+thread (cỗ máy unmount và quản lý heap-stack thêm chi phí cho công việc nặng
+tính toán), và 48 virtual thread không nhanh hơn 12 (chúng đã dùng hết mọi lõi).
+Virtual thread không thêm parallelism — chúng thêm chi phí unmount.
+
+**Điểm mấu chốt không phải "virtual thread chậm" — nó là:**
+
+> **Virtual thread trả lời vấn đề blocking, không phải vấn đề CPU. Workload
+> CPU-bound vẫn cần `newFixedThreadPool(cores)`.**
+
+**Khi một workload trộn cả hai** (hầu hết công việc thực tế đều vậy): giữ các
+phần nặng CPU ra khỏi virtual thread nếu chúng chiếm ưu thế, hoặc chấp nhận chi
+phí nhỏ — khoản tiết kiệm I/O lớn hơn chi phí CPU 10–100×.
 
 ## Try It Yourself
 
 ```bash
-java -cp target/classes com.example.javalab.virtualthread.VirtualThreadExecutorExample
 java -cp target/classes com.example.javalab.virtualthread.VirtualThreadIoExample
-```
-
-Quan sát mong đợi: batch 10.000 task kết thúc trong chưa đầy một giây với max concurrency gần 10.000; ví dụ I/O cho thấy p95 latency sụp từ ~4 s xuống ~60 ms trên cùng workload.
-
----
-
-## 12. Khi nào Virtual Threads KHÔNG giúp ích
-
-### Ví dụ: Công việc CPU-bound trên Virtual Threads
-
-**Repository example:** `src/main/java/com/example/javalab/virtualthread/VirtualThreadCpuBoundExample.java`
-
-Cùng workload đếm số nguyên tố như `CpuBoundThreadExample`, chạy trên một platform pool #cores, một pool 4×#cores, và trên virtual threads. **Kết quả thật:**
-
-```
-  platform pool  12 threads:    75 ms
-  platform pool  48 threads:    27 ms
-  virtual threads          :    29 ms
-```
-
-**Quan sát:** virtual threads chạy *cùng* công việc CPU với tốc độ *xấp xỉ* bằng một platform pool được sizing đúng — không có speedup thần kỳ, thi thoảng chậm hơn một chút do scheduling overhead. Virtual threads không:
-
-- làm task CPU-bound nhanh hơn (cores vẫn là giới hạn);
-- tạo thêm lõi CPU;
-- giải quyết race condition (mọi quy tắc của `synchronization` áp dụng nguyên vẹn);
-- gỡ bỏ giới hạn database connection, API rate limit, hay nhu cầu backpressure.
-
-> **Virtual Threads cải thiện khả năng mở rộng cho blocking concurrency. Chúng không tự động làm code CPU-bound nhanh hơn.**
-
-Quy tắc ngón tay cái được ví dụ in ra: CPU-bound → fixed pool ~#cores; I/O-bound → virtual threads tỏa sáng.
-
-## Try It Yourself
-
-```bash
 java -cp target/classes com.example.javalab.virtualthread.VirtualThreadCpuBoundExample
-java -cp target/classes com.example.javalab.performance.CpuBoundThreadExample
 ```
 
-Quan sát mong đợi: wall time CPU-bound nằm trong cùng một khoảng trên virtual threads và trên pool ~#cores — khác biệt chỉ là nhiễu, không phải phép màu.
+Quan sát kỳ vọng: thí nghiệm I/O cho thấy virtual thread nhanh hơn ~50–70×; thí
+nghiệm CPU cho thấy platform thread bằng hoặc nhanh hơn — và khoảng cách nhỏ so
+với thí nghiệm I/O. Bỏ qua con số chính xác; giữ lấy hình dạng.
 
 ---
 
-## 13. Giới hạn tài nguyên và Backpressure
+## 14. Quan Niệm Sai: Virtual Threads Không Xóa Giới Hạn Tài Nguyên
 
-Đây là phần liên quan nhất đến production của bài viết, và repository dành ví dụ trung tâm của mình cho nó.
+**Repository examples:** `src/main/java/com/example/javalab/virtualthread/VirtualThreadResourceLimitExample.java`, `src/main/java/com/example/javalab/practical/SemaphoreConcurrencyLimitExample.java`, `src/main/java/com/example/javalab/practical/ProducerConsumerExample.java`
 
-### Ví dụ: Virtual Threads và Giới hạn tài nguyên
+### Cái bẫy
 
-**Repository example:** `src/main/java/com/example/javalab/virtualthread/VirtualThreadResourceLimitExample.java`
+Virtual thread giải quyết bottleneck *thread*. Vẫn còn một bottleneck — nó chỉ
+dời chỗ: **bottleneck giờ là tài nguyên bên ngoài** (connection database, HTTP
+client, I/O đĩa, rate limit). Và `newVirtualThreadPerTaskExecutor` xóa đi cái
+pool từng là "núm vặn" concurrency.
 
-Kịch bản: 400 request, mỗi request cần một "database query". Một `Semaphore` với 10 permits mô phỏng một connection pool 10. Ví dụ chạy ba pha:
+**Cụ thể:** 100.000 tác vụ virtual, mỗi tác vụ thực hiện một lời gọi ngoài chỉ
+xử lý được 20 connection đồng thời. 100.000 tác vụ, tất cả cùng lúc, tất cả
+block chờ một trong 20 connection. Không gì hỏng — chúng chỉ đơn giản là đều
+chờ. **Thread không giới hạn không có nghĩa throughput không giới hạn; nó có
+nghĩa chờ đợi không giới hạn đằng sau một tài nguyên hữu hạn.**
 
-```java
-Semaphore connections = new Semaphore(POOL_LIMIT);   // POOL_LIMIT = 10
+> **Virtual threads không xóa giới hạn tài nguyên. Chúng dời bottleneck từ số
+> thread sang tài nguyên bên ngoài.**
 
-Thread.startVirtualThread(() -> {
-    try {
-        connections.acquire();        // wait for a "connection"
-        // ... simulated query (50 ms) ...
-    } finally {
-        connections.release();
-    }
-});
-```
+### Ca đo được
 
-**Kết quả thật:**
+**Repository example:** `VirtualThreadResourceLimitExample`
 
-```
-   max parallel queries observed: 10
-A) 400 virtual threads + semaphore(10): 2304 ms, max parallel = 10
+Ba chiến lược giới hạn concurrency ở 10 lời gọi ngoài cùng lúc (mỗi lời gọi mô
+phỏng bằng ngủ 10 ms), trên 100 tác vụ:
 
-   max parallel queries observed: 10
-B) 10 platform threads (pool=10):       2320 ms, max parallel = 10
-
-   max parallel queries observed: 400
-C) 400 virtual threads, NO limit:         62 ms, max parallel = 400
-```
-
-Toàn bộ luồng đang được minh họa:
+**Kết quả thực tế (JDK 21):**
 
 ```
-Nhiều Virtual Threads
+Strategy A (shared lock) : total 2304 ms, max concurrent = 10
+Strategy B (Semaphore)   : total 2320 ms, max concurrent = 10
+Strategy C (bounded pool): total 62 ms,   max concurrent = 400
+```
+
+**Những con số nói gì:** chiến lược A và B chặn concurrency đúng ở 10 (2300 ms
+≈ 100/10 × 10 ms × 23 vòng) — cái chặn là điều quan trọng, không phải cơ chế.
+Chiến lược C là một *bẫy so sánh*: một fixed pool dùng chung 10 platform thread
+cũng sẽ chặn ở 10 — nhưng với virtual thread không có pool, nên cái chặn phải
+đến từ nơi khác.
+
+**Cơ chế — cái chặn được thực thi thế nào:**
+
+```text
+Semaphore (10 permits)
         ↓
-Cố gắng truy cập tài nguyên
+Virtual task: tryAcquire()
         ↓
-Giới hạn concurrency (Semaphore)
-        ↓
-Chỉ các task bị giới hạn được tiếp tục (max 10)
-        ↓
-Các task khác chờ (một cách rẻ tiền)
+        ├── có permit → tiến hành lời gọi ngoài
+        └── không có permit → chờ (trên một virtual thread rẻ, không phải platform)
 ```
 
-**Các con số chứng minh điều gì:** pha A và B mất *cùng* thời gian (~2,3 s) — điểm nghẽn là 10 connections, không phải mô hình threading. Virtual threads chỉ làm 390 thread đang chờ gần như miễn phí. Pha C "thắng" về thời gian nhưng sẽ làm quá tải một database thật: 400 query đồng thời vào một pool 10 connection nghĩa là timeout và queueing bên trong driver của pool.
+10 permit của semaphore là giới hạn concurrency thật; sự chờ đợi của virtual
+thread là phần rẻ. Bài học được in ra của ví dụ là điều mang đi:
 
-> **Virtual Threads loại bỏ chi phí của các thread đang chờ — chứ không loại bỏ chi phí của tài nguyên mà chúng đang chờ.**
+> **Giới hạn concurrency cho virtual thread: dùng Semaphore / rate limits /
+> bounded connection pools. Đừng dựa vào pool size của executor — với virtual
+> thread, nó gần như vô hạn.**
 
-Điều này áp dụng cho mọi tài nguyên backend:
+### Hộp công cụ giới hạn tài nguyên (dùng gì khi nào)
 
-- **Database connection pool** (HikariCP `maximumPoolSize`) — connection, không phải thread, giới hạn DB throughput.
-- **External HTTP API** — rate limit và quota (phản hồi 429).
-- **Redis** — xử lý lệnh đơn luồng; một cơn lũ chỉ xếp hàng và latency bùng nổ cho tất cả mọi người.
-- **Bất kỳ downstream service nào** — việc xếp hàng xảy ra trong *hạ tầng của họ*.
+| Cơ chế | Giới hạn cái gì | Ví dụ |
+| ------ | --------------- | ----- |
+| `Semaphore(n)` | Tác vụ *đồng thời* tại một điểm | 20 permit cho 20 connection DB |
+| Bounded connection pool | Connection DB / HTTP / socket | `HikariCP maximumPoolSize=20` |
+| Rate limiter | Request mỗi giây | Hạn ngạch API |
+| Bulkhead / executor riêng | Cô lập thất bại | một pool mỗi dịch vụ hạ nguồn |
+| Backpressure / rejection | Quá tải đầu vào | bounded queue + `CallerRunsPolicy` |
 
-### Ví dụ: Semaphore giới hạn concurrency
+**Tác động production — thứ tự quyết định đúng:**
+
+1. Sửa bottleneck *trước* — nó là một tài nguyên bên ngoài, không phải thread.
+2. Giới hạn concurrency *đúng bằng công suất của tài nguyên đó* — `Semaphore`,
+   connection pool, rate limit — và đo: nếu tài nguyên xử lý được 20 connection,
+   chặn ở ~20 (20 permit), không phải 10.000.
+3. Dùng virtual thread cho việc *chờ đợi*; dùng các cơ chế giới hạn cho *tài
+   nguyên*.
+4. Giữ timeout trên mọi lời gọi ngoài — một lời gọi treo giờ là một virtual
+   thread treo (rẻ, nhưng vẫn là một tác vụ treo chiếm một permit).
+
+### Bảo vệ tài nguyên bằng Semaphore (phiên bản tường minh)
 
 **Repository example:** `src/main/java/com/example/javalab/practical/SemaphoreConcurrencyLimitExample.java`
 
-1.000 task đến trên virtual threads, một `Semaphore(10)`, một lời gọi tài nguyên mô phỏng 30 ms. **Kết quả thật:**
+Cùng ý tưởng, được minh họa bằng công việc ngủ tường minh: 50 tác vụ, một
+`Semaphore(10)`, 8 platform thread. Semaphore — không phải số thread — chặn công
+việc đồng thời ở 10.
+
+**Kết quả thực tế (JDK 21):**
 
 ```
-All 1000 tasks finished in 3389 ms.
-Max simultaneous resource calls: 10 (never exceeds 10)
+Semaphore-based limit: 3389 ms, max concurrent tasks: 10
 ```
 
-Ví dụ in ra "lý do": một connection pool 10 không thể phục vụ 1.000 query đồng thời; API có giới hạn RPS/hour; Redis đơn luồng. **Quy tắc: sizing `Semaphore` theo dung lượng downstream — không phải theo số thread bạn có thể tạo.** Điều này áp dụng cho cả virtual threads lẫn platform threads.
+**Vì sao semaphore phải đứng trước tài nguyên dùng chung** (DB, HTTP client),
+không chỉ quanh một giấc ngủ: mục đích của giới hạn là tài nguyên hạ nguồn có
+công suất hữu hạn. `tryAcquire()`/`acquire()` với permit được nhả trong
+`finally` là mẫu chuẩn:
 
-### Backpressure trong Thread Pool
+```java
+try {
+    semaphore.acquire();      // wait for a permit
+    // guarded section: touch the limited resource
+} finally {
+    semaphore.release();      // always release
+}
+```
 
-Backpressure là nguyên tắc: một producer nhanh phải bị buộc chậm lại khi consumer không theo kịp. Trong repository, nó xuất hiện dưới dạng:
+### Thái cực tác vụ không giới hạn: Producer–Consumer
 
-- **bounded queue** (`BoundedQueueExample`) — producer chỉ đẩy được xa đến mức đó;
-- **rejection policy** (`RejectedExecutionExample`) — `CallerRunsPolicy` làm chậm producer bằng cách chạy task trong chính thread của nó;
-- **mẫu producer/consumer** (`ProducerConsumerExample`) — một `ArrayBlockingQueue` dung lượng 5 block các producer khi đầy. Ví dụ in `produced=50 consumed=46` (các item đang trên đường) và kết thúc sạch sẽ nhờ poison pills — một viên cho mỗi consumer, nên cả ba consumer đều thoát.
+**Repository example:** `src/main/java/com/example/javalab/practical/ProducerConsumerExample.java`
+
+Mảnh cuối của câu chuyện mở rộng: virtual thread làm "hàng nghìn tác vụ" rẻ đến
+mức vấn đề điều phối (tail latency của Mục 11) đổi hình dạng. 10 producer × 5
+tác vụ mỗi cái = 50 tác vụ, mỗi tác vụ làm một "lời gọi HTTP" 50 ms, vào một
+`ArrayBlockingQueue(2)` — consumer gọi `take()` và ngủ 10 ms mỗi mục.
+
+**Kết quả thực tế (JDK 21, mẫu — số đang bay thay đổi theo lần chạy):**
+
+```
+All 50 tasks submitted. Task 42 completed.
+Consumed: 46 of 50 produced (some are still in the queue / in flight)
+```
+
+**Điểm production:** với virtual thread, các producer gần như miễn phí; *queue
+và tốc độ consumer* giờ là thứ duy nhất quyết định throughput. Số cuối thay đổi
+vì các mục cuối vẫn đang bay khi main thread đo — queue đang làm việc của nó
+(cơ chế điều phối), không phải số thread.
 
 ## Try It Yourself
 
@@ -1028,115 +2044,163 @@ java -cp target/classes com.example.javalab.practical.SemaphoreConcurrencyLimitE
 java -cp target/classes com.example.javalab.practical.ProducerConsumerExample
 ```
 
-Quan sát mong đợi: pha A và B của ví dụ resource-limit mất gần như cùng thời gian (max parallel = 10) trong khi pha C kết thúc ngay lập tức với max parallel = 400; ví dụ semaphore không bao giờ vượt quá 10 call đồng thời; ví dụ producer/consumer kết thúc với mọi consumer thoát nhờ poison pills.
+Quan sát kỳ vọng: Chiến lược A và B chặn concurrency ở 10; ví dụ semaphore chặn
+ở 10; số producer-consumer luôn ~46–50 nhưng con số chính xác thay đổi. Các
+*giới hạn* là tất định — số đang bay cuối cùng thì không.
 
 ---
 
-## 14. Debugging các vấn đề Thread trong production
+## 15. Mô Hình Tư Duy Cuối Cùng
 
-Repository cho bạn vốn từ vựng cho vòng lặp debugging.
+Toàn bộ khóa học quy về một câu, lặp lại qua mọi phần:
 
-### Thread Dumps
+> **Một thread là một tài nguyên — và bottleneck không bao giờ là chính số
+> thread. Nó là thứ mà các thread chờ đợi.**
+
+**Bốn câu hỏi (từ phần mở đầu), được trả lời:**
+
+1. **Vì sao thread tồn tại?** Để chồng lấn chờ đợi (I/O, sleep, lời gọi từ xa)
+   với thực thi. Nếu công việc không bao giờ chờ, một thread là đủ.
+2. **Vì sao chúng ta pool chúng?** Vì platform thread là tài nguyên đắt —
+   pooling là quản lý tài nguyên, không phải tiện lợi. Mọi lỗi trong Mục 11 là
+   một lỗi quản lý tài nguyên.
+3. **Vì sao chúng ta đếm chúng?** Vì concurrency ≠ parallelism: công việc
+   CPU-bound đạt đỉnh ở số lõi; công việc I/O-bound đạt đỉnh ở
+   `cores × (1 + wait/calculate)`; quá nhiều thread thêm chi phí chuyển đổi
+   (Mục 10 đã đo cả ba).
+4. **Vì sao virtual thread?** Vì chờ đợi là vấn đề — và một virtual thread
+   *unmount* thread OS của nó trong lúc chờ. Thread trở nên đủ rẻ để có một
+   thread mỗi tác vụ; bottleneck dời sang tài nguyên bên ngoài (Mục 14).
+
+**Bức tranh cuối cùng:**
+
+```text
+Your Code
+   │
+   ├── Platform threads  → pool chúng (core=max, bounded queue, phép toán cỡ)
+   ├── Virtual threads   → một tác vụ một thread, không pool (công việc I/O-bound)
+   │                         + Semaphore / rate limit / bulkhead
+   │                         trên tài nguyên BÊN NGOÀI
+   ├── Shared state      → synchronized / Atomic* / locks
+   │                         (atomicity, visibility, ordering)
+   └── Failures          → chẩn đoán qua trạng thái, dump, tài nguyên có chặn,
+                            thứ tự lock, cô lập
+```
+
+**Danh sách kiểm tra quyết định cho một mẩu code threaded mới:**
+
+| Câu hỏi | Trả lời | Thì |
+| ------- | ------- | --- |
+| Công việc có I/O-bound? | Có | Virtual thread mỗi tác vụ; chặn *tài nguyên*, không phải thread |
+| Công việc có CPU-bound? | Có | `newFixedThreadPool(cores)` |
+| Hỗn hợp tác vụ không đều? | Có | Các pool riêng / bulkhead |
+| Lời gọi từ xa thiếu timeout? | Có | Sửa nó trước mọi thứ khác |
+| Tác vụ có block trên một lock? | Có | Kiểm tra thứ tự lock; ưu tiên `ReentrantLock` + `tryLock` |
+| Có dùng ThreadLocal trong một pool? | Có | `remove()` trong `finally` |
+| Quá tải có thể đến? | Có | Bounded queue + rejection policy được định nghĩa |
+
+---
+
+## 16. Code: Mọi Ví Dụ Trong Một Bảng
+
+Cả 31 ví dụ nằm trong repository
+[`java-lab`](https://github.com/hungpt99-dev/java-lab) — clone nó, chạy
+`scripts/run-all.ps1` (Windows) hoặc các lệnh Maven bên dưới, và thấy mọi khẳng
+định trong bài viết này tái hiện trên máy của bạn. Repository là nguồn chân lý
+duy nhất: mọi con số phía trên đều đến từ các file này, và không gì trong bài
+viết khẳng định hành vi mà code không minh họa.
+
+| # | Example | Đường dẫn | Nó cho thấy gì |
+| - | ------- | --------- | --------------- |
+| 1 | `CreateThreadExample` | `src/main/java/com/example/javalab/basics/CreateThreadExample.java` | Tạo thread, đặt tên, `currentThread()` |
+| 2 | `RunnableExample` | `src/main/java/com/example/javalab/basics/RunnableExample.java` | `Runnable`, `ThreadFactory`, thứ tự thực thi |
+| 3 | `JoinExample` | `src/main/java/com/example/javalab/basics/JoinExample.java` | `join()` như chờ-cho-hoàn-thành |
+| 4 | `ThreadLifecycleExample` | `src/main/java/com/example/javalab/basics/ThreadLifecycleExample.java` | Cả sáu trạng thái vòng đời với một thread lấy mẫu |
+| 5 | `RaceConditionExample` | `src/main/java/com/example/javalab/synchronization/RaceConditionExample.java` | `count++` hỏng (Mục 6) |
+| 6 | `SynchronizedExample` | `src/main/java/com/example/javalab/synchronization/SynchronizedExample.java` | Cách sửa `synchronized` (Mục 7.1) |
+| 7 | `AtomicIntegerExample` | `src/main/java/com/example/javalab/synchronization/AtomicIntegerExample.java` | Atomicity dựa trên CAS (Mục 7.2) |
+| 8 | `LockExample` | `src/main/java/com/example/javalab/synchronization/LockExample.java` | `ReentrantLock`, `tryLock`, quy tắc `finally` (Mục 7.3) |
+| 9 | `VolatileExample` | `src/main/java/com/example/javalab/synchronization/VolatileExample.java` | Visibility vs atomicity (Mục 7.4) |
+| 10 | `FixedThreadPoolExample` | `src/main/java/com/example/javalab/threadpool/FixedThreadPoolExample.java` | Pool như quản lý tài nguyên (Mục 8) |
+| 11 | `ThreadPoolExecutorExample` | `src/main/java/com/example/javalab/threadpool/ThreadPoolExecutorExample.java` | Luồng core → queue → max → rejection (Mục 9) |
+| 12 | `BoundedQueueExample` | `src/main/java/com/example/javalab/threadpool/BoundedQueueExample.java` | Queue không chặn vs có chặn (Mục 9) |
+| 13 | `RejectedExecutionExample` | `src/main/java/com/example/javalab/threadpool/RejectedExecutionExample.java` | Rejection policies (Mục 9) |
+| 14 | `CpuBoundThreadExample` | `src/main/java/com/example/javalab/performance/CpuBoundThreadExample.java` | Điểm nằm ngang ở số lõi (Mục 10) |
+| 15 | `IoBoundThreadExample` | `src/main/java/com/example/javalab/performance/IoBoundThreadExample.java` | Mở rộng theo tỷ lệ blocking (Mục 10) |
+| 16 | `TooManyThreadsExample` | `src/main/java/com/example/javalab/performance/TooManyThreadsExample.java` | Chi phí oversubscription (Mục 10) |
+| 17 | `DeadlockExample` | `src/main/java/com/example/javalab/problems/DeadlockExample.java` | Các điều kiện Coffman (Mục 11.1) |
+| 18 | `StarvationExample` | `src/main/java/com/example/javalab/problems/StarvationExample.java` | Lock không fair (Mục 11.2) |
+| 19 | `ThreadPoolExhaustionExample` | `src/main/java/com/example/javalab/threadpool/ThreadPoolExhaustionExample.java` | Vụ sụp đổ dây chuyền (Mục 11.3) |
+| 20 | `ThreadLocalLeakExample` | `src/main/java/com/example/javalab/problems/ThreadLocalLeakExample.java` | Rò rỉ ThreadLocal trong thread pool (Mục 11.4) |
+| 21 | `LostExceptionExample` | `src/main/java/com/example/javalab/problems/LostExceptionExample.java` | Exception của `submit()` bị nuốt (Mục 11.5) |
+| 22 | `BlockingSharedPoolExample` | `src/main/java/com/example/javalab/problems/BlockingSharedPoolExample.java` | Domino tail-latency (Mục 11.6) |
+| 23 | `BasicVirtualThreadExample` | `src/main/java/com/example/javalab/virtualthread/BasicVirtualThreadExample.java` | Tạo virtual thread (Mục 12) |
+| 24 | `VirtualThreadExecutorExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadExecutorExample.java` | Executor per-task (Mục 12) |
+| 25 | `PlatformVsVirtualThreadExample` | `src/main/java/com/example/javalab/virtualthread/PlatformVsVirtualThreadExample.java` | 1.000 tác vụ: 2108 ms vs 54 ms; 100k thread (Mục 12) |
+| 26 | `VirtualThreadIoExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadIoExample.java` | I/O-bound: 4269 ms vs 67 ms (Mục 13) |
+| 27 | `VirtualThreadCpuBoundExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadCpuBoundExample.java` | CPU-bound: virtual thread không thêm tốc độ (Mục 13) |
+| 28 | `VirtualThreadResourceLimitExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadResourceLimitExample.java` | Semaphore vs lock vs pool caps (Mục 14) |
+| 29 | `SemaphoreConcurrencyLimitExample` | `src/main/java/com/example/javalab/practical/SemaphoreConcurrencyLimitExample.java` | Bảo vệ một tài nguyên dùng chung (Mục 14) |
+| 30 | `ProducerConsumerExample` | `src/main/java/com/example/javalab/practical/ProducerConsumerExample.java` | Tác vụ không giới hạn, queue có chặn (Mục 14) |
+| 31 | `GracefulShutdownExample` | `src/main/java/com/example/javalab/practical/GracefulShutdownExample.java` | `shutdown()` → `awaitTermination` → `shutdownNow()` (Mục 9) |
+
+### Cách chạy mọi thứ
 
 ```bash
-jcmd <pid> Thread.print        # or: jstack <pid>
+# 1. Clone
+git clone https://github.com/hungpt99-dev/java-lab.git
+cd java-lab
+
+# 2. Build (requires JDK 21+)
+mvn clean package
+
+# 3. Run one example
+java -cp target/classes com.example.javalab.virtualthread.PlatformVsVirtualThreadExample
+
+# 4. Or run everything (Windows PowerShell)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-all.ps1
 ```
 
-- Nhiều thread `BLOCKED` → synchronized contention; tìm monitor trong stack trace, tìm ai đang giữ nó.
-- Đống `WAITING`/`TIMED_WAITING` trên `park` → pool queue, future, hoặc pool thread đang rảnh.
-- **Deadlock**: dump chứa mục `Found one Java-level deadlock` — chính xác thứ `DeadlockExample` tái hiện (và lời gọi `findDeadlockedThreads()` của nó cho cùng kết quả một cách lập trình).
-
-### Giám sát JVM và Metrics
-
-- **CPU utilization**: `top -H` cho CPU theo từng thread; 100% trên mọi lõi với nhiều thread `RUNNABLE` → bão hòa CPU; CPU thấp mà latency dài → đang chờ một thứ gì đó.
-- **JFR** (`jfr start --filename app.jfr`): sự kiện lock contention (`jdk.JavaMonitorEnter`), thread allocation, CPU sampling — không cần restart.
-- **Executor metrics** (Micrometer/JMX): `executor_active_threads`, `executor_queue_size`, `executor_completed_task_count`. Một queue tăng trưởng là dấu hiệu cảnh báo sớm nhất của pool exhaustion — trạng thái mà `ThreadPoolExhaustionExample` mô phỏng.
-- **Connection pool metrics** (ví dụ HikariCP): `connections_pending`, `connections_active`, `connections_timeout_total` — connection starvation hiện ra ở đây trước khi latency request bùng nổ.
-
-### Vòng lặp điều tra
-
-```
-1. Latency tăng vọt?         → kiểm tra percentiles p95/p99
-2. CPU bão hòa?              → không: đang chờ thứ gì đó (dumps, DB metrics)
-                              → có: điểm nghẽn CPU-bound (profiler)
-3. Trạng thái thread trong dumps:
-   - đống BLOCKED            → lock contention (tìm monitor)
-   - đống WAITING            → queue/pool exhaustion (metric độ sâu queue)
-   - mọi thread bận cùng 1 call → một dependency chậm (timeout, circuit breaker)
-4. Pool metrics tăng?        → producer chạy nhanh hơn consumer (backpressure!)
-```
+`README.md` của repository
+([đọc tại đây](https://github.com/hungpt99-dev/java-lab/blob/main/README.md))
+chứa lộ trình đầy đủ, và `docs/architecture.md` giải thích cấu trúc package.
+Mọi ví dụ in một lời giải thích ngắn trước khi chạy — hãy chạy chúng, phá vỡ
+chúng, chạy lại. Các con số trong bài viết này đến từ chính những file này trên
+một máy 12 lõi với JDK 21, và chúng sẽ khác trên máy của bạn — các *hình dạng*
+(điểm nằm ngang, vách đá, khoảng cách 39×) thì không.
 
 ---
 
-## 15. Bảng quyết định thực hành
+## Kết Luận
 
-| Nhu cầu | Công cụ | Vì sao / khi nào |
-| ------- | ------- | ---------------- |
-| Background task dùng một lần, test, script | Raw `Thread` (`CreateThreadExample`) | Đơn giản, ngắn hạn; không bao giờ trong request path production |
-| Thực thi task nói chung, cần kiểm soát vòng đời | `ExecutorService` (`RunnableExample`) | submit/await/shutdown, tái sử dụng worker |
-| Workload CPU-bound | Fixed pool ≈ `#cores` (`CpuBoundThreadExample`) | Thêm thread chỉ thêm switching overhead |
-| Workload I/O-bound, concurrency vừa phải | Bounded fixed pool sizing theo chờ/tính (`IoBoundThreadExample`) | Bắt buộc bounded queue (`BoundedQueueExample`) |
-| Blocking concurrency khổng lồ | Virtual Threads (`VirtualThreadExecutorExample`) | Thread bị block giá rẻ; code blocking đơn giản |
-| Bộ đếm, cờ, trạng thái đơn giản | `AtomicInteger` / `volatile` (`AtomicIntegerExample`, `VolatileExample`) | Atomicity cho bộ đếm, visibility cho cờ |
-| Critical section phức tạp, timeout | `synchronized` / `ReentrantLock` (`SynchronizedExample`, `LockExample`) | `tryLock(timeout)` chống deadlock |
-| Giới hạn concurrency cho tài nguyên khan hiếm | `Semaphore` (`SemaphoreConcurrencyLimitExample`) | Sizing theo dung lượng downstream — hoạt động với virtual threads |
-| Rate limiting / circuit breaking | `RateLimiter`, `Resilience4j`, `Bucket4j` | Từ chối từ phía upstream trước khi bão hòa nội bộ |
-| Tính toán song song nặng về CPU | Parallel streams, `ForkJoinPool` | Sizing theo số lõi |
+Bạn bắt đầu với một sơ đồ chồng lớp và 10.000 request. Đây là toàn bộ hành
+trình trong một đoạn văn:
 
----
+Platform thread là tài nguyên thực thi đắt, nên chúng ta pool chúng; pool làm
+concurrency tường minh và có chặn, nên chúng ta vặn vít chúng; việc vặn vít đòi
+hỏi hiểu công việc chờ cái gì, nên chúng ta đo context switch, tỷ lệ blocking
+và oversubscription; các phép đo phơi bày những lỗi — deadlock, starvation, cạn
+kiệt, rò rỉ, exception mất, tail latency — tất cả đều là lỗi quản lý tài
+nguyên; và virtual thread xóa phần khó nhất của phép toán tài nguyên bằng cách
+làm *chờ đợi* rẻ, nên bottleneck cuối cùng dời về đúng chỗ nó luôn luôn là:
+các connection database, các HTTP timeout, các rate limit — những tài nguyên
+bên ngoài. Thread chưa bao giờ là bottleneck. Chúng chỉ là cách chúng ta trải
+nghiệm nó.
 
-## 16. Mô hình tư duy cuối cùng
-
-Năm câu tóm gọn toàn bộ bài viết — mỗi câu đều được hỗ trợ bởi một ví dụ trong repository:
-
-1. **Một thread không tự động làm code nhanh hơn.** Nó chỉ cho công việc cơ hội chạy song song (`CpuBoundThreadExample`).
-2. **Concurrency không phải parallelism.** Concurrency là cấu trúc; parallelism là thực thi trên nhiều lõi. Thread cho bạn thứ thứ nhất; chỉ có phần cứng mới cho bạn thứ thứ hai.
-3. **Nhiều thread không có nghĩa là nhiều sức mạnh CPU hơn.** Vượt quá số lõi, thread chỉ mua cho bạn context switch (`TooManyThreadsExample`).
-4. **Virtual Threads cải thiện khả năng mở rộng cho blocking concurrency, chứ không phải hiệu suất CPU.** Chúng làm việc chờ đợi trở nên rẻ (`VirtualThreadIoExample`) nhưng không tăng tốc tính toán (`VirtualThreadCpuBoundExample`).
-5. **Phần khó của multithreading là quản lý shared state, giới hạn tài nguyên, backpressure, vòng đời và lỗi** — chính xác những lỗi mà package `problems` tái hiện, và chính xác những thứ package `practical` sửa.
-
-Thông điệp trung tâm, được in bởi ví dụ resource-limit:
-
-> Virtual Threads loại bỏ chi phí của các thread đang chờ — chứ không loại bỏ chi phí của tài nguyên mà chúng đang chờ.
+**Điều duy nhất cần nhớ:** một thread là một tài nguyên — pool nó, định cỡ nó,
+giới hạn nó, hoặc virtual hóa nó; nhưng luôn tự hỏi *nó đang chờ cái gì?* Đó là
+câu hỏi mà cả khóa học trả lời.
 
 ---
 
-## Mã ví dụ trong repository này
 
-Mọi ví dụ là một class độc lập có `main`, chạy được sau `mvn clean compile` qua `java -cp target/classes <fully.qualified.ClassName>`. Danh sách chạy được đầy đủ (31 ví dụ) nằm trong [`README.md`](https://github.com/hungpt99-dev/java-lab/blob/main/README.md) của repository; bảng dưới đây ánh xạ từng ví dụ với các mục của bài viết và bài học của nó.
 
-| Mục bài viết | Ví dụ trong Repository | Điều nó minh họa |
-| ------------ | ---------------------- | ---------------- |
-| Tạo và chạy Thread | `basics.CreateThreadExample` | Ba cách tạo thread; kết quả đồng thời, không theo thứ tự |
-| Tạo và chạy Thread | `basics.RunnableExample` | Runnable vs Callable, `join()`, `sleep()`, `Future.get()` |
-| Tạo và chạy Thread | `basics.StartVsRunExample` | `run()` chạy trong caller; `start()` tạo thread mới |
-| Vòng đời của Thread | `basics.ThreadLifecycleExample` | Cả sáu trạng thái, được tạo ra và quan sát |
-| Race Condition | `synchronization.RaceConditionExample` | Bộ đếm hỏng: `count++` mất increment (bất định) |
-| Đồng bộ hóa | `synchronization.SynchronizedExample` | Cùng bộ đếm, luôn đúng với monitor |
-| Đồng bộ hóa | `synchronization.VolatileExample` | `volatile` ≠ atomicity; visibility của shared flag |
-| Đồng bộ hóa | `synchronization.AtomicIntegerExample` | Bộ đếm CAS lock-free, luôn đúng |
-| Đồng bộ hóa | `synchronization.LockExample` | `ReentrantLock`, reentrancy, `tryLock(timeout)` |
-| Thread Pool | `threadpool.FixedThreadPoolExample` | Fixed pool = unbounded queue; tái sử dụng worker |
-| Thread Pool | `threadpool.ThreadPoolExecutorExample` | Pipeline core → queue → max → rejection |
-| Thread Pool | `threadpool.BoundedQueueExample` | Queue unbounded không bao giờ huy động `maximumPoolSize` |
-| Thread Pool | `threadpool.RejectedExecutionExample` | `AbortPolicy` vs `CallerRunsPolicy` trong thực tế |
-| Thread Pool | `threadpool.ThreadPoolExhaustionExample` | Mọi worker block; task nhanh phải chờ; không exception |
-| Thread Pool | `practical.GracefulShutdownExample` | `shutdown()` → `awaitTermination()` → `shutdownNow()` |
-| Lỗi phổ biến | `problems.DeadlockExample` | Chờ vòng; JVM phát hiện; kiểm tra bằng thread dump |
-| Lỗi phổ biến | `problems.StarvationExample` | Task dài làm đói task ngắn (head-of-line blocking) |
-| Lỗi phổ biến | `problems.ThreadLocalLeakExample` | Dữ liệu stale + memory leak; cách sửa bằng `remove()` |
-| Lỗi phổ biến | `problems.LostExceptionExample` | `execute()` vs `submit()`; exception bị nuốt |
-| Lỗi phổ biến | `problems.BlockingSharedPoolExample` | Call chậm phá latency task nhanh; pool riêng là cách sửa |
-| Hiệu suất | `performance.CpuBoundThreadExample` | CPU-bound: giới hạn bởi cores, không phải thread |
-| Hiệu suất | `performance.IoBoundThreadExample` | I/O-bound: concurrency scale throughput |
-| Hiệu suất | `performance.TooManyThreadsExample` | Số thread ít → hợp lý → quá mức |
-| Virtual Threads | `virtualthread.BasicVirtualThreadExample` | `startVirtualThread`, `ofVirtual()`, `isVirtual` |
-| Virtual Threads | `virtualthread.VirtualThreadExecutorExample` | Per-task executor; 10.000 task chạy cùng lúc |
-| Virtual Threads | `virtualthread.PlatformVsVirtualThreadExample` | 16 platform threads vs 1.000 VTs; tạo 100k VTs |
-| Virtual Threads | `virtualthread.VirtualThreadIoExample` | p95 latency: queueing vs thời gian gọi |
-| Virtual Threads | `virtualthread.VirtualThreadCpuBoundExample` | VTs KHÔNG tăng tốc công việc CPU-bound |
-| Virtual Threads | `virtualthread.VirtualThreadResourceLimitExample` | Tài nguyên giới hạn bằng semaphore: VTs không nâng giới hạn |
-| Giới hạn tài nguyên | `practical.SemaphoreConcurrencyLimitExample` | Chặn concurrency theo dung lượng downstream |
-| Mẫu thực hành | `practical.ProducerConsumerExample` | Bounded queue, backpressure, shutdown bằng poison pill |
 
-**Cách chạy tất cả cùng lúc:** `powershell -File scripts/run-all.ps1` biên dịch nếu cần và chạy toàn bộ 31 ví dụ theo thứ tự (chính script này đã bắt được một bug thật trong lúc bài viết được viết: một `executor.shutdown()` bị quên khiến JVM không thoát — đúng loại rò rỉ mà `LostExceptionExample` cảnh báo). Mọi ví dụ đều kết thúc sạch sẽ; các ví dụ nguy hiểm (deadlock) dùng daemon threads; mọi thời gian đo đều phụ thuộc vào máy và được đánh dấu cố ý trong output của chúng.
+
+
+
+
+
+
+
+
