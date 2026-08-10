@@ -16,11 +16,11 @@ Some of those requests need the CPU — parsing JSON, hashing, compressing.
 Some wait for a database query.
 Some wait for an external HTTP API that takes 300 ms to answer.
 
-The first question every engineer asks: *should we create 10,000 threads?*
+The first question every engineer asks: _should we create 10,000 threads?_
 
-If not, why not? And the follow-up that confuses everyone: *if Java
+If not, why not? And the follow-up that confuses everyone: _if Java
 Virtual Threads let us create millions of threads, why can't we make the
-application infinitely concurrent?*
+application infinitely concurrent?_
 
 This article answers those questions. But instead of starting with a
 definition of a thread, it starts with the stack of machinery that decides
@@ -60,7 +60,7 @@ Here are the four questions this article answers in depth:
 - Why do concurrency bugs almost always **only appear in production**?
 
 Every claim is backed by a real, runnable example. The article is designed to
-be read next to the companion repository [`java-lab`](https://github.com/hungpt99-dev/java-lab),
+be read next to the companion repository [`java-lab`](https://github.com/hungpt99-dev/java-lab/tree/lab/thread),
 a plain Maven project with **31 small, independent examples**, zero frameworks,
 and pure JDK concurrency APIs. Each section maps a concept to an actual class,
 shows the real code, and tells you exactly what to run and what to observe.
@@ -107,7 +107,7 @@ finished — so the machine spends most of its time doing nothing, waiting
 on external resources that are thousands of times slower than the CPU.
 
 A CPU core executes billions of instructions per second. A database round
-trip takes milliseconds — millions of instructions worth of time. *Waiting*
+trip takes milliseconds — millions of instructions worth of time. _Waiting_
 is not a rare event in a backend; it is the default state.
 
 This gap between "the CPU is fast" and "everything else is slow" is the
@@ -128,11 +128,11 @@ article is built on.
 
 ### 2.1. Concurrency is about structure; parallelism is about execution
 
-- **Concurrency**: multiple tasks make progress during *overlapping* time
-  periods, interleaved on the same CPU. It is a way to *structure* a program
+- **Concurrency**: multiple tasks make progress during _overlapping_ time
+  periods, interleaved on the same CPU. It is a way to _structure_ a program
   that has waiting in it.
-- **Parallelism**: multiple tasks physically *execute at the same instant*,
-  on different CPU cores. It is a property of the *hardware* doing the
+- **Parallelism**: multiple tasks physically _execute at the same instant_,
+  on different CPU cores. It is a property of the _hardware_ doing the
   execution.
 
 A helpful but technically honest analogy: concurrency is one chef switching
@@ -163,11 +163,11 @@ context-switched. **Creating threads does not create cores.**
 
 ### 2.2. The two workload types that decide everything
 
-There is one question to ask about any task: *what is it waiting for?*
+There is one question to ask about any task: _what is it waiting for?_
 
 - **CPU-bound**: the task spends its time computing — parsing, hashing,
   crypto, compression. Speed is limited by CPU cores, not by thread count.
-- **I/O-bound**: the task spends most of its time *waiting* — for a database,
+- **I/O-bound**: the task spends most of its time _waiting_ — for a database,
   an HTTP response, a file read. Speed is limited by latency and concurrency.
 
 ```text
@@ -179,7 +179,7 @@ I/O-bound task:   [wait 95ms][wait 95ms][wait 95ms]
                   ↑ 95% of time is waiting → more concurrency helps
 ```
 
-Why does this matter before we even talk about threads? Because the *entire*
+Why does this matter before we even talk about threads? Because the _entire_
 design of Java concurrency — thread pools, Virtual Threads, backpressure — is
 an answer to the I/O-bound reality of backends. A typical request handler in
 production does 5 ms of real work and 95 ms of waiting. The CPU utilization of
@@ -210,7 +210,7 @@ that are merely waiting.
 **Repository examples:** `src/main/java/com/example/javalab/basics/CreateThreadExample.java`, `src/main/java/com/example/javalab/basics/RunnableExample.java`
 
 The textbook says a thread is "a unit of execution". That tells you what it
-does, not what it *is*. Under the hood, a thread is a bundle of state that
+does, not what it _is_. Under the hood, a thread is a bundle of state that
 the CPU can switch to, run, suspend, and switch away from:
 
 - **A stack** — the memory region holding local variables and call frames.
@@ -220,9 +220,9 @@ the CPU can switch to, run, suspend, and switch away from:
 - **Execution state** — registers (general-purpose, stack pointer, frame
   pointer, instruction pointer), plus flags like "interrupted".
 - **Scheduling metadata** — priority, state, wait queues, CPU time
-  accounting. This is what the OS scheduler uses to decide *when* to run it.
+  accounting. This is what the OS scheduler uses to decide _when_ to run it.
 
-The key fact about a *platform* thread (the classic Java `Thread`) is the
+The key fact about a _platform_ thread (the classic Java `Thread`) is the
 relationship it has with the operating system. Conceptually:
 
 ```text
@@ -252,14 +252,14 @@ structure that shapes every design decision in Java concurrency:
   kernel operation, so it competes with every other process on the machine.
 - **Stack memory.** ~1 MB reserved per thread. 10,000 threads ≈ 10 GB of
   virtual memory. In practice, most processes hit `OutOfMemoryError: unable
-  to create native thread` before they run out of heap.
+to create native thread` before they run out of heap.
 - **Kernel scheduling.** The OS scheduler must track every runnable thread.
   More threads = more scheduler work, on every context switch, on every timer
   tick.
 - **Context switching.** Switching the CPU from one thread to another costs
   CPU time and destroys CPU cache locality (Section 10).
 - **Scheduler overhead at scale.** With thousands of runnable threads, a
-  large fraction of CPU time can go to *deciding* what to run and *switching*
+  large fraction of CPU time can go to _deciding_ what to run and _switching_
   to it, instead of running it.
 
 The `basics` package demonstrates how threads are created and what the API
@@ -323,7 +323,7 @@ try {
 ```
 
 **Under the hood:** the task is executed on a worker thread; the result is
-stored in the `Future`. `future.get()` blocks the *caller* until the value is
+stored in the `Future`. `future.get()` blocks the _caller_ until the value is
 available — note that the caller does not busy-wait, the OS parks it.
 **Production impact:** the pattern "submit work, get a `Future`, block on
 `get()`" is how most async orchestration works; the `Future` is also where
@@ -344,8 +344,8 @@ java -cp target/classes com.example.javalab.basics.RunnableExample
 ```
 
 Expected observation: the three lines in `CreateThreadExample` print from
-three different thread names in a *different order on every run*. That
-nondeterministic order *is* concurrency.
+three different thread names in a _different order on every run_. That
+nondeterministic order _is_ concurrency.
 
 ---
 
@@ -399,7 +399,7 @@ JVM invokes run() on the new thread
 ```
 
 **Why the output order is nondeterministic.** Once `start()` has been called,
-there are two independent threads that are both *runnable*. From that moment,
+there are two independent threads that are both _runnable_. From that moment,
 the developer no longer fully controls execution order: the JVM and the OS
 scheduler decide when each thread gets CPU time, and that decision depends on
 machine load, other processes, timer interrupts, and the scheduler's policy.
@@ -408,7 +408,7 @@ threads prints first.
 
 `run()` gives you zero concurrency, and the bug is invisible because the code
 still produces correct results — it just runs sequentially on the caller. This
-is a classic silent failure: code that *looks* concurrent but is not.
+is a classic silent failure: code that _looks_ concurrent but is not.
 
 **Under the hood:** `start()` performs a native call that creates a kernel
 thread, allocates its stack, and enqueues it as runnable. Only then does the
@@ -437,7 +437,7 @@ Expected observation: `run()` always prints the caller's thread name (`main`);
 **Repository example:** `src/main/java/com/example/javalab/basics/ThreadLifecycleExample.java`
 
 Every thread state is an answer to a question the scheduler must answer:
-*can this thread run right now, and if not, what is it waiting for?* The six
+_can this thread run right now, and if not, what is it waiting for?_ The six
 states are the vocabulary of thread dumps — which means understanding them is
 a debugging skill, not trivia.
 
@@ -474,14 +474,14 @@ a debugging skill, not trivia.
 ```
 
 - **NEW** — created but `start()` not called yet. There is no OS thread.
-  *Cause:* nothing has asked the JVM to begin execution.
+  _Cause:_ nothing has asked the JVM to begin execution.
 - **RUNNABLE** — ready to run or actually running. Important: **"runnable"
   does not mean "currently executing on a CPU".** A runnable thread may be
   waiting in the OS run queue for CPU time. Java deliberately does not
   distinguish "running" from "ready": that decision belongs to the OS
   scheduler, which Java cannot see.
 - **BLOCKED** — waiting to acquire a `synchronized` monitor held by another
-  thread. The thread cannot proceed *because it needs exclusive access*.
+  thread. The thread cannot proceed _because it needs exclusive access_.
 
   ```text
   Thread A owns Lock
@@ -493,9 +493,9 @@ a debugging skill, not trivia.
   BLOCKED
   ```
 
-- **WAITING** — the thread *intentionally* paused itself waiting for another
+- **WAITING** — the thread _intentionally_ paused itself waiting for another
   thread to act: `Object.wait()` without timeout, `Thread.join()`,
-  `LockSupport.park()`. It is waiting for a *signal*, not for CPU time.
+  `LockSupport.park()`. It is waiting for a _signal_, not for CPU time.
 - **TIMED_WAITING** — the same, but with a deadline: `Thread.sleep()`,
   `join(millis)`, `await(timeout, unit)`. The difference from WAITING is
   that the OS can wake it by timer.
@@ -506,7 +506,7 @@ The example manufactures each state on demand: a second thread blocks on a
 `synchronized` monitor held by `main` (→ `BLOCKED`), the worker calls
 `LOCK.wait(300)` (→ `TIMED_WAITING`) then `LOCK.wait()` (→ `WAITING`), and
 finally `join()` reveals `TERMINATED`. Because exact timing is nondeterministic,
-the example *polls* until each expected state appears (with a timeout) instead
+the example _polls_ until each expected state appears (with a timeout) instead
 of relying on sleeps.
 
 **Actual output (abridged):**
@@ -528,7 +528,7 @@ problem class:
   the stack trace, find who holds it. The fix is usually less contention
   (smaller critical sections, lock striping) or a different structure.
 - Piles of `WAITING`/`TIMED_WAITING` on `park` → pool queues, futures, or idle
-  pool threads; if they are *growing*, the pool is backing up.
+  pool threads; if they are _growing_, the pool is backing up.
 - Floods of `RUNNABLE` → CPU saturation: the machine is the bottleneck.
 
 **Key takeaway:** the states are not bookkeeping — they tell you whether a
@@ -543,7 +543,7 @@ java -cp target/classes com.example.javalab.basics.ThreadLifecycleExample
 
 Expected observation: all six states printed in order. Note that the exact
 `RUNNABLE` sample point varies per run — the state machine itself is fixed,
-the *timing* is not.
+the _timing_ is not.
 
 ---
 
@@ -623,7 +623,7 @@ Actual:   1
 **Why it is nondeterministic:** whether the interleaving collides depends on
 scheduling, JIT state, and machine load. Trial 5 happened to be correct —
 which is exactly why these bugs pass code review and explode in production.
-The code compiles, runs, and *sometimes* produces the right answer.
+The code compiles, runs, and _sometimes_ produces the right answer.
 
 ### The deeper problem: three separate guarantees
 
@@ -666,7 +666,7 @@ thread B after it acquires the same lock".
 That is why the example is not a curiosity: every production race you will
 ever debug is the same failure — shared mutable state mutated without the
 synchronization that creates visibility and atomicity. "It works on my
-machine" is the JMM doing its job *too well* on a lightly loaded box.
+machine" is the JMM doing its job _too well_ on a lightly loaded box.
 
 ## Try It Yourself
 
@@ -700,8 +700,8 @@ public class SynchronizedExample {
 }
 ```
 
-**The mechanism:** the `synchronized` monitor gives the thread *exclusive
-ownership* of the critical section. Only one thread can be inside it at a
+**The mechanism:** the `synchronized` monitor gives the thread _exclusive
+ownership_ of the critical section. Only one thread can be inside it at a
 time:
 
 ```text
@@ -724,12 +724,12 @@ The same 8×50,000 workload is now always correct: all three trials print
 
 **The trade-offs — why not synchronize everything?**
 
-- **Lock contention.** If many threads hammer the same monitor, they *queue*.
+- **Lock contention.** If many threads hammer the same monitor, they _queue_.
   Each thread that misses the lock must be descheduled and rescheduled — that
   is a context switch, plus scheduler work. Under heavy contention, the code
   becomes effectively single-threaded: the lock serializes everything.
 - **Critical section size.** The bigger the section, the more time threads
-  spend waiting outside it. The fix is usually *smaller* critical sections —
+  spend waiting outside it. The fix is usually _smaller_ critical sections —
   hold the lock only for the mutation, not for the whole method.
 - **No timeout.** `synchronized` cannot time out: a thread holding the lock
   forever blocks everyone else forever. There is no way to "give up".
@@ -775,13 +775,14 @@ Two crucial consequences:
 - **It is correct without blocking**, because the CAS instruction itself is
   atomic at the hardware level (with a JVM fallback where hardware support
   is unavailable). The exact mechanism is implementation-defined, but
-  conceptually: *the hardware is the lock*.
+  conceptually: _the hardware is the lock_.
 
 The example also prints the other useful operations
 (`get()`, `getAndIncrement()`, `addAndGet(n)`, `compareAndSet(exp, upd)`).
 
 **Why AtomicInteger is not a replacement for every critical section.** An
-atomic variable protects *one* value. If an operation involves:
+atomic variable protects _one_ value. If an operation involves:
+
 - checking multiple values,
 - modifying multiple objects,
 - maintaining an invariant that spans fields,
@@ -789,7 +790,7 @@ atomic variable protects *one* value. If an operation involves:
 one atomic variable is not enough. Example: transferring money between two
 accounts needs both balances to change atomically; two separate `AtomicLong`s
 can be observed mid-transfer. For compound invariants you need
-`synchronized` or a lock — that is what mutual exclusion is *for*.
+`synchronized` or a lock — that is what mutual exclusion is _for_.
 
 ### 7.3. ReentrantLock: control, timeouts, and the finally rule
 
@@ -883,7 +884,7 @@ does not.**
 **Part B — a non-volatile flag may never be seen.** A worker loops on a plain
 `boolean keepRunning` while `main` sets it to `false` after 200 ms. The JIT
 can hoist the field out of the loop (the compiler observes it is never written
-*within the loop* and is free to assume single-thread semantics), so the write
+_within the loop_ and is free to assume single-thread semantics), so the write
 is never observed. This part is deliberately nondeterministic — in the
 recorded run it reproduced 0 out of 3 trials, while the escape hatch (a
 `volatile boolean forceStop`) stopped the worker immediately every time. The
@@ -957,7 +958,7 @@ A thread pool is a **resource management mechanism** with four jobs:
   tasks run at once. This is the concurrency dial.
 - **Limit resource consumption** — bounded workers × bounded queue = bounded
   memory, regardless of the task arrival rate.
-- **Manage overload** — when the pool is saturated, *something defined*
+- **Manage overload** — when the pool is saturated, _something defined_
   happens (queueing, rejection) instead of silently allocating unbounded
   resources until the JVM dies.
 
@@ -1043,7 +1044,7 @@ New Task
             └── Reject task
 ```
 
-The crucial subtlety: **the queue is consulted *before* the pool grows past
+The crucial subtlety: **the queue is consulted _before_ the pool grows past
 core size.** The pool prefers to buffer work in the queue, and only grows
 extra workers when the queue is full. Consequence: with an unbounded queue,
 `maximumPoolSize` is dead configuration — the pool never grows past core
@@ -1079,11 +1080,11 @@ submitted 9 -> REJECTED (pool full, queue full): RejectedExecutionException
 
 Observe the order: tasks 1–2 hit the core threads; tasks 3–4 go into the queue;
 the pool only grows past core size **after** the queue is full (tasks 5–6);
-once the queue is full *and* max is reached, `AbortPolicy` throws.
+once the queue is full _and_ max is reached, `AbortPolicy` throws.
 
-**Why this order matters:** the queue is the pool's *buffer* — it absorbs
-short bursts. Core threads are the *steady-state* capacity; extra threads
-(core→max) are the *burst* capacity, engaged only when the buffer overflows.
+**Why this order matters:** the queue is the pool's _buffer_ — it absorbs
+short bursts. Core threads are the _steady-state_ capacity; extra threads
+(core→max) are the _burst_ capacity, engaged only when the buffer overflows.
 The algorithm deliberately prefers buffering over spawning, because worker
 threads are the expensive resource; a queue slot is cheap.
 
@@ -1093,7 +1094,7 @@ This is the key idea of the whole section:
 
 > **A queue does not remove overload. It stores overload somewhere.**
 
-An unbounded queue does not reject anything — it makes overload *invisible*
+An unbounded queue does not reject anything — it makes overload _invisible_
 until it is too late:
 
 ```text
@@ -1122,7 +1123,7 @@ B) BOUNDED queue (ArrayBlockingQueue capacity=2)
    -> poolSize=4 queueSize=2 (pool grew to 4)
 ```
 
-With an unbounded queue, `maximumPoolSize` never engages — the queue *is* the
+With an unbounded queue, `maximumPoolSize` never engages — the queue _is_ the
 real limit, and tasks accumulate in memory. A bounded queue forces the pool
 to engage extra threads, then the rejection policy. **The bounded queue is
 how a pool participates in backpressure:** it can only buffer so much, and
@@ -1144,16 +1145,16 @@ four submissions) with `AbortPolicy` and `CallerRunsPolicy`:
    tasks actually executed: 4
 ```
 
-| Policy | Behavior | Use when |
-| ------ | -------- | -------- |
-| `AbortPolicy` (default) | Throws `RejectedExecutionException` | Fail fast; caller handles it |
-| `CallerRunsPolicy` | Task runs **in the caller's thread** | Natural backpressure: producer slows down |
-| `DiscardPolicy` | Silently drops the task | Never — silent data loss |
-| `DiscardOldestPolicy` | Drops the oldest queued task | Only for stale/windowed work |
+| Policy                  | Behavior                             | Use when                                  |
+| ----------------------- | ------------------------------------ | ----------------------------------------- |
+| `AbortPolicy` (default) | Throws `RejectedExecutionException`  | Fail fast; caller handles it              |
+| `CallerRunsPolicy`      | Task runs **in the caller's thread** | Natural backpressure: producer slows down |
+| `DiscardPolicy`         | Silently drops the task              | Never — silent data loss                  |
+| `DiscardOldestPolicy`   | Drops the oldest queued task         | Only for stale/windowed work              |
 
 **Under the hood of `CallerRunsPolicy`:** the submitting thread itself
 executes the task, so the producer automatically slows down to the consumer's
-speed — the rejection mechanism *is* the backpressure mechanism. This is why
+speed — the rejection mechanism _is_ the backpressure mechanism. This is why
 it is the production favorite: instead of throwing an error, the system
 throttles itself.
 
@@ -1179,9 +1180,9 @@ pool.awaitTermination(5, TimeUnit.SECONDS);        // 4) wait for cleanup
 running workers (`started=3 interrupted=3`). Well-behaved tasks catch
 `InterruptedException` and clean up before exiting.
 
-**Why the three-phase sequence exists:** `shutdown()` stops the *inbound* —
+**Why the three-phase sequence exists:** `shutdown()` stops the _inbound_ —
 no new tasks accepted, but queued work still runs. `awaitTermination(deadline)`
-gives in-flight work a chance. `shutdownNow()` interrupts the *outbound* —
+gives in-flight work a chance. `shutdownNow()` interrupts the _outbound_ —
 running tasks get the interrupt flag, queued tasks are returned. A well-behaved
 task treats the interrupt as "the system is shutting down: release sockets,
 roll back, exit". Respecting the interrupt flag is what makes graceful
@@ -1267,7 +1268,7 @@ workload does not get faster: it cannot. The core count is the ceiling. On a
 run confirms it.
 
 **The pattern is not an accident:** CPU-bound work scales only until the
-core count, then plateaus — and later *degrades* as switching overhead grows.
+core count, then plateaus — and later _degrades_ as switching overhead grows.
 This is why the pool-size rule of thumb exists:
 
 > CPU-bound: `cores` (usually `cores + 1` to cover hiccups).
@@ -1299,7 +1300,7 @@ the extra threads simply fill the gaps between sleeps. Concurrency is
 ~10× cores because of the blocking ratio.
 
 **Production impact:** sizing an I/O pool is not "pick a big number". The
-number is `cores × (1 + wait/calculate)` — and `wait` is *the* variable you
+number is `cores × (1 + wait/calculate)` — and `wait` is _the_ variable you
 can control. Change the API call from 50 ms to 5 s and the correct pool size
 jumps 100×. Revisit pool sizes when latency changes.
 
@@ -1307,7 +1308,7 @@ jumps 100×. Revisit pool sizes when latency changes.
 
 **Repository example:** `TooManyThreadsExample`
 
-This example measures what oversubscription *actually* does. 4, 64, 400 and
+This example measures what oversubscription _actually_ does. 4, 64, 400 and
 800 platform threads each spin on CPU for 1.5 seconds of wall-clock work on a
 12-core machine.
 
@@ -1322,9 +1323,9 @@ This example measures what oversubscription *actually* does. 4, 64, 400 and
 
 **What the numbers say:** 4 threads finish in 1.09 s (0.4 s of pure switching
 and scheduling overhead); 64 threads finish faster — but 400 threads are
-*slower* than 64 (167 ms → 212 ms), and 800 threads do not recover. The extra
-threads do not add work — the CPU is fully utilized at 64; they add *switching
-overhead*: more runnable threads than cores means the scheduler cycles through
+_slower_ than 64 (167 ms → 212 ms), and 800 threads do not recover. The extra
+threads do not add work — the CPU is fully utilized at 64; they add _switching
+overhead_: more runnable threads than cores means the scheduler cycles through
 them, and every cycle is a context switch.
 
 This is the "when more threads make things slower" proof: **oversubscription
@@ -1340,8 +1341,8 @@ I/O-bound task   → bottleneck is the I/O   → thread count >> cores
 Too many threads → bottleneck is the scheduler → thread count is the problem
 ```
 
-Every performance example in this course answers the same question: *what is
-the bottleneck?* Find it first — thread count is a decision, not a number.
+Every performance example in this course answers the same question: _what is
+the bottleneck?_ Find it first — thread count is a decision, not a number.
 
 ## Try It Yourself
 
@@ -1379,7 +1380,7 @@ class Chopstick {
 ```
 
 Two threads, two shared locks, crossed acquisition order. Every philosopher
-picks up their left chopstick, pauses to *think* (the sleep is crucial: it
+picks up their left chopstick, pauses to _think_ (the sleep is crucial: it
 gives the other thread time to grab the second chopstick), then waits for the
 right one. Deadlock.
 
@@ -1406,7 +1407,7 @@ them (this is exactly what `ReentrantLock.tryLock` is for).
 **How to fix it — break any one condition:**
 
 - **Break Circular Wait: acquire locks in a global order.** Make all threads
-  take lock A before lock B (e.g. always pick up the *lower-numbered*
+  take lock A before lock B (e.g. always pick up the _lower-numbered_
   chopstick first). This is the standard fix: a total ordering on locks
   guarantees no cycle can form.
 - **Break Hold and Wait: acquire all resources atomically**, or
@@ -1418,7 +1419,7 @@ them (this is exactly what `ReentrantLock.tryLock` is for).
 
 **Production impact:** deadlocks are the "no error" failure: the service just
 stops responding, threads pile up in BLOCKED, requests time out from the
-client's side. The most common real cause is *inconsistent lock ordering*
+client's side. The most common real cause is _inconsistent lock ordering_
 across code paths — the rule "always acquire in the same order" is cheap and
 prevents the worst class of failure.
 
@@ -1493,7 +1494,7 @@ service. The queue holds the failure.
 
 **Production impact — the feedback loop:** when one component slows, its
 callers' threads block waiting, their pools fill, their callers' pools fill
-in turn — a *cascade* that takes down an entire distributed system. The
+in turn — a _cascade_ that takes down an entire distributed system. The
 defenses are the resource-management ideas of this course, applied together:
 **bounded pools (Section 9), timeouts on every remote call (a task that can
 block must be able to give up), and rejection policies (exhaustion should
@@ -1503,7 +1504,7 @@ fail fast, not pile up).**
 
 **Repository example:** `ThreadLocalLeakExample`
 
-A pooled thread *is a long-lived object* — and `ThreadLocal` values are
+A pooled thread _is a long-lived object_ — and `ThreadLocal` values are
 attached to threads. Combine the two and a single careless `set()` becomes a
 memory leak that is invisible for a long time.
 
@@ -1512,7 +1513,7 @@ The example uses a **thread pool of 4 threads** (not 4 raw threads!) and a
 
 - **Phase 1:** tasks save "session data" per task — one heap buffer per task.
   Because threads are reused, the maps are never cleared.
-- **Phase 2:** new tasks *do not* set the ThreadLocal anymore — they call
+- **Phase 2:** new tasks _do not_ set the ThreadLocal anymore — they call
   `session.get()`.
 
 **Actual output:**
@@ -1524,7 +1525,7 @@ Phase 2: session.get() → STALE data from previous tasks (threads were reused!)
 
 **The mechanism:** `ThreadLocal` storage is owned by the thread object. A
 pool thread runs task A, keeps A's value, then runs task B — B's `get()`
-returns *A's value*. That is both the leak (the value never dies with the
+returns _A's value_. That is both the leak (the value never dies with the
 task) and the correctness bug (tasks see each other's data).
 
 ```text
@@ -1549,7 +1550,7 @@ try {
 
 **Why this is not a problem in "normal" (unpooled) code:** a plain
 `new Thread(runnable)` starts, runs once, and dies; the thread's death
-reclaims its ThreadLocals. The leak exists *because* of reuse. The moment you
+reclaims its ThreadLocals. The leak exists _because_ of reuse. The moment you
 introduce pooling, every ThreadLocal becomes a lifecycle responsibility —
 `remove()` in `finally`, or the value outlives its task and contaminates the
 next one.
@@ -1578,7 +1579,7 @@ LOST!!! The main thread did NOT see the exception:
 ```
 
 **The mechanism:** `submit()` returns a `Future`; the exception is stored
-*inside the future* to be delivered on `get()`. Nobody calls `get()` → the
+_inside the future_ to be delivered on `get()`. Nobody calls `get()` → the
 failure vanishes. The shutdown line (`pool.shutdown()`) reveals the leak:
 the rejected `Future` still references the failed task's exception.
 
@@ -1597,7 +1598,7 @@ the logs" happens. The fixes:
 **Repository example:** `src/main/java/com/example/javalab/problems/BlockingSharedPoolExample.java`
 
 The most "invisible" failure of them all. One shared pool (4 threads) runs
-*all* tasks — both a fast order-processing task and a slow task that depends
+_all_ tasks — both a fast order-processing task and a slow task that depends
 on another service (simulated with 100 ms sleeps). The slow task takes the
 whole pool, and the fast tasks starve behind it.
 
@@ -1644,7 +1645,7 @@ fast order task completed: 5 ms
 ```
 
 **The mechanism — tail latency:** with a shared pool, the slow task's 100 ms
-becomes the *floor* for every other task that shares the pool. The fast task
+becomes the _floor_ for every other task that shares the pool. The fast task
 that could finish in 6 ms waits 1900 ms because it is queued behind the slow
 one. This is the **tail-latency amplification** of pooling: one slow
 downstream dependency slows every unrelated request.
@@ -1691,11 +1692,11 @@ Sections 8–11 built an uncomfortable picture:
   tail latency, isolation problems.
 - Pool sizing is a fragile manual tuning exercise (`cores × (1 + wait/calc)`,
   with every knob a landmine).
-- Blocking calls inside a pool *are* the pool's failure mode.
+- Blocking calls inside a pool _are_ the pool's failure mode.
 
 All of this exists because of one property of platform threads: **a blocked
 platform thread occupies an OS resource — a slot that costs ~1 MB of memory
-and a scheduler entry.** When a thread waits on I/O, the *resource* waits with
+and a scheduler entry.** When a thread waits on I/O, the _resource_ waits with
 it. Virtual threads were designed to make "waiting" cheap: **a virtual thread
 is a normal Java thread whose underlying OS thread is released while it
 waits.**
@@ -1782,7 +1783,7 @@ I am virtual: true
 
 **The per-task executor:** `Executors.newVirtualThreadPerTaskExecutor()` is
 the modern replacement for `newFixedThreadPool` in the I/O case. It creates a
-*new virtual thread for every task* — there is no pool to size, no queue, no
+_new virtual thread for every task_ — there is no pool to size, no queue, no
 rejection. The example submits 20 sleeping tasks and prints max parallelism
 (`newVirtualThreadPerTaskExecutor().getMaximumPoolSize() = Integer.MAX_VALUE`):
 
@@ -1808,8 +1809,8 @@ Virtual threads:  1,000 tasks * 50ms sleep -> 54 ms
 ```
 
 **What the numbers say:** the virtual version is ~39× faster because 1,000
-virtual threads *wait* on 10 carriers; the platform version waits on 10
-threads *and* queues 990 tasks. Both are correct — but one of them blocked
+virtual threads _wait_ on 10 carriers; the platform version waits on 10
+threads _and_ queues 990 tasks. Both are correct — but one of them blocked
 threads, the other didn't.
 
 **The second measurement is the scaling proof:**
@@ -1828,7 +1829,7 @@ core is not a problem to work around — it is the design.**
 
 **When NOT to use virtual threads (and when to prefer platform threads):**
 
-- **CPU-bound work** — virtual threads run *on* platform threads; they add no
+- **CPU-bound work** — virtual threads run _on_ platform threads; they add no
   parallelism, only unmounting overhead. A CPU-bound pool should be
   `newFixedThreadPool(cores)`.
 - **Pinned code** — a virtual thread that blocks inside `synchronized` or a
@@ -1870,7 +1871,7 @@ machine.
 
 **Repository example:** `VirtualThreadIoExample`
 
-200 tasks, each sleeping 50 ms then *processing* for 25 ms (the same
+200 tasks, each sleeping 50 ms then _processing_ for 25 ms (the same
 calculate/wait ratio as `IoBoundThreadExample` — 2/3 blocking). Compared
 against a fixed pool of 12 platform threads.
 
@@ -1883,9 +1884,9 @@ Virtual threads:        67 ms   (p95: 58 ms)
 
 **What the numbers say:** virtual threads finish ~64× faster. The platform
 pool queues 200 tasks behind 12 workers (4269 ms ≈ 200/12 × 50 ms + 200 × 25
-ms); virtual threads *start a thread per task* — no queue, no serialization.
-The p95 confirms it: the *slowest* virtual task (58 ms) is faster than the
-*fastest* platform one (4269 ms total).
+ms); virtual threads _start a thread per task_ — no queue, no serialization.
+The p95 confirms it: the _slowest_ virtual task (58 ms) is faster than the
+_fastest_ platform one (4269 ms total).
 
 **The production consequence:** this is the same experiment as Section 10's
 I/O pool sizing — but with the tuning removed. No `cores × (1 + wait/calc)`,
@@ -1906,7 +1907,7 @@ threads on a 12-core machine — plus 48 virtual threads to prove the plateau.
 48 virtual threads:  ~29 ms
 ```
 
-**What the numbers say:** 12 virtual threads are ~3× *slower* than 12
+**What the numbers say:** 12 virtual threads are ~3× _slower_ than 12
 platform threads (the unmounting machinery and heap-stack management add
 overhead to compute-heavy work), and 48 virtual threads are not faster than
 12 (they are already using all cores). Virtual threads add no parallelism —
@@ -1941,7 +1942,7 @@ shapes.
 
 ### The trap
 
-Virtual threads solve the *thread* bottleneck. There is still a bottleneck —
+Virtual threads solve the _thread_ bottleneck. There is still a bottleneck —
 it just moved: **the bottleneck is now the external resource** (database
 connections, HTTP clients, disk I/O, rate limits). And `newVirtualThreadPerTaskExecutor` removes the pool that used to be the concurrency dial.
 
@@ -1971,7 +1972,7 @@ Strategy C (bounded pool): total 62 ms,   max concurrent = 400
 
 **What the numbers say:** strategies A and B correctly cap concurrency at 10
 (2300 ms ≈ 100/10 × 10 ms × 23 rounds) — the cap is what matters, not the
-mechanism. Strategy C is a *comparison trap*: a shared fixed pool of 10
+mechanism. Strategy C is a _comparison trap_: a shared fixed pool of 10
 platform threads would also cap at 10 — but with virtual threads there is no
 pool, so the cap must come from somewhere else.
 
@@ -1996,22 +1997,22 @@ takeaway:
 
 ### The resource-limit toolbox (when to use what)
 
-| Mechanism | What it limits | Example |
-| --------- | -------------- | ------- |
-| `Semaphore(n)` | Concurrent *tasks* at a point | 20 permits for 20 DB connections |
-| Bounded connection pool | DB / HTTP / socket connections | `HikariCP maximumPoolSize=20` |
-| Rate limiter | Requests per second | API quotas |
-| Bulkhead / separate executors | Failure isolation | one pool per downstream service |
-| Backpressure / rejection | Incoming overload | bounded queue + `CallerRunsPolicy` |
+| Mechanism                     | What it limits                 | Example                            |
+| ----------------------------- | ------------------------------ | ---------------------------------- |
+| `Semaphore(n)`                | Concurrent _tasks_ at a point  | 20 permits for 20 DB connections   |
+| Bounded connection pool       | DB / HTTP / socket connections | `HikariCP maximumPoolSize=20`      |
+| Rate limiter                  | Requests per second            | API quotas                         |
+| Bulkhead / separate executors | Failure isolation              | one pool per downstream service    |
+| Backpressure / rejection      | Incoming overload              | bounded queue + `CallerRunsPolicy` |
 
 **Production impact — the correct order of decisions:**
 
-1. Fix the bottleneck *first* — it is an external resource, not threads.
-2. Limit concurrency *to that resource's capacity* — `Semaphore`, connection
+1. Fix the bottleneck _first_ — it is an external resource, not threads.
+2. Limit concurrency _to that resource's capacity_ — `Semaphore`, connection
    pool, rate limit — and measure: if the resource can handle 20 connections,
    cap at ~20 (20 permits), not 10,000.
-3. Use virtual threads for the *waiting*; use the limit mechanisms for the
-   *resource*.
+3. Use virtual threads for the _waiting_; use the limit mechanisms for the
+   _resource_.
 4. Keep timeouts on every external call — a hung call is now a hung virtual
    thread (cheap, but still a hung task occupying a permit).
 
@@ -2061,7 +2062,7 @@ Consumed: 46 of 50 produced (some are still in the queue / in flight)
 ```
 
 **The production point:** with virtual threads the producers are effectively
-free; the *queue and consumer speed* are now the only thing that determines
+free; the _queue and consumer speed_ are now the only thing that determines
 throughput. The final count varies because the last items are still in
 flight when the main thread measures — the queue is doing its job (the
 coordination mechanism), not the thread count.
@@ -2076,7 +2077,7 @@ java -cp target/classes com.example.javalab.practical.ProducerConsumerExample
 
 Expected observations: Strategies A and B cap concurrency at 10; the
 semaphore example caps at 10; the producer-consumer count is always ~46–50
-but the exact number varies. The *limits* are deterministic — the final
+but the exact number varies. The _limits_ are deterministic — the final
 in-flight count is not.
 
 ---
@@ -2100,7 +2101,7 @@ The whole course reduces to one sentence, repeated through every section:
    `cores × (1 + wait/calculate)`; too many threads add switching overhead
    (Section 10 measured all three).
 4. **Why virtual threads?** Because waiting is the problem — and a virtual
-   thread *unmounts* its OS thread while waiting. Threads become cheap
+   thread _unmounts_ its OS thread while waiting. Threads become cheap
    enough to have one per task; the bottleneck moves to the external
    resource (Section 14).
 
@@ -2121,66 +2122,66 @@ Your Code
 
 **The decision checklist for a new piece of threaded code:**
 
-| Question | Answer | Then |
-| -------- | ------ | ---- |
-| Is the work I/O-bound? | Yes | Virtual thread per task; cap the *resource*, not the threads |
-| Is the work CPU-bound? | Yes | `newFixedThreadPool(cores)` |
-| Is the task mixture uneven? | Yes | Separate pools / bulkheads |
-| Does a remote call lack a timeout? | Yes | Fix it before anything else |
-| Does a task block on a lock? | Yes | Check lock ordering; prefer `ReentrantLock` + `tryLock` |
-| Is a ThreadLocal used in a pool? | Yes | `remove()` in `finally` |
-| Could overload arrive? | Yes | Bounded queue + defined rejection policy |
+| Question                           | Answer | Then                                                         |
+| ---------------------------------- | ------ | ------------------------------------------------------------ |
+| Is the work I/O-bound?             | Yes    | Virtual thread per task; cap the _resource_, not the threads |
+| Is the work CPU-bound?             | Yes    | `newFixedThreadPool(cores)`                                  |
+| Is the task mixture uneven?        | Yes    | Separate pools / bulkheads                                   |
+| Does a remote call lack a timeout? | Yes    | Fix it before anything else                                  |
+| Does a task block on a lock?       | Yes    | Check lock ordering; prefer `ReentrantLock` + `tryLock`      |
+| Is a ThreadLocal used in a pool?   | Yes    | `remove()` in `finally`                                      |
+| Could overload arrive?             | Yes    | Bounded queue + defined rejection policy                     |
 
 ---
 
 ## 16. The Code: Every Example in One Table
 
 All 31 examples live in the repository
-[`java-lab`](https://github.com/hungpt99-dev/java-lab) — clone it, run
+[`java-lab`](https://github.com/hungpt99-dev/java-lab/tree/lab/thread) — clone it, run
 `scripts/run-all.ps1` (Windows) or the Maven commands below, and see every
 claim in this article reproduce on your machine. The repository is the
 single source of truth: every number above comes from these files, and
 nothing in the article claims behavior the code does not demonstrate.
 
-| # | Example | Path | What it shows |
-| - | ------- | ---- | ------------- |
-| 1 | `CreateThreadExample` | `src/main/java/com/example/javalab/basics/CreateThreadExample.java` | Creating threads, naming, `currentThread()` |
-| 2 | `RunnableExample` | `src/main/java/com/example/javalab/basics/RunnableExample.java` | `Runnable`, `ThreadFactory`, execution order |
-| 3 | `JoinExample` | `src/main/java/com/example/javalab/basics/JoinExample.java` | `join()` as waiting-for-completion |
-| 4 | `ThreadLifecycleExample` | `src/main/java/com/example/javalab/basics/ThreadLifecycleExample.java` | All six lifecycle states with a sampling thread |
-| 5 | `RaceConditionExample` | `src/main/java/com/example/javalab/synchronization/RaceConditionExample.java` | The broken `count++` (Section 6) |
-| 6 | `SynchronizedExample` | `src/main/java/com/example/javalab/synchronization/SynchronizedExample.java` | The `synchronized` fix (Section 7.1) |
-| 7 | `AtomicIntegerExample` | `src/main/java/com/example/javalab/synchronization/AtomicIntegerExample.java` | CAS-based atomicity (Section 7.2) |
-| 8 | `LockExample` | `src/main/java/com/example/javalab/synchronization/LockExample.java` | `ReentrantLock`, `tryLock`, `finally` rule (Section 7.3) |
-| 9 | `VolatileExample` | `src/main/java/com/example/javalab/synchronization/VolatileExample.java` | Visibility vs atomicity (Section 7.4) |
-| 10 | `FixedThreadPoolExample` | `src/main/java/com/example/javalab/threadpool/FixedThreadPoolExample.java` | The pool as resource management (Section 8) |
-| 11 | `ThreadPoolExecutorExample` | `src/main/java/com/example/javalab/threadpool/ThreadPoolExecutorExample.java` | Core → queue → max → rejection flow (Section 9) |
-| 12 | `BoundedQueueExample` | `src/main/java/com/example/javalab/threadpool/BoundedQueueExample.java` | Unbounded vs bounded queue (Section 9) |
-| 13 | `RejectedExecutionExample` | `src/main/java/com/example/javalab/threadpool/RejectedExecutionExample.java` | Rejection policies (Section 9) |
-| 14 | `CpuBoundThreadExample` | `src/main/java/com/example/javalab/performance/CpuBoundThreadExample.java` | The core-count plateau (Section 10) |
-| 15 | `IoBoundThreadExample` | `src/main/java/com/example/javalab/performance/IoBoundThreadExample.java` | The blocking-ratio scaling (Section 10) |
-| 16 | `TooManyThreadsExample` | `src/main/java/com/example/javalab/performance/TooManyThreadsExample.java` | Oversubscription cost (Section 10) |
-| 17 | `DeadlockExample` | `src/main/java/com/example/javalab/problems/DeadlockExample.java` | Coffman conditions (Section 11.1) |
-| 18 | `StarvationExample` | `src/main/java/com/example/javalab/problems/StarvationExample.java` | Non-fair locking (Section 11.2) |
-| 19 | `ThreadPoolExhaustionExample` | `src/main/java/com/example/javalab/threadpool/ThreadPoolExhaustionExample.java` | The cascade (Section 11.3) |
-| 20 | `ThreadLocalLeakExample` | `src/main/java/com/example/javalab/problems/ThreadLocalLeakExample.java` | Pooled-thread ThreadLocal leak (Section 11.4) |
-| 21 | `LostExceptionExample` | `src/main/java/com/example/javalab/problems/LostExceptionExample.java` | Swallowed `submit()` exceptions (Section 11.5) |
-| 22 | `BlockingSharedPoolExample` | `src/main/java/com/example/javalab/problems/BlockingSharedPoolExample.java` | The tail-latency domino (Section 11.6) |
-| 23 | `BasicVirtualThreadExample` | `src/main/java/com/example/javalab/virtualthread/BasicVirtualThreadExample.java` | Creating virtual threads (Section 12) |
-| 24 | `VirtualThreadExecutorExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadExecutorExample.java` | The per-task executor (Section 12) |
-| 25 | `PlatformVsVirtualThreadExample` | `src/main/java/com/example/javalab/virtualthread/PlatformVsVirtualThreadExample.java` | 1,000 tasks: 2108 ms vs 54 ms; 100k threads (Section 12) |
-| 26 | `VirtualThreadIoExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadIoExample.java` | I/O-bound: 4269 ms vs 67 ms (Section 13) |
-| 27 | `VirtualThreadCpuBoundExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadCpuBoundExample.java` | CPU-bound: virtual threads add no speed (Section 13) |
-| 28 | `VirtualThreadResourceLimitExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadResourceLimitExample.java` | Semaphore vs lock vs pool caps (Section 14) |
-| 29 | `SemaphoreConcurrencyLimitExample` | `src/main/java/com/example/javalab/practical/SemaphoreConcurrencyLimitExample.java` | Guarding a shared resource (Section 14) |
-| 30 | `ProducerConsumerExample` | `src/main/java/com/example/javalab/practical/ProducerConsumerExample.java` | Unbounded tasks, bounded queue (Section 14) |
-| 31 | `GracefulShutdownExample` | `src/main/java/com/example/javalab/practical/GracefulShutdownExample.java` | `shutdown()` → `awaitTermination` → `shutdownNow()` (Section 9) |
+| #   | Example                             | Path                                                                                     | What it shows                                                   |
+| --- | ----------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 1   | `CreateThreadExample`               | `src/main/java/com/example/javalab/basics/CreateThreadExample.java`                      | Creating threads, naming, `currentThread()`                     |
+| 2   | `RunnableExample`                   | `src/main/java/com/example/javalab/basics/RunnableExample.java`                          | `Runnable`, `ThreadFactory`, execution order                    |
+| 3   | `JoinExample`                       | `src/main/java/com/example/javalab/basics/JoinExample.java`                              | `join()` as waiting-for-completion                              |
+| 4   | `ThreadLifecycleExample`            | `src/main/java/com/example/javalab/basics/ThreadLifecycleExample.java`                   | All six lifecycle states with a sampling thread                 |
+| 5   | `RaceConditionExample`              | `src/main/java/com/example/javalab/synchronization/RaceConditionExample.java`            | The broken `count++` (Section 6)                                |
+| 6   | `SynchronizedExample`               | `src/main/java/com/example/javalab/synchronization/SynchronizedExample.java`             | The `synchronized` fix (Section 7.1)                            |
+| 7   | `AtomicIntegerExample`              | `src/main/java/com/example/javalab/synchronization/AtomicIntegerExample.java`            | CAS-based atomicity (Section 7.2)                               |
+| 8   | `LockExample`                       | `src/main/java/com/example/javalab/synchronization/LockExample.java`                     | `ReentrantLock`, `tryLock`, `finally` rule (Section 7.3)        |
+| 9   | `VolatileExample`                   | `src/main/java/com/example/javalab/synchronization/VolatileExample.java`                 | Visibility vs atomicity (Section 7.4)                           |
+| 10  | `FixedThreadPoolExample`            | `src/main/java/com/example/javalab/threadpool/FixedThreadPoolExample.java`               | The pool as resource management (Section 8)                     |
+| 11  | `ThreadPoolExecutorExample`         | `src/main/java/com/example/javalab/threadpool/ThreadPoolExecutorExample.java`            | Core → queue → max → rejection flow (Section 9)                 |
+| 12  | `BoundedQueueExample`               | `src/main/java/com/example/javalab/threadpool/BoundedQueueExample.java`                  | Unbounded vs bounded queue (Section 9)                          |
+| 13  | `RejectedExecutionExample`          | `src/main/java/com/example/javalab/threadpool/RejectedExecutionExample.java`             | Rejection policies (Section 9)                                  |
+| 14  | `CpuBoundThreadExample`             | `src/main/java/com/example/javalab/performance/CpuBoundThreadExample.java`               | The core-count plateau (Section 10)                             |
+| 15  | `IoBoundThreadExample`              | `src/main/java/com/example/javalab/performance/IoBoundThreadExample.java`                | The blocking-ratio scaling (Section 10)                         |
+| 16  | `TooManyThreadsExample`             | `src/main/java/com/example/javalab/performance/TooManyThreadsExample.java`               | Oversubscription cost (Section 10)                              |
+| 17  | `DeadlockExample`                   | `src/main/java/com/example/javalab/problems/DeadlockExample.java`                        | Coffman conditions (Section 11.1)                               |
+| 18  | `StarvationExample`                 | `src/main/java/com/example/javalab/problems/StarvationExample.java`                      | Non-fair locking (Section 11.2)                                 |
+| 19  | `ThreadPoolExhaustionExample`       | `src/main/java/com/example/javalab/threadpool/ThreadPoolExhaustionExample.java`          | The cascade (Section 11.3)                                      |
+| 20  | `ThreadLocalLeakExample`            | `src/main/java/com/example/javalab/problems/ThreadLocalLeakExample.java`                 | Pooled-thread ThreadLocal leak (Section 11.4)                   |
+| 21  | `LostExceptionExample`              | `src/main/java/com/example/javalab/problems/LostExceptionExample.java`                   | Swallowed `submit()` exceptions (Section 11.5)                  |
+| 22  | `BlockingSharedPoolExample`         | `src/main/java/com/example/javalab/problems/BlockingSharedPoolExample.java`              | The tail-latency domino (Section 11.6)                          |
+| 23  | `BasicVirtualThreadExample`         | `src/main/java/com/example/javalab/virtualthread/BasicVirtualThreadExample.java`         | Creating virtual threads (Section 12)                           |
+| 24  | `VirtualThreadExecutorExample`      | `src/main/java/com/example/javalab/virtualthread/VirtualThreadExecutorExample.java`      | The per-task executor (Section 12)                              |
+| 25  | `PlatformVsVirtualThreadExample`    | `src/main/java/com/example/javalab/virtualthread/PlatformVsVirtualThreadExample.java`    | 1,000 tasks: 2108 ms vs 54 ms; 100k threads (Section 12)        |
+| 26  | `VirtualThreadIoExample`            | `src/main/java/com/example/javalab/virtualthread/VirtualThreadIoExample.java`            | I/O-bound: 4269 ms vs 67 ms (Section 13)                        |
+| 27  | `VirtualThreadCpuBoundExample`      | `src/main/java/com/example/javalab/virtualthread/VirtualThreadCpuBoundExample.java`      | CPU-bound: virtual threads add no speed (Section 13)            |
+| 28  | `VirtualThreadResourceLimitExample` | `src/main/java/com/example/javalab/virtualthread/VirtualThreadResourceLimitExample.java` | Semaphore vs lock vs pool caps (Section 14)                     |
+| 29  | `SemaphoreConcurrencyLimitExample`  | `src/main/java/com/example/javalab/practical/SemaphoreConcurrencyLimitExample.java`      | Guarding a shared resource (Section 14)                         |
+| 30  | `ProducerConsumerExample`           | `src/main/java/com/example/javalab/practical/ProducerConsumerExample.java`               | Unbounded tasks, bounded queue (Section 14)                     |
+| 31  | `GracefulShutdownExample`           | `src/main/java/com/example/javalab/practical/GracefulShutdownExample.java`               | `shutdown()` → `awaitTermination` → `shutdownNow()` (Section 9) |
 
 ### How to run everything
 
 ```bash
 # 1. Clone
-git clone https://github.com/hungpt99-dev/java-lab.git
+git clone -b lab/thread https://github.com/hungpt99-dev/java-lab.git
 cd java-lab
 
 # 2. Build (requires JDK 21+)
@@ -2194,12 +2195,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-all.ps1
 ```
 
 The repository's `README.md`
-([read it here](https://github.com/hungpt99-dev/java-lab/blob/main/README.md))
+([read it here](https://github.com/hungpt99-dev/java-lab/blob/lab/thread/README.md))
 contains the full roadmap, and `docs/architecture.md` explains the package
 structure. Every example prints a short explanation before it runs — run
 them, break them, rerun them. The numbers in this article came from exactly
 these files on a 12-core machine with JDK 21, and they will differ on yours —
-the *shapes* (plateaus, cliffs, 39× gaps) will not.
+the _shapes_ (plateaus, cliffs, 39× gaps) will not.
 
 ---
 
@@ -2214,19 +2215,13 @@ understanding what work waits on, so we measure context switches, blocking
 ratios and oversubscription; the measurements expose the failures —
 deadlocks, starvation, exhaustion, leaks, lost exceptions, tail latency —
 all of them resource-management failures; and virtual threads remove the
-worst of the resource math by making the *waiting* cheap, so the bottleneck
+worst of the resource math by making the _waiting_ cheap, so the bottleneck
 finally moves to what it always was: the database connections, the HTTP
 timeouts, the rate limits — the external resources. Threads were never the
 bottleneck. They were just the way we experienced it.
 
 **The one thing to remember:** a thread is a resource — pool it, size it,
-limit it, or virtualize it; but always ask *what is it waiting on?* That is
+limit it, or virtualize it; but always ask _what is it waiting on?_ That is
 the question the whole course answers.
 
 ---
-
-
-
-
-
-
