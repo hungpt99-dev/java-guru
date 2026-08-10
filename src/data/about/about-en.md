@@ -1,50 +1,49 @@
 ---
 title: "About"
-description: "About Java Guru and the author Phạm Thanh Hưng (Harry)."
+description: "About Java Guru and the author Phạm Thanh Hưng (Harry) — a fullstack engineer who is strongest in the backend."
 ---
 
-**Java Guru** is a technical blog by **Phạm Thanh Hưng (Harry)**, a **Software Engineer (Full-stack)** passionate about building resilient systems and writing clean code.
+**Java Guru** is a technical blog by **Phạm Thanh Hưng (Harry)** — a fullstack software engineer who is strongest in the backend, and who treats "why isn't this automated yet?" as a personality trait.
 
 ## About the Author
 
-Hi! I'm **Phạm Thanh Hưng (Harry)** — a software engineer (full-stack) who loves simplicity, clarity, and resilience in every line of code.
+Hi! I'm **Harry (Hưng)** — part engineer, part "why is this not automated yet" machine.
+
+I'm **AI-driven**: not in the "I let the robot write my code" way (mostly), but in the "what if this whole workflow just… did itself?" way. I like building things, but I *love* optimizing them — if a process takes three clicks, I've already imagined the one-click version and resented the extra two. I'm equal parts **creative and logical**: I'll whiteboard a wild idea at 9pm and have a boring, sane architecture for it by 9:05. **Open-minded** enough to try your stack, **pragmatic** enough to ship the simple one first.
+
+Professionally I build backend systems with **Java** and **Spring Boot** — focused on scalability, reliability, and *not* accidentally dropping production databases. But I also take features from the database all the way to the pixel, so the frontend isn't a mystery to me — just a place I visit on purpose.
 
 ### What I Do
 
-I currently work in **consumer finance** — a demanding domain where bugs cost real money and performance isn't optional, it's existential. This environment has shaped my habits:
-
-- Write well-tested code — no guessing
-- Design systems defensively from the start
-- Think about failure scenarios before the happy path
+- Build backend systems that scale and survive contact with real users
+- Optimize everything I touch — code, pipelines, and the occasional life decision
+- Design defensively: failure scenarios before happy paths
 - Review code as carefully as reviewing my own bank statement
 
 ### Tech Stack
 
 - **Java**, **Spring Boot** — primary language & framework
-- **Kafka** — message broker for event-driven architecture
+- **Kafka** — event-driven architecture, idempotent consumers, backpressure
 - **Redis** — caching, distributed locking
-- **MySQL** — relational database
+- **MySQL / PostgreSQL** — relational databases, query-plan archaeology
 - **Docker**, **Kubernetes** — containerization & orchestration
-- **Microservices**, **Cloud-native**, **Observability** (logs, metrics, traces)
+- **TypeScript / React** — for when the backend needs a face
+- **Observability** (Prometheus, Grafana, tracing) — if it isn't on a dashboard, did it even error?
 
 ### How I Work
-
-I don't want to just _code_ — I want to _build_. Build systems that scale. Write code that outlives the next sprint. Grow into an architect who makes complexity feel simple.
-
-My approach:
 
 - 🧠 **Think clearly** — understand the problem before touching the keyboard
 - ✍️ **Write precisely** — code is the best documentation
 - 📦 **Ship reliably** — CI/CD, test coverage, monitoring
-- 🤐 **Talk less, code more** — action speaks louder than words
+- 🔁 **Automate** — if I do it twice, I'd rather script it
 
 ### Where I'm Headed
 
-Cloud-native, event-driven, observable-by-default — that's the direction I'm pursuing. I believe a good system doesn't just work correctly — it must be easy to operate, easy to debug, and easy to extend.
+AI engineering, developer tools, and automation — wiring LLMs into real tools, not just chat demos. Cloud-native, event-driven, observable-by-default.
 
 ## What This Blog Covers
 
-Practical knowledge for backend developers, focusing on:
+Practical, opinionated knowledge for backend developers, focusing on:
 
 - Java Core
 - Spring Boot
@@ -54,11 +53,15 @@ Practical knowledge for backend developers, focusing on:
 - Clean Code
 - Real-world engineering experience
 
-The goal is to help backend developers understand problems deeply, write better code, and build stronger engineering thinking.
+The goal: help backend developers understand problems deeply, write better code, and build stronger engineering thinking — ideally with a smile.
 
 > _"Write code your future self won't hate you for."_
+
+## Hiring & collaboration
+
+I'm **open to work** and easy to build with — fullstack / backend roles (full-time or contract). Java is my deepest, but I'm comfortable in .NET and Python too. Happy to pair on backend systems, open-source tools, or MVPs. Contributors and testers always welcome.
 
 ## Contact
 
 - GitHub: https://github.com/hungpt99-dev
-- Email: thanhhungpham6@gmail.com
+- Email: hungpt591@gmail.com

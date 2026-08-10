@@ -1,50 +1,49 @@
 ---
 title: "Giới thiệu"
-description: "Giới thiệu về Java Guru và tác giả Phạm Thanh Hưng (Harry)."
+description: "Giới thiệu về Java Guru và tác giả Phạm Thanh Hưng (Harry) — một fullstack engineer mạnh về backend."
 ---
 
-**Java Guru** là blog của **Phạm Thanh Hưng (Harry)**, một **Software Engineer (Full-stack)** đam mê xây dựng hệ thống bền vững và code sạch.
+**Java Guru** là blog của **Phạm Thanh Hưng (Harry)** — một fullstack software engineer mạnh về backend, và coi "sao cái này chưa tự động hóa vậy" như một nét tính cách.
 
 ## Về tác giả
 
-Xin chào! Mình là **Phạm Thanh Hưng (Harry)** — một software engineer (full-stack) yêu thích sự đơn giản, rõ ràng và bền vững trong từng dòng code.
+Xin chào! Mình là **Harry (Hưng)** — nửa kỹ sư, nửa cái máy "sao cái này chưa tự động hóa vậy".
+
+Mình **hướng tới AI**: không phải kiểu "để robot viết code giùm" (phần lớn là không), mà là kiểu "giá mà cả quy trình này… tự chạy được thì sao". Mình thích xây dựng, nhưng càng thích tối ưu: quy trình nào mất ba cú click, mình đã hình dung bản một click và thấy phiền cái hai click thừa. Mình vừa **sáng tạo vừa logic**: tối 9h vẽ ý tưởng điên rồ, 9h05 có kiến trúc nhàm chán mà hợp lý. **Cởi mở** đủ để thử stack của bạn, **thực tế** đủ để ship bản đơn giản trước.
+
+Chuyên môn mình xây dựng hệ thống backend với **Java** và **Spring Boot** — tập trung vào khả năng mở rộng, độ tin cậy, và *không* vô tình xóa sạch database production. Nhưng mình cũng đưa tính năng từ database thẳng tới từng điểm ảnh, nên frontend không phải điều bí ẩn — chỉ là nơi mình ghé qua có chủ đích.
 
 ### Công việc hiện tại
 
-Hiện mình đang làm việc trong lĩnh vực **consumer finance (tài chính tiêu dùng)**. Đây là một domain khắc nghiệt — nơi bug không chỉ là bug, mà là tiền thật. Nơi performance không phải là "nice to have", mà là yếu tố sống còn. Chính môi trường này đã rèn cho mình thói quen:
-
-- Viết code có test đầy đủ, không đoán mò
-- Thiết kế hệ thống phòng thủ từ đầu (defensive by design)
-- Luôn nghĩ về failure scenarios trước khi nghĩ về happy path
+- Xây dựng hệ thống backend vừa scale được, vừa sống sót khi gặp user thật
+- Tối ưu mọi thứ chạm vào — code, pipeline, và thỉnh thoảng cả quyết định đời sống
+- Thiết kế phòng thủ: nghĩ failure scenarios trước happy path
 - Review code kỹ như review tiền của chính mình
 
 ### Stack kỹ thuật
 
 - **Java**, **Spring Boot** — ngôn ngữ và framework chính
-- **Kafka** — message broker cho event-driven architecture
+- **Kafka** — event-driven architecture, consumer idempotent, backpressure
 - **Redis** — caching, distributed locking
-- **MySQL** — relational database
+- **MySQL / PostgreSQL** — relational database, khảo cổ query-plan
 - **Docker**, **Kubernetes** — containerization & orchestration
-- **Microservices**, **Cloud-native**, **Observability** (logs, metrics, traces)
+- **TypeScript / React** — khi backend cần một gương mặt
+- **Observability** (Prometheus, Grafana, tracing) — không nằm trên dashboard thì lỗi có thật không?
 
 ### Triết lý làm việc
-
-Mình không muốn chỉ _code_ — mình muốn _xây dựng_. Xây dựng những hệ thống scale được. Viết những dòng code sống lâu hơn sprint tiếp theo. Phát triển bản thân thành một architect thực thụ — người khiến sự phức tạp trở nên đơn giản.
-
-Cách mình làm việc:
 
 - 🧠 **Nghĩ rõ ràng** — hiểu vấn đề trước khi chạm vào bàn phím
 - ✍️ **Viết chính xác** — code là documentation tốt nhất
 - 📦 **Ship đáng tin cậy** — CI/CD, test coverage, monitoring
-- 🤐 **Nói ít, code nhiều** — action speaks louder than words
+- 🔁 **Tự động hóa** — làm hai lần thì thà viết script
 
 ### Định hướng
 
-Cloud-native, event-driven, observable-by-default — đó là hướng đi mình đang theo đuổi. Mình tin rằng một hệ thống tốt không chỉ chạy đúng, mà còn phải dễ vận hành, dễ debug, và dễ mở rộng.
+AI engineering, developer tools, và automation — gắn LLM vào tool thật, không chỉ demo chat. Cloud-native, event-driven, observable-by-default.
 
 ## Blog này viết về gì
 
-Blog chia sẻ kiến thức thực chiến cho backend developer, tập trung vào:
+Blog chia sẻ kiến thức thực chiến, có quan điểm cho backend developer, tập trung vào:
 
 - Java Core
 - Spring Boot
@@ -54,11 +53,15 @@ Blog chia sẻ kiến thức thực chiến cho backend developer, tập trung v
 - Clean Code
 - Kinh nghiệm đi làm thực tế
 
-Mục tiêu là giúp backend developer hiểu bản chất vấn đề, viết code tốt hơn và phát triển tư duy kỹ thuật vững chắc hơn.
+Mục tiêu: giúp backend developer hiểu bản chất vấn đề, viết code tốt hơn, và xây dựng tư duy kỹ thuật vững chắc hơn — tốt nhất là kèm một nụ cười.
 
 > _"Write code your future self won't hate you for."_
+
+## Hiring & hợp tác
+
+Mình **đang tìm việc** và dễ hợp tác — vị trí fullstack / backend (toàn thời gian hoặc hợp đồng). Java là thế mạnh nhất, nhưng mình cũng dùng được .NET và Python. Sẵn sàng ghép cặp làm hệ thống backend, tool open-source, hoặc MVP. Luôn chào đón người đóng góp và tester.
 
 ## Liên hệ
 
 - GitHub: https://github.com/hungpt99-dev
-- Email: thanhhungpham6@gmail.com
+- Email: hungpt591@gmail.com
