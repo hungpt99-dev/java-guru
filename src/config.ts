@@ -9,6 +9,7 @@ export const SITE = {
   scheduledPostMargin: 15 * 60 * 1000, // 15 minutes
   showArchives: true,
   showBackButton: true, // show back button in post detail
+  booksRepo: "https://github.com/hungpt99-dev/awesome-books", // affiliate/books repo
   editPost: {
     enabled: false,
     url: "",

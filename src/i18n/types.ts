@@ -83,6 +83,10 @@ export interface I18nStrings {
   "sharePost.desc": string;
   "sharePost.on": string;
   "sharePost.via": string;
+  "booksCta.title": string;
+  "booksCta.body": string;
+  "booksCta.button": string;
+  "a11y.booksCta": string;
   "a11y.skipToContent": string;
   "a11y.rssFeed": string;
   "a11y.openMenu": string;

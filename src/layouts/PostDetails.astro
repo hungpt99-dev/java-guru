@@ -9,6 +9,7 @@ import EditPost from "@/components/EditPost.astro";
 import ShareLinks from "@/components/ShareLinks.astro";
 import BackButton from "@/components/BackButton.astro";
 import BackToTopButton from "@/components/BackToTopButton.astro";
+import BooksCta from "@/components/BooksCta.astro";
 import { getPath } from "@/utils/getPath";
 import { slugifyStr } from "@/utils/slugify";
 import IconChevronLeft from "@/assets/icons/IconChevronLeft.svg";
@@ -125,6 +126,8 @@ const nextPost =
     <ul class="mt-4 mb-8 sm:my-8">
       {tags.map(tag => <Tag tag={slugifyStr(tag)} tagName={tag} />)}
     </ul>
+
+    <BooksCta />
 
     <BackToTopButton />
 

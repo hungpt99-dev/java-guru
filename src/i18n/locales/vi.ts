@@ -91,6 +91,11 @@ const VILocale: I18nStrings = {
   "sharePost.desc": "Chia sẻ bài viết này trên",
   "sharePost.on": "Chia sẻ bài viết này trên {media}",
   "sharePost.via": "Chia sẻ bài viết này qua {media}",
+  "booksCta.title": "Ủng hộ blog",
+  "booksCta.body":
+    "Những cuốn sách tôi gợi ý để đào sâu kỹ năng Java và software engineering của bạn.",
+  "booksCta.button": "Xem sách gợi ý",
+  "a11y.booksCta": "Xem sách gợi ý",
   "a11y.skipToContent": "Bỏ qua đến nội dung",
   "a11y.rssFeed": "rss feed",
   "a11y.openMenu": "Mở menu",

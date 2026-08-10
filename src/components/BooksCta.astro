@@ -1,0 +1,28 @@
+---
+import IconGitHub from "@/assets/icons/IconGitHub.svg";
+import LinkButton from "@/components/LinkButton.astro";
+import { SITE } from "@/config";
+import { translateFor } from "@/i18n/utils";
+
+const t = translateFor(Astro.currentLocale);
+---
+
+<aside
+  aria-label={t("a11y.booksCta")}
+  class="mt-10 rounded-xl border border-dashed border-accent/40 bg-muted/40 p-5 text-center sm:p-6"
+>
+  <span class="text-base font-semibold text-accent">{t("booksCta.title")}</span>
+  <p class="mx-auto mt-2 max-w-xl text-sm text-foreground/80">
+    {t("booksCta.body")}
+  </p>
+  <LinkButton
+    href={SITE.booksRepo}
+    target="_blank"
+    rel="noopener noreferrer"
+    ariaLabel={t("a11y.booksCta")}
+    class="mt-4 inline-flex items-center gap-2 rounded-full border border-accent px-4 py-2 text-sm font-medium text-accent transition hover:bg-accent hover:text-background"
+  >
+    <IconGitHub class="size-4" />
+    {t("booksCta.button")}
+  </LinkButton>
+</aside>

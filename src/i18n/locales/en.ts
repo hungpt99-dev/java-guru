@@ -91,6 +91,11 @@ const ENLocale: I18nStrings = {
   "sharePost.desc": "Share this post on",
   "sharePost.on": "Share this post on {media}",
   "sharePost.via": "Share this post via {media}",
+  "booksCta.title": "Support the blog",
+  "booksCta.body":
+    "The books I recommend to deepen your Java and software engineering skills.",
+  "booksCta.button": "View recommended books",
+  "a11y.booksCta": "View recommended books",
   "a11y.skipToContent": "Skip to content",
   "a11y.rssFeed": "rss feed",
   "a11y.openMenu": "Open Menu",
