@@ -35,7 +35,7 @@ Know the phases: instantiation → population (DI) → `Aware` callbacks → `Be
 ## 3. Auto-configuration
 
 - **`@SpringBootApplication`** bundles `@Configuration`, `@ComponentScan`, `@EnableAutoConfiguration`.
-- Auto-config works via `spring.factories` / `AutoConfiguration.imports` + `@ConditionalOnClass` / `@ConditionalOnMissingBean`. A senior can explain *why* a starter activates only when a class is on the classpath, and how to override it.
+- Auto-config works via `spring.factories` / `AutoConfiguration.imports` + `@ConditionalOnClass` / `@ConditionalOnMissingBean`. A senior can explain _why_ a starter activates only when a class is on the classpath, and how to override it.
 - **Trap:** letting auto-config hide what's actually running. Know your actuator endpoints and what beans exist.
 
 ## 4. Transaction management

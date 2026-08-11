@@ -18,7 +18,7 @@ OOP là vé vào cửa. Ở cấp senior, phỏng vấn viên muốn thấy nó 
 Hai cái bị soi kỹ:
 
 - **Open/Closed.** Thêm tính năng bằng type mới, không sửa class đang chạy. Strategy / Plugin.
-- **Dependency Inversion.** Phụ thuộc vào abstraction — *lý do* Spring tồn tại. Inject `PaymentGateway`, không bao giờ `StripeGateway`.
+- **Dependency Inversion.** Phụ thuộc vào abstraction — _lý do_ Spring tồn tại. Inject `PaymentGateway`, không bao giờ `StripeGateway`.
 
 ```java
 // Vi phạm DIP: dependency cụ thể gắn cứng

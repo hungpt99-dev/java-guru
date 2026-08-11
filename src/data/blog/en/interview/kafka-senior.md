@@ -15,7 +15,7 @@ Kafka questions separate people who've run it in production from those who've on
 
 ## 1. Core model
 
-- **Topics, partitions, offsets, consumer groups.** Partitions are the unit of parallelism and ordering — order is guaranteed *within* a partition, not across.
+- **Topics, partitions, offsets, consumer groups.** Partitions are the unit of parallelism and ordering — order is guaranteed _within_ a partition, not across.
 - **A consumer group** splits partitions among members; adding consumers beyond the partition count does nothing.
 
 ## 2. Delivery semantics — know all three

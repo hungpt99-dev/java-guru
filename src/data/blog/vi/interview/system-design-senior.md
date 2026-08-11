@@ -29,7 +29,7 @@ System design là nơi phán đoán bị test 45–60 phút. Quy trình quan tr�
 
 ## 3. Consistency models
 
-- **CAP:** dưới partition chọn CP hoặc AP. Nói đúng — partition hiếm nhưng không tránh được, nên chọn thật là "bỏ cái gì *trong lúc* partition."
+- **CAP:** dưới partition chọn CP hoặc AP. Nói đúng — partition hiếm nhưng không tránh được, nên chọn thật là "bỏ cái gì _trong lúc_ partition."
 - **Eventual consistency:** ổn cho feed/count/search; nguy hiểm cho balance/inventory thiếu guard.
 
 ## 4. Scalability patterns

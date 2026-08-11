@@ -29,7 +29,7 @@ System design is where judgment is tested for 45–60 minutes. The process matte
 
 ## 3. Consistency models
 
-- **CAP:** under partition you choose CP or AP. Say it correctly — partitions are rare but unavoidable, so the real choice is what you sacrifice *during* a partition.
+- **CAP:** under partition you choose CP or AP. Say it correctly — partitions are rare but unavoidable, so the real choice is what you sacrifice _during_ a partition.
 - **Eventual consistency:** fine for feeds/counts/search; dangerous for balances/inventory without guards.
 
 ## 4. Scalability patterns

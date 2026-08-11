@@ -15,7 +15,7 @@ Câu hỏi Kafka phân biệt người từng chạy prod và người chỉ đ�
 
 ## 1. Core model
 
-- **Topics, partitions, offsets, consumer groups.** Partition là đơn vị parallelism và ordering — order đảm bảo *trong* partition, không across.
+- **Topics, partitions, offsets, consumer groups.** Partition là đơn vị parallelism và ordering — order đảm bảo _trong_ partition, không across.
 - **Consumer group** chia partition cho member; thêm consumer vượt partition count thì vô ích.
 
 ## 2. Delivery semantics — biết cả ba

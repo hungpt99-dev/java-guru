@@ -35,7 +35,7 @@ Các pha: instantiation → population (DI) → `Aware` callbacks → `BeanPostP
 ## 3. Auto-configuration
 
 - **`@SpringBootApplication`** gộp `@Configuration`, `@ComponentScan`, `@EnableAutoConfiguration`.
-- Auto-config qua `spring.factories`/`AutoConfiguration.imports` + `@ConditionalOnClass`/`@ConditionalOnMissingBean`. Senior giải thích *tại sao* starter chỉ kích hoạt khi class có trên classpath, và cách override.
+- Auto-config qua `spring.factories`/`AutoConfiguration.imports` + `@ConditionalOnClass`/`@ConditionalOnMissingBean`. Senior giải thích _tại sao_ starter chỉ kích hoạt khi class có trên classpath, và cách override.
 - **Bẫy:** để auto-config giấu thứ đang chạy. Biết actuator endpoints và beans tồn tại.
 
 ## 4. Transaction management

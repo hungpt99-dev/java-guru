@@ -18,7 +18,7 @@ Object-oriented programming is the entry ticket. At senior level, interviewers w
 The two most-probed:
 
 - **Open/Closed.** Add features via new types, not by editing working classes. Strategy / Plugin patterns.
-- **Dependency Inversion.** Depend on abstractions — this is *why* Spring exists. You inject `PaymentGateway`, never `StripeGateway`.
+- **Dependency Inversion.** Depend on abstractions — this is _why_ Spring exists. You inject `PaymentGateway`, never `StripeGateway`.
 
 ```java
 // Violates DIP: concrete dependency baked in
