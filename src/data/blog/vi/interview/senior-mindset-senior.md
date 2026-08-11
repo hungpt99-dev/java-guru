@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: Tư duy và Behavioral"
 description: "Phỏng vấn senior test tư duy và giao tiếp ngang với code. Cách trình bày trade-off, thừa nhận không chắc chắn, và kể chuyện chứng tỏ ownership cấp cao."
-pubDatetime: 2026-08-12T10:35:00+07:00
+pubDatetime: 2026-08-10T10:35:00+07:00
 featured: false
 draft: false
 tags:

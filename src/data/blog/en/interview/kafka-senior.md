@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: Apache Kafka"
 description: "Event-driven systems on Kafka — delivery semantics, replication, partitioning for order, consumer lag, and the dead-letter queue every production consumer needs."
-pubDatetime: 2026-08-12T10:20:00+07:00
+pubDatetime: 2026-08-10T10:20:00+07:00
 featured: false
 draft: false
 tags:

@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: Database and SQL"
 description: "The database layer decides real-world scale. Senior candidates must speak fluently about indexing, transaction isolation, connection pooling, and the ORM trap."
-pubDatetime: 2026-08-12T10:15:00+07:00
+pubDatetime: 2026-08-10T10:15:00+07:00
 featured: false
 draft: false
 tags:

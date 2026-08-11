@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: Microservices"
 description: "Microservices cấp senior chủ yếu là biết khi nào KHÔNG dùng — resilience patterns, service communication, và distributed transactions."
-pubDatetime: 2026-08-12T10:10:00+07:00
+pubDatetime: 2026-08-10T10:10:00+07:00
 featured: false
 draft: false
 tags:

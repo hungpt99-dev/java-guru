@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: Spring Boot"
 description: "Spring Boot is where Java backend seniors live. IoC/DI, the bean lifecycle, transaction management, and the auto-configuration magic interviewers expect you to see through."
-pubDatetime: 2026-08-12T10:30:00+07:00
+pubDatetime: 2026-08-10T10:30:00+07:00
 featured: false
 draft: false
 tags:

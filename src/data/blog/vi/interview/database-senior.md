@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: Database và SQL"
 description: "Tầng database quyết định scale thực tế. Ứng viên senior phải nói lưu loát về indexing, transaction isolation, connection pooling, và bẫy ORM."
-pubDatetime: 2026-08-12T10:15:00+07:00
+pubDatetime: 2026-08-10T10:15:00+07:00
 featured: false
 draft: false
 tags:

@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: System Design"
 description: "System design là bài capstone của senior — test tư duy 45 phút. Quy trình, ước lượng capacity, caching, CAP, scalability, và observability."
-pubDatetime: 2026-08-12T10:25:00+07:00
+pubDatetime: 2026-08-10T10:25:00+07:00
 featured: false
 draft: false
 tags:

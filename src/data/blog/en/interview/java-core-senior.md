@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: Java Core Deep Dive"
 description: "What senior interviewers actually probe in Java core — GC and the JMM, concurrency traps, virtual threads, and the runtime tooling that proves you've debugged production."
-pubDatetime: 2026-08-12T10:00:00+07:00
+pubDatetime: 2026-08-10T10:00:00+07:00
 featured: true
 draft: false
 tags:

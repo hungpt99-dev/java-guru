@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: Microservices"
 description: "Microservices at senior level is mostly about knowing when NOT to use them — resilience patterns, service communication, and distributed transactions."
-pubDatetime: 2026-08-12T10:10:00+07:00
+pubDatetime: 2026-08-10T10:10:00+07:00
 featured: false
 draft: false
 tags:

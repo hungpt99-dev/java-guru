@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: Apache Kafka"
 description: "Hệ thống event-driven trên Kafka — delivery semantics, replication, partitioning cho order, consumer lag, và dead-letter queue mọi consumer production cần."
-pubDatetime: 2026-08-12T10:20:00+07:00
+pubDatetime: 2026-08-10T10:20:00+07:00
 featured: false
 draft: false
 tags:

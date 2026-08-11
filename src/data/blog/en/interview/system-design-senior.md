@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: System Design"
 description: "System design is the senior capstone — a 45-minute judgment test. Process, capacity estimation, caching, CAP, scalability, and observability."
-pubDatetime: 2026-08-12T10:25:00+07:00
+pubDatetime: 2026-08-10T10:25:00+07:00
 featured: false
 draft: false
 tags:

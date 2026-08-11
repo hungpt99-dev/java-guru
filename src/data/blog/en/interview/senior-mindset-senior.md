@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: Mindset and Behavioral"
 description: "Senior interviews test judgment and communication as much as code. How to present trade-offs, admit uncertainty, and tell stories that prove senior-level ownership."
-pubDatetime: 2026-08-12T10:35:00+07:00
+pubDatetime: 2026-08-10T10:35:00+07:00
 featured: false
 draft: false
 tags:

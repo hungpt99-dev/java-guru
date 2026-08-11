@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: Java Core sâu"
 description: "Phỏng vấn viên senior thực sự kiểm tra gì ở Java core — GC và JMM, bẫy concurrency, virtual threads, và tooling runtime chứng tỏ bạn từng debug production."
-pubDatetime: 2026-08-12T10:00:00+07:00
+pubDatetime: 2026-08-10T10:00:00+07:00
 featured: true
 draft: false
 tags:

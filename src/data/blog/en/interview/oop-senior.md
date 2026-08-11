@@ -1,7 +1,7 @@
 ---
 title: "Senior Java Interview: OOP and Design Principles"
 description: "OOP at the senior level is about applied SOLID, composition over inheritance, and interface design at scale — not reciting definitions."
-pubDatetime: 2026-08-12T10:05:00+07:00
+pubDatetime: 2026-08-10T10:05:00+07:00
 featured: false
 draft: false
 tags:

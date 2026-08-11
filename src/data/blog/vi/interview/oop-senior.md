@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: OOP và nguyên lý thiết kế"
 description: "OOP cấp senior là áp dụng SOLID, composition over inheritance, và thiết kế interface khi scale — không phải đọc định nghĩa."
-pubDatetime: 2026-08-12T10:05:00+07:00
+pubDatetime: 2026-08-10T10:05:00+07:00
 featured: false
 draft: false
 tags:

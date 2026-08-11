@@ -1,7 +1,7 @@
 ---
 title: "Phỏng vấn Senior Java: Spring Boot"
 description: "Spring Boot là nơi senior Java backend sống. IoC/DI, bean lifecycle, quản lý transaction, và auto-configuration magic mà phỏng vấn viên mong bạn nhìn thấu."
-pubDatetime: 2026-08-12T10:30:00+07:00
+pubDatetime: 2026-08-10T10:30:00+07:00
 featured: false
 draft: false
 tags:
