@@ -31,6 +31,15 @@ This article is a field trip inside that machinery. We are going to follow one t
 
 You already know Java syntax. This article is about what runs underneath it.
 
+Every claim in this article can be verified by running real code. It is designed
+to be read together with the companion repository
+[`java-lab`](https://github.com/hungpt99-dev/java-lab/tree/lab/jvm) (branch
+`lab/jvm`) — a plain, framework-free Maven project with **16 small, independent
+experiments** on bytecode, class loading, stack frames, references, GC
+reachability, escape analysis, and the boxed-type traps. Each section below maps
+a concept to a concrete class: follow the link to the example file, run it with
+the command next to it, and compare your observation with the one recorded here.
+
 ## 1. The Big Picture — What Happens When You Run a Java Program?
 
 ### The journey in one diagram
@@ -77,6 +86,8 @@ You can see the bytecode of any compiled class with a tool you already have:
 javap -c Main
 ```
 
+> 🧪 **Experiment:** [`BytecodeExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/BytecodeExample.java) in `java-lab` (branch `lab/jvm`) contains exactly the line `User user = new User("Hung")`; after `mvn clean compile`, run `javap -c -p target/classes/com/example/javalab/jvminternals/BytecodeExample.class` and you get the exact `new dup ldc invokespecial astore_1` sequence that Section 3 reads instruction by instruction.
+
 Later in this article we will literally read the bytecode of our example program. This is the first reason Java "runs everywhere": the compiler targets a fictional machine, and it is the job of each platform's JVM to make that fictional machine real.
 
 ### Why Java can run on different operating systems
@@ -109,6 +120,8 @@ When a class is needed, the JVM's loading process asks its class loader, which n
 
 Once a class file is found, it is **verified** (the JVM checks the bytecode is well-formed and type-safe — this is why garbage bytecode cannot crash a conforming JVM the way garbage machine code can crash your OS), then **linked**, then — only when first actively used — **initialized** (static initializers run). Classes are loaded **lazily**: at startup, the JVM loads only what it needs.
 
+> 🧪 **Experiment:** [`ClassLoaderHierarchyExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ClassLoaderHierarchyExample.java) prints the loader of each class (`null` = bootstrap, then `platform`, `app`) and demonstrates lazy initialization: run `java -Xlog:class+load -cp target/classes com.example.javalab.jvminternals.ClassLoaderHierarchyExample` and watch the entry point get loaded immediately while `Lazy` is loaded only at first use.
+
 ### Interpreter vs JIT compiler — and why warm-up matters
 
 Now the loaded `main` method is ready to execute. But execute _how_? Two strategies exist:
@@ -119,6 +132,8 @@ Now the loaded `main` method is ready to execute. But execute _how_? Two strateg
 Modern HotSpot does both, in tiers. A method starts interpreted. While interpreting, the JVM silently **profiles** it: how often is it called, which branch is taken, which types actually arrive at those arguments? Then the profile is used to make better-inlining and optimization decisions, and the method is progressively compiled to native code — first by C1 (the "client" compiler, quick compilation, modest optimizations), then, if it stays hot, by C2 (the "server" compiler, slow compilation, aggressive optimizations).
 
 This is why long-running Java applications can become **faster after warm-up**: the first requests are interpreted, the millionth request is running highly optimized native code, guided by data collected from your actual workload. It is also why micro-benchmarks that don't warm up are meaningless, and why you should never judge a Java API's performance by a single cold call.
+
+> 🧪 **Experiment:** [`WarmUpExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/WarmUpExample.java) times the same method in successive epochs — later epochs usually print markedly lower ns/call. Add `-Xlog:jit+compilation` (JDK 24+; JDK 21–23 use `-Xlog:compilation`) to see the method's compile events appear in the middle of the run.
 
 ## 2. A Method Is Called — What Actually Happens?
 
@@ -162,6 +177,8 @@ Calling `process` for the frame on top:
 
 Because each invocation needs a frame, deep recursion grows the thread's stack frame by frame — the frames do not "reuse" anything. Thread stacks have a fixed size (in HotSpot, typically 512 KB to 1 MB per thread; configurable with `-Xss`). When a recursion exhausts it, the JVM throws `StackOverflowError` — not because you ran out of heap, but because you ran out of **stack**. This is also why recursive algorithms over large inputs (deep trees, large lists) fail where an explicitly managed heap-based stack would succeed.
 
+> 🧪 **Experiment:** [`StackOverflowExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/StackOverflowExample.java) recurses with no base case and prints how many frames were used when `StackOverflowError` hit. Compare `java -Xss256k -cp target/classes com.example.javalab.jvminternals.StackOverflowExample` with the `-Xss4m` version: frame depth scales with stack size, and the heap is not involved.
+
 ### The oversimplification you must unlearn
 
 Textbooks often teach:
@@ -182,6 +199,8 @@ What is false, or at least not guaranteed:
 - **Escape analysis** (Section 9) can make the JVM realize that a locally created object never "escapes" the method — and then the object may be _scalar-replaced_: its fields become plain local values, and **no heap object is ever created at all**.
 
 So the model "primitive = stack, object = heap" explains the _conceptual_ runtime but not the _actual_ execution, which is permitted — and frequently does — something cleverer.
+
+> 🧪 **Experiment:** [`ObjectReferenceExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ObjectReferenceExample.java) makes the "local variable holds a reference, the object lives elsewhere" distinction tangible: two variables pointing at one object (same `System.identityHashCode`), mutation visible through both, and assigning `null` to one variable leaves the object untouched.
 
 ## 3. What Really Happens When You Write `new User("Hung")`?
 
@@ -205,6 +224,8 @@ Reading this backward from the language level:
 
 So the complete object lifecycle becomes visible in six bytecode instructions.
 
+> 🧪 **Experiment:** [`BytecodeExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/BytecodeExample.java) contains exactly this line; `javap -c -p target/classes/com/example/javalab/jvminternals/BytecodeExample.class` shows the exact `new → dup → ldc "Hung" → invokespecial User.<init> → astore_1` sequence in `main`, and `iload / iadd` in `sum`.
+
 ### Step by step: what the machine does
 
 **Step 1 — `new`: memory is allocated.** "The heap" is a concept; the implementation allocates from a region controlled by the garbage collector. HotSpot gives each thread a **TLAB** — a private slice of young-generation memory. Allocating means nudging a pointer forward, which is so cheap it rivals stack allocation (and it effectively becomes exactly that after escape analysis, see Section 9).
@@ -213,7 +234,9 @@ So the complete object lifecycle becomes visible in six bytecode instructions.
 
 **Step 3 — The object header is placed.** In HotSpot, every object begins with an **object header**, which stores (conceptually, not necessarily in this physical form): a **mark word** (identity hash code, GC age, lock state — this is how `synchronized` and biased/small locks reuse the header) and a **klass pointer** linking the object to its class metadata so the JVM knows what type it is when dispatching virtual calls or casting. Fields then follow at offsets _calculated at runtime_ (HotSpot lays fields out to minimize padding; the layout is an implementation detail, and can be compressed with **compressed oops**, where object references are stored as 32-bit offsets into a base instead of full 64-bit pointers).
 
-**Step 4 — Fields are initialized.** First the heap-zeroed defaults (step 2), then the _explicit field initializers_ (`private String name = "default"`), and then — for a `User` — `super()` is called implicitly, and finally the body of the constructor you wrote runs: `this.name = "Hung";`.
+**Step 4 — Fields are initialized.** The memory was already zeroed in step 2, so every field already carries its default value. The constructor begins by implicitly calling `super()` — the first thing every constructor does (for a `User`, that branch just builds `Object` and is empty) — then the _explicit field initializers_ (`private String name = "default"`) run in declaration order, and finally the body of the constructor you wrote runs: `this.name = "Hung";`. The real order is: zeroing → `super()` → field initializers → constructor body.
+
+> 🧪 **Experiment:** [`FieldInitializationExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/FieldInitializationExample.java) prints the `super() → field initializer → constructor body` order along with fields never assigned — they still read `0`, `false`, `null` thanks to zeroing, exactly as the language guarantees.
 
 **Step 5 — The reference is assigned to `user`.** The local variable `user` — slot 1 of `main`'s frame — now holds a reference to the object.
 
@@ -243,6 +266,8 @@ So the complete object lifecycle becomes visible in six bytecode instructions.
 ```
 
 The essential insight: **the local variable and the object are different things.** `user` is a small slot in a thread-local stack frame. The `User` object is a region in shared, GC-managed memory, reachable _through_ `user`. That single distinction explains references, GC reachability, and most "is an object still alive?" confusion that follows.
+
+> 🧪 **Experiment:** [`ObjectReferenceExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ObjectReferenceExample.java) illustrates exactly this diagram: `u2 = u1` copies the reference, not the object, and `u2 = null` removes only one path.
 
 ## 4. When Does an Object Actually Die?
 
@@ -291,6 +316,8 @@ Starting from every root, the collector walks references transitively. Every obj
 
 Our `user = null` made the `User` unreachable: previously `user` (a root) pointed to it; now no root path exists. But "unreachable" only means _eligible_. The collector may reclaim it during the next cycle — or during a distant one.
 
+> 🧪 **Experiment:** [`ReachabilityExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ReachabilityExample.java) watches the collector from the outside with a `WeakReference`: right after `big = null`, the object is still fully intact (assignment deletes nothing) — only when the GC runs and proves it unreachable does the weak reference get cleared.
+
 ### Why garbage collection is nondeterministic
 
 - The GC decides **when** to run based on allocation pressure, available memory, pause targets, and collector-specific policies — not on your assignments. The exact moment is not part of any specification.
@@ -329,6 +356,8 @@ Empirically, most objects die young: a temporary `StringBuilder`, a loop's `BigD
 Objects are born in **Eden**. When Eden fills up, a **young-only GC** (often called a _minor_ GC) runs: it copies survivors into a **survivor space** (with an age counter — the account how many cycles they've survived), and eventually promotes the oldest survivors into the **old generation**. Young collections are cheap _because_ most of Eden is dead — copying a few survivors and discarding the rest is far cheaper than scanning the whole heap.
 
 The old generation grows more slowly, so it is collected less often, but each such collection is heavier. Be careful with terminology here: **"full GC" vs "major GC" mean different things in different collectors.** In G1, for instance, you get _young-only_ cycles, _mixed_ cycles (young + some old regions), and an explicit _full GC_ (usually a symptom that other strategies failed); ZGC and Shenandoah made old-generation collections concurrent precisely to reduce these stop-the-world events. When reading a GC log, always map the terms to the collector's own documentation.
+
+> 🧪 **Experiment:** [`GenerationalGcExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/GenerationalGcExample.java) prints young- and old-generation collection counts before/after a workload of 64 MB of long-lived objects plus short-lived garbage: young climbs, old barely moves. Run with `-Xmx256m -Xlog:gc` to see each `Pause Young (Normal)` in the log.
 
 ### Modern collectors — trade-offs, not magic
 
@@ -388,6 +417,8 @@ Both objects _were_ reachable from the root through the local variables. The mom
 Languages like the earlier eras of Python and Objective-C used **reference counting**: each object holds a counter of references to it; when the count hits zero, it is freed _immediately_. Now consider `A ↔ B`: decrement `a`'s count and it goes from 2 to 1, not to 0 — because `B` still references it. Neither count ever reaches zero. The pair leaks forever, unless elaborate cycle detection is bolted on.
 
 Java's collector does not count references at all. **Tracing**: start from roots, walk the graph, reclaim everything not visited. "Who references me?" is never asked; only "Am I reachable from a root?" matters. That is precisely why cycles are _automatically_ collectable — including much more realistic cycles like a parent collection referencing its children and being referenced by them, which appears in real domain models all the time.
+
+> 🧪 **Experiment:** [`CircularReferenceExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/CircularReferenceExample.java) builds a parent ↔ child cycle, then drops every root: the cycle disappears in the first GC cycle — observed via `WeakReference`, because a tracing collector walks the graph instead of asking "who points at me?".
 
 This is also why weaker reference types (`WeakReference`, `WeakHashMap`) exist and behave sensibly: reachability — not counting — is the language of Java's memory model.
 
@@ -461,6 +492,8 @@ One field, seemingly innocent, can pin an entire object graph.
 
 If the retained objects must legitimately outlive the source of their data, use the right tool: `WeakHashMap`, `WeakReference`/`ReferenceQueue`, caches with eviction (`CacheBuilder`, `Caffeine`) — anything that converts an accidental strong pin into a cancellable one. And when a heap dump shows gigabytes of "one big `HashMap`," the solution is _eviction policy_ and _ownership discipline_, not a bigger `-Xmx`.
 
+> 🧪 **Experiment:** [`MemoryLeakExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/MemoryLeakExample.java) compares two caches holding keys to dead objects: `HashMap` keeps strong keys — after two GC rounds all 2000 entries are still there; `WeakHashMap` lets keys be collected once unused — down to 0. See also [`ThreadLocalLeakExample`](https://github.com/hungpt99-dev/java-lab/blob/lab/thread/src/main/java/com/example/javalab/threads/ThreadLocalLeakExample.java) (branch `lab/thread`) for the thread-pool variant of the same trap.
+
 ## 8. Special Case: `OutOfMemoryError` Does Not Always Mean the Heap Is Full
 
 `OutOfMemoryError` is a hat that fits many different heads. It is thrown — in different flavors of the same `Error` — whenever some resource the JVM needs **cannot be obtained**. Only some flavors relate to the heap you raised with `-Xmx`. Blindly increasing `-Xmx` for every OOME is the classic reflex that solves one problem and masks others.
@@ -489,6 +522,8 @@ When an OOME hits, resist the reflex. Walk this ladder instead:
 5. **Only then consider configuration.** Raising `-Xmx` is a _capacity_ move. If you're retaining data you shouldn't, the correct move is to stop retaining it; if you're generating classes, the correct move is to unload or reuse them; if you're creating threads per task, the correct move is a pool (and on JDK 21+, virtual threads for I/O-bound work, without a native thread per task).
 
 In one sentence: the OOME message tells you _which_ memory system failed; the right fix fixes _that system_, not the one you already tuned.
+
+> 🧪 **Experiment:** [`OutOfMemoryAreasExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/OutOfMemoryAreasExample.java) takes one argument to pick the memory area — `java -Xmx32m -cp target/classes com.example.javalab.jvminternals.OutOfMemoryAreasExample heap` overflows the heap (`Java heap space`), while `-XX:MaxDirectMemorySize=8m ... direct` overflows direct buffers (`Direct buffer memory`) — same `OutOfMemoryError`, two different memory systems.
 
 ## 9. When the JVM Is Smarter Than You Think
 
@@ -532,6 +567,8 @@ So: _sometimes_ — when the JVM can prove the object never escapes — the `new
 
 This is the deep resolution of the Section 2 puzzle: the conceptual model says "objects live on the heap," and the _engine may legally replace the heap with registers_ whenever the semantics allow it. Do not write code that _depends_ on allocation happening ("I can detect allocation in a loop by..."), and do not be surprised that a micro-benchmark shows zero allocations for code that looks like it allocates.
 
+> 🧪 **Experiment:** [`EscapeAnalysisExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/EscapeAnalysisExample.java) creates ten million points inside a method that never lets them escape: run `-Xmx32m -Xlog:gc -cp target/classes com.example.javalab.jvminternals.EscapeAnalysisExample` with escape analysis on — not a single `Pause Young`; add `-XX:-DoEscapeAnalysis` — dozens of pauses and a final `OutOfMemoryError`.
+
 This also explains why adding a _reachable escape_ — e.g. storing `point` into a field "just in case it's useful for debugging" — can measurably change allocation behavior: you have pushed a non-escaping object into the escaping world.
 
 ## 10. Java Special Cases That Surprise Developers
@@ -556,6 +593,8 @@ Mechanics: `Integer a = 100` is autoboxing — shorthand for `Integer.valueOf(10
 
 The lesson is doubly practical: `==` on boxed types compares _identity_, never value; and the cache makes the boxes' behavior _value-dependent in a way that violates intuition_. Always compare numbers with `equals` (or `intValue()`), always unbox before `==` — and remember the same trick exists for `Boolean` and (smaller caches) other boxed types.
 
+> 🧪 **Experiment:** [`IntegerCacheExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/IntegerCacheExample.java) prints `==` results for 100, 200, and 1000: `100` — `true` (shared cached instance); `200`, `1000` — `false`. Run with `-XX:AutoBoxCacheMax=2000` and `1000` flips to `true` — cache hit or miss is a JVM flag, not language semantics.
+
 ### 10.2 The null unboxing NPE
 
 ```java
@@ -564,6 +603,8 @@ int result = value;        // what happens?
 ```
 
 `int result = value` is unboxing — compiled as `value.intValue()`. Calling a method on `null` throws `NullPointerException`. So this line **always throws NPE**, no matter how "obviously 0 it should be." Modern JDKs even name the culprit: _"Cannot invoke 'java.lang.Integer.intValue()' because 'value' is null"_ (JDK 14+ helpful messages). The takeaway: any data flowing into a primitive-typed API through an autoboxing boundary carries a hidden method call that can fail — validate before unboxing, never assume nullability lands at the parse from the persistence layer.
+
+> 🧪 **Experiment:** [`UnboxingNpeExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/UnboxingNpeExample.java) proves it in four lines: `Integer value = null;` then `int result = value;` — NPE immediately, and on JDK 14+ the message names the `intValue()` call blocked by null.
 
 ### 10.3 The two lives of `"hello"`
 
@@ -586,6 +627,8 @@ The subtlety deepens when strings are built:
 
 Rules of thumb, one line each: use `equals` for content, always; literals are pooled, `new` is not; never assume `==` on strings except when you're deliberately relying on pooling of intern'd/compile-time strings; and remember the pool lives in the heap (since Java 7) — thousands of unique `intern()`ed strings _do_ consume heap.
 
+> 🧪 **Experiment:** [`StringPoolExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/StringPoolExample.java) compares `==` across four ways of building "hello": literal — `true` (same pooled entry); compile-time fold `"hel" + "lo"` — `true`; `new String("hello")` — `false` (fresh heap object); runtime concatenation `"hel" + s` — `false`. Run with `-Xlog:stringtable` to watch the pool being filled.
+
 ### 10.4 `finally` can change the result
 
 ```java
@@ -602,6 +645,8 @@ static int probe() {
 The answer — **2** — catches people in code reviews every year. The JVM compiles a `finally` block into _every exit path_ of the `try`: the normal path, and each exception-handler path. The `return` in `finally` executes _after_ the `return 1` expression has been evaluated but _before_ the method actually returns — and a return that executes is a return that wins, silently discarding the pending value 1.
 
 The practical damage: a function that _appears_ to return its intended value instead returns whatever the cleanup block decides; worse, a `return` inside `finally` **swallows exceptions** thrown in `try` (the same mechanics apply to `catch` too). Cleanup belongs in `finally`, but returning from `finally` deserves the same suspicion as `catch (Exception e) {}` on an empty line.
+
+> 🧪 **Experiment:** [`FinallyReturnExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/FinallyReturnExample.java) demonstrates both outcomes: a `return` inside `finally` beats the `return` in `try` (the pending value is discarded), and an exception thrown in `try` vanishes without a trace when `finally` returns — `javap` shows the `finally` code duplicated onto every exit path.
 
 Each of these four traps is not "Java being stupid" — each is the runtime faithfully executing a contract that the source syntax makes easy to misread (caching identity, hidden method calls, interned canonical instances, control-flow compilation). Which is exactly the theme of this whole article: the code you write is a _description_, and the machine's reading of that description is the reality that runs.
 

@@ -31,6 +31,15 @@ Bài viết này là một chuyến đi thực địa vào bên trong cỗ máy 
 
 Bạn đã biết cú pháp Java. Bài viết này bàn về thứ đang chạy bên dưới nó.
 
+Mọi khẳng định trong bài đều có thể kiểm chứng bằng cách chạy thật. Bài viết
+được thiết kế để đọc cùng repository đồng hành
+[`java-lab`](https://github.com/hungpt99-dev/java-lab/tree/lab/jvm) (nhánh
+`lab/jvm`) — một dự án Maven thuần, không framework, với **16 thí nghiệm nhỏ,
+độc lập** về bytecode, class loading, stack frame, reference, GC reachability,
+escape analysis và các bẫy kiểu boxed. Mỗi phần dưới đây gắn một khái niệm với
+một class cụ thể: theo link xanh tới file ví dụ, chạy nó bằng lệnh bên cạnh,
+rồi so sánh quan sát của bạn với kết quả ghi trong bài.
+
 ## 1. Bức Tranh Lớn — Điều Gì Xảy Ra Khi Bạn Chạy Một Chương Trình Java?
 
 ### Hành trình trong một sơ đồ
@@ -77,6 +86,8 @@ Bạn có thể xem bytecode của bất kỳ class nào đã biên dịch bằn
 javap -c Main
 ```
 
+> 🧪 **Thử nghiệm:** File [`BytecodeExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/BytecodeExample.java) trong `java-lab` (nhánh `lab/jvm`) chứa đúng dòng `User user = new User("Hung")`; sau khi `mvn clean compile`, lệnh `javap -c -p target/classes/com/example/javalab/jvminternals/BytecodeExample.class` hiện ra đúng dãy `new dup ldc invokespecial astore_1` — cùng cấu trúc mà Phần 3 sẽ đọc từng chỉ thị.
+
 Phần sau của bài viết này chúng ta sẽ đọc đúng bytecode của chương trình ví dụ. Đây là lý do đầu tiên Java "chạy ở mọi nơi": trình biên dịch nhắm đến một cỗ máy hư cấu, và nhiệm vụ của JVM trên mỗi nền tảng là biến cỗ máy hư cấu đó thành hiện thực.
 
 ### Vì sao Java có thể chạy trên nhiều hệ điều hành khác nhau
@@ -109,6 +120,8 @@ Khi cần một class, quá trình nạp của JVM yêu cầu class loader của
 
 Khi tìm thấy file class, nó được **verify** (JVM kiểm tra bytecode có đúng cấu trúc và type-safe — đó là lý do bytecode rác không thể làm sập JVM theo cách machine code rác có thể làm sập hệ điều hành), sau đó **link**, rồi — chỉ khi được dùng thực sự lần đầu — được **initialize** (các đoạn static initializer chạy). Class được nạp **một cách lười biếng**: lúc khởi động, JVM chỉ nạp những gì cần.
 
+> 🧪 **Thử nghiệm:** [`ClassLoaderHierarchyExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ClassLoaderHierarchyExample.java) in loader của từng class (`null` = bootstrap, `platform`, `app`) và chứng minh lazy initialization: chạy `java -Xlog:class+load -cp target/classes com.example.javalab.jvminternals.ClassLoaderHierarchyExample` để thấy class entry point được nạp ngay lập tức còn `Lazy` chỉ được nạp đúng lúc dùng lần đầu.
+
 ### Interpreter vs JIT compiler — và vì sao warm-up lại quan trọng
 
 Giờ phương thức `main` đã được nạp và sẵn sàng thực thi. Nhưng thực thi _bằng cách nào_? Có hai chiến lược:
@@ -119,6 +132,8 @@ Giờ phương thức `main` đã được nạp và sẵn sàng thực thi. Nh�
 HotSpot hiện đại làm cả hai, theo từng bậc. Một phương thức bắt đầu được interpret. Trong lúc interpret, JVM âm thầm **profiling** nó: nó được gọi bao nhiêu lần, nhánh nào được rẽ, kiểu dữ liệu nào thực sự truyền vào tham số? Sau đó profile được dùng để tối ưu hóa và inline tốt hơn, rồi phương thức được biên dịch dần sang native code — đầu tiên bởi C1 (trình biên dịch "client": biên dịch nhanh, tối ưu khiêm tốn), và nếu vẫn còn hot, bởi C2 (trình biên dịch "server": biên dịch chậm, tối ưu mạnh tay).
 
 Đây là lý do các ứng dụng Java chạy lâu có thể **nhanh dần sau warm-up**: request đầu tiên bị interpret, request thứ triệu đang chạy native code được tối ưu rất sâu, dựa trên dữ liệu thu thập từ chính workload thật của bạn. Đây cũng là lý do micro-benchmark không có bước warm-up vô nghĩa, và bạn không bao giờ nên đánh giá hiệu năng của một API Java chỉ bằng một lần gọi lạnh.
+
+> 🧪 **Thử nghiệm:** [`WarmUpExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/WarmUpExample.java) đo cùng một phương thức theo từng epoch — các epoch sau thường in ra ns/call thấp hơn hẳn. Chạy kèm `-Xlog:jit+compilation` (JDK 24+; JDK 21–23 dùng `-Xlog:compilation`) để thấy sự kiện biên dịch phương thức xuất hiện ngay giữa lúc chạy.
 
 ## 2. Một Phương Thức Được Gọi — Điều Gì Thực Sự Xảy Ra?
 
@@ -162,6 +177,8 @@ Gọi `process` với frame đang nằm trên cùng:
 
 Vì mỗi lần gọi cần một frame, đệ quy sâu làm stack của thread phình ra hết frame này đến frame khác — các frame không "tái sử dụng" gì cả. Stack của thread có kích thước cố định (trong HotSpot, thường 512 KB đến 1 MB cho mỗi thread; cấu hình bằng `-Xss`). Khi đệ quy làm cạn kiệt nó, JVM ném `StackOverflowError` — không phải vì bạn hết heap, mà vì bạn hết **stack**. Đây cũng là lý do thuật toán đệ quy trên đầu vào lớn (cây sâu, danh sách lớn) thất bại ở chỗ một ngăn xếp tường minh trên heap lại thành công.
 
+> 🧪 **Thử nghiệm:** [`StackOverflowExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/StackOverflowExample.java) đệ quy không điểm dừng và in số frame đã dùng khi `StackOverflowError` xảy ra. So sánh `java -Xss256k -cp target/classes com.example.javalab.jvminternals.StackOverflowExample` với bản `-Xss4m`: độ sâu frame tỷ lệ thuận với kích thước stack, và heap không hề liên quan.
+
 ### Sự đơn giản hóa quá mức bạn cần gỡ bỏ
 
 Giáo trình thường dạy:
@@ -182,6 +199,8 @@ Giáo trình thường dạy:
 - **Escape analysis** (Phần 9) có thể giúp JVM nhận ra một đối tượng tạo cục bộ không bao giờ "thoát" khỏi phương thức — và khi đó đối tượng có thể bị _scalar-replace_: các field của nó trở thành các giá trị cục bộ đơn thuần, và **không có đối tượng heap nào được tạo ra**.
 
 Vậy mô hình "primitive = stack, object = heap" giải thích runtime _khái niệm_ chứ không phải thực thi _thật_, và thực thi thật được phép — và thường xuyên — làm một điều gì đó thông minh hơn.
+
+> 🧪 **Thử nghiệm:** [`ObjectReferenceExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ObjectReferenceExample.java) khiến sự phân biệt "biến cục bộ giữ reference, đối tượng sống ở nơi khác" trở nên hữu hình: hai biến trỏ cùng một object (cùng `System.identityHashCode`), mutate qua biến này thấy qua biến kia, và gán `null` cho một biến không đụng chạm gì tới đối tượng.
 
 ## 3. Điều Gì Thực Sự Xảy Ra Khi Bạn Viết `new User("Hung")`?
 
@@ -205,6 +224,8 @@ Dòng này xứng đáng được điều tra riêng. Xem bytecode trước — 
 
 Toàn bộ vòng đời của đối tượng hiện ra trong sáu chỉ thị bytecode.
 
+> 🧪 **Thử nghiệm:** [`BytecodeExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/BytecodeExample.java) chứa chính xác dòng này; chạy `javap -c -p target/classes/com/example/javalab/jvminternals/BytecodeExample.class` và bạn sẽ thấy đúng dãy `new → dup → ldc "Hung" → invokespecial User.<init> → astore_1` trong `main`, và `iload / iadd` trong phương thức `sum`.
+
 ### Từng bước: máy làm gì
 
 **Bước 1 — `new`: bộ nhớ được cấp phát.** "Heap" là một khái niệm; cách triển khai cấp phát từ một vùng do garbage collector quản lý. HotSpot cấp cho mỗi thread một **TLAB** — một lát riêng của vùng young generation. Cấp phát chỉ là đẩy con trỏ về phía trước, rẻ đến mức sánh ngang stack allocation (và thực tế nó trở thành y hệt stack allocation sau escape analysis, xem Phần 9).
@@ -213,7 +234,9 @@ Toàn bộ vòng đời của đối tượng hiện ra trong sáu chỉ thị b
 
 **Bước 3 — Object header được đặt vào.** Trong HotSpot, mọi đối tượng bắt đầu bằng một **object header**, nơi lưu (về mặt khái niệm, không nhất thiết đúng dạng vật lý này): một **mark word** (hash code nhận dạng, tuổi GC, trạng thái khóa — đây là cách `synchronized` và các khóa nhỏ tái sử dụng header) và một **klass pointer** liên kết đối tượng với metadata của class để JVM biết kiểu của nó khi dispatch virtual call hay cast. Các field nằm sau đó ở các offset _được tính ở runtime_ (HotSpot sắp xếp field để giảm padding; bố cục là chi tiết triển khai, và có thể được nén với **compressed oops**, nơi reference được lưu dưới dạng offset 32-bit vào một địa chỉ cơ sở thay vì con trỏ 64-bit đầy đủ).
 
-**Bước 4 — Field được khởi tạo.** Đầu tiên là giá trị mặc định do zero hóa (bước 2), kế đến là các _field initializer tường minh_ (`private String name = "default"`), rồi đối với một `User` — `super()` được gọi ngầm, và cuối cùng thân constructor bạn viết chạy: `this.name = "Hung";`.
+**Bước 4 — Field được khởi tạo.** Vùng nhớ đã được zero hóa ở bước 2, nên mọi field đã mang giá trị mặc định sẵn. Constructor bắt đầu chạy với lời gọi ngầm `super()` — bước đầu tiên của mọi constructor (đối với `User`, nhánh đó chỉ dựng `Object`, rỗng), kế đến là các _field initializer tường minh_ (`private String name = "default"`) chạy theo thứ tự khai báo, và cuối cùng thân constructor bạn viết chạy: `this.name = "Hung";`. Thứ tự thực sự là: zero hóa → `super()` → field initializer → thân constructor.
+
+> 🧪 **Thử nghiệm:** [`FieldInitializationExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/FieldInitializationExample.java) in ra thứ tự `super() → field initializer → constructor body` cùng các field chưa bao giờ được gán — chúng vẫn đọc ra `0`, `false`, `null` nhờ zero hóa, đúng như bảo đảm của ngôn ngữ.
 
 **Bước 5 — Tham chiếu được gán cho `user`.** Biến cục bộ `user` — ô 1 của frame `main` — giờ giữ một tham chiếu đến đối tượng.
 
@@ -242,6 +265,8 @@ Toàn bộ vòng đời của đối tượng hiện ra trong sáu chỉ thị b
 ```
 
 Điểm mấu chốt: **biến cục bộ và đối tượng là hai thứ khác nhau.** `user` là một ô nhỏ trong frame trên stack của thread. Đối tượng `User` là một vùng trong bộ nhớ dùng chung do GC quản lý, có thể tiếp cận _thông qua_ `user`. Chính sự phân biệt đó giải thích reference, tính reachability của GC, và hầu hết các nhầm lẫn "đối tượng còn sống hay không" ngay sau đây.
+
+> 🧪 **Thử nghiệm:** [`ObjectReferenceExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ObjectReferenceExample.java) minh họa đúng sơ đồ trên: `u2 = u1` sao chép reference chứ không phải đối tượng, và `u2 = null` chỉ gỡ một đường dẫn.
 
 ## 4. Khi Nào Một Đối Tượng Thực Sự Chết?
 
@@ -290,6 +315,8 @@ Bắt đầu từ mọi root, collector đi theo reference một cách bắc c�
 
 `user = null` của chúng ta làm cho `User` trở nên unreachable: trước đó `user` (một root) trỏ tới nó; giờ không còn đường nào từ root tới nó. Nhưng "unreachable" chỉ có nghĩa là _đủ điều kiện_. Collector có thể thu hồi nó trong chu kỳ tiếp theo — hoặc một chu kỳ xa xôi hơn.
 
+> 🧪 **Thử nghiệm:** [`ReachabilityExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/ReachabilityExample.java) quan sát collector từ bên ngoài bằng `WeakReference`: ngay sau `big = null`, đối tượng vẫn còn nguyên vẹn (gán null xóa không gì cả) — phải tới khi GC chạy và chứng minh nó unreachable, reference yếu mới bị dọn.
+
 ### Vì sao garbage collection mang tính bất định
 
 - GC tự quyết **khi nào** chạy dựa trên áp lực cấp phát, heap hiện có, mục tiêu pause, và chính sách riêng của từng collector — chứ không phải dựa trên các phép gán của bạn. Thời điểm chính xác không nằm trong bất kỳ thông số kỹ thuật nào.
@@ -328,6 +355,8 @@ Kinh nghiệm cho thấy hầu hết đối tượng chết trẻ: một `String
 Đối tượng được sinh ra trong **Eden**. Khi Eden đầy, một chu kỳ **young-only GC** (thường gọi là _minor_ GC) chạy: nó copy những đối tượng sống sót vào một **survivor space** (kèm bộ đếm tuổi — ghi chú chúng đã sống sót qua bao nhiêu chu kỳ), và cuối cùng promoted những survivor già nhất lên **old generation**. Young collection rẻ _vì_ hầu hết Eden đã chết — copy vài survivor rồi vứt phần còn lại rẻ hơn nhiều so với quét toàn bộ heap.
 
 Old generation phình chậm hơn, nên bị thu gom ít hơn, nhưng mỗi lần thu gom lại nặng nề hơn. Cẩn thận với thuật ngữ ở đây: **"full GC" và "major GC" có nghĩa khác nhau ở từng collector.** Trong G1 chẳng hạn, bạn có _young-only_ cycle, _mixed_ cycle (young + một phần old region), và một _full GC_ tường minh (thường là triệu chứng các chiến lược khác đã thất bại); ZGC và Shenandoah làm cho collection của old generation chạy concurrent chính là để giảm các sự kiện stop-the-world này. Khi đọc GC log, luôn tra cứu các thuật ngữ theo tài liệu của chính collector đó.
+
+> 🧪 **Thử nghiệm:** [`GenerationalGcExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/GenerationalGcExample.java) in số lần thu gom của young và old generation trước/sau một workload gồm 64 MB object sống lâu cộng rác ngắn ngày: young tăng, old gần như đứng yên. Chạy với `-Xmx256m -Xlog:gc` để thấy từng `Pause Young (Normal)` trong log.
 
 ### Collector hiện đại — đánh đổi, không phải phép màu
 
@@ -387,6 +416,8 @@ Cả hai đối tượng _từng_ reachable từ root qua các biến cục bộ
 Các ngôn ngữ như Python thời kỳ đầu hay Objective-C dùng **reference counting**: mỗi đối tượng giữ một bộ đếm số tham chiếu tới nó; khi bộ đếm về 0, nó bị giải phóng _ngay lập tức_. Giờ xét `A ↔ B`: giảm bộ đếm của `A` xuống, nó đi từ 2 xuống 1 chứ không phải 0 — vì `B` vẫn tham chiếu nó. Không cái nào chạm mốc 0. Cặp đôi đó rò rỉ vĩnh viễn, trừ khi gắn thêm cơ chế phát hiện vòng phức tạp.
 
 Collector của Java không đếm tham chiếu. Nó **tracing**: bắt đầu từ root, đi qua đồ thị, thu hồi mọi thứ không được ghé thăm. Câu hỏi "Ai đang tham chiếu tôi?" không bao giờ được hỏi; chỉ có "Tôi có reachable từ root không?" mới có ý nghĩa. Đó chính xác là lý do vòng tham chiếu được thu hồi _tự động_ — kể cả các vòng thực tế hơn nhiều như một collection cha tham chiếu đến phần tử con và bị chính phần tử con tham chiếu ngược, xuất hiện trong mọi domain model thật.
+
+> 🧪 **Thử nghiệm:** [`CircularReferenceExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/CircularReferenceExample.java) dựng một vòng cha ↔ con, rồi gỡ mọi root: vòng đó biến mất ở chu kỳ GC đầu tiên — dùng `WeakReference` để quan sát, vì một collector tracing thăm đồ thị chứ không hỏi "ai đang trỏ vào tôi?".
 
 Đây cũng là lý do các kiểu reference yếu (`WeakReference`, `WeakHashMap`) tồn tại và hoạt động hợp lý: reachability — chứ không phải đếm — mới là ngôn ngữ của mô hình bộ nhớ Java.
 
@@ -460,6 +491,8 @@ Một field, tưởng vô hại, có thể ghim cả một đồ thị đối t�
 
 Nếu các đối tượng bị giữ phải sống sót hợp pháp hơn nguồn dữ liệu của chúng, hãy dùng đúng công cụ: `WeakHashMap`, `WeakReference`/`ReferenceQueue`, cache có eviction (`CacheBuilder`, `Caffeine`) — bất cứ thứ gì biến một cái ghim strong không thể hủy thành một cái có thể hủy. Và khi một heap dump cho thấy hàng gigabyte "một `HashMap` to đùng", giải pháp là _chính sách eviction_ và _kỷ luật sở hữu_, chứ không phải một `-Xmx` to hơn.
 
+> 🧪 **Thử nghiệm:** [`MemoryLeakExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/MemoryLeakExample.java) so sánh hai cache giữ key tới đối tượng đã chết: `HashMap` giữ các key strong — sau hai vòng GC, 2000 mục vẫn nằm đó; `WeakHashMap` để các key bị GC dọn khi không ai dùng — về 0. Cũng xem thêm [`ThreadLocalLeakExample`](https://github.com/hungpt99-dev/java-lab/blob/lab/thread/src/main/java/com/example/javalab/threads/ThreadLocalLeakExample.java) (nhánh `lab/thread`) — phiên bản thread-pool của cùng cái bẫy.
+
 ## 8. Trường Hợp Đặc Biệt: `OutOfMemoryError` Không Phải Lúc Nào Cũng Là Heap Đầy
 
 `OutOfMemoryError` là một chiếc mũ đội vừa nhiều cái đầu. Nó được ném — ở nhiều phiên bản của cùng một `Error` — mỗi khi một tài nguyên nào đó JVM cần **không thể lấy được**. Chỉ một số phiên bản liên quan đến heap bạn đã nâng bằng `-Xmx`. Tăng `-Xmx` mù quáng cho mọi OOME là phản xạ kinh điển: giải quyết một vấn đề và che giấu những vấn đề khác.
@@ -488,6 +521,8 @@ Khi OOME ập đến, hãy cưỡng lại phản xạ. Đi theo bậc thang này
 5. **Chỉ sau đó mới cân nhắc cấu hình.** Tăng `-Xmx` là một nước đi về _dung lượng_. Nếu bạn đang giữ dữ liệu đáng lẽ không nên giữ, nước đi đúng là dừng giữ nó; nếu bạn đang sinh class, nước đi đúng là unload hoặc tái sử dụng; nếu bạn tạo thread cho từng tác vụ, nước đi đúng là dùng pool (và trên JDK 21+, virtual thread cho công việc I/O-bound, không tốn một native thread cho mỗi tác vụ).
 
 Tóm một câu: thông điệp OOME cho bạn biết _hệ thống bộ nhớ nào_ thất bại; cách sửa đúng là sửa _hệ thống đó_, chứ không phải cái mà bạn đã tinh chỉnh.
+
+> 🧪 **Thử nghiệm:** [`OutOfMemoryAreasExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/OutOfMemoryAreasExample.java) nhận một tham số để chọn vùng bộ nhớ — `java -Xmx32m -cp target/classes com.example.javalab.jvminternals.OutOfMemoryAreasExample heap` làm tràn heap (`Java heap space`), còn `-XX:MaxDirectMemorySize=8m ... direct` làm tràn direct buffer (`Direct buffer memory`) — cùng một ngoại lệ `OutOfMemoryError`, hai hệ thống bộ nhớ khác nhau.
 
 ## 9. Khi JVM Thông Minh Hơn Bạn Nghĩ
 
@@ -531,6 +566,8 @@ Vậy: _đôi khi_ — khi JVM chứng minh được đối tượng không bao 
 
 Đây là lời giải sâu cho câu đố ở Phần 2: mô hình khái niệm nói "đối tượng sống trên heap", và _cỗ máy có thể hợp pháp thay heap bằng register_ mỗi khi ngữ nghĩa cho phép. Đừng viết code _phụ thuộc_ vào việc cấp phát xảy ra ("tôi có thể phát hiện cấp phát trong một vòng lặp bằng cách..."), và đừng ngạc nhiên khi một micro-benchmark báo zero allocation với code trông như đang cấp phát.
 
+> 🧪 **Thử nghiệm:** [`EscapeAnalysisExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/EscapeAnalysisExample.java) tạo 10 triệu điểm trong một phương thức không để chúng thoát ra ngoài: chạy `-Xmx32m -Xlog:gc -cp target/classes com.example.javalab.jvminternals.EscapeAnalysisExample` với escape analysis bật — không một `Pause Young` nào; thêm `-XX:-DoEscapeAnalysis` — hàng chục pause và một lần `OutOfMemoryError`.
+
 Điều này cũng giải thích vì sao thêm một _escape hữu hình_ — ví dụ lưu `point` vào một field "phòng khi cần debug" — có thể làm thay đổi đo lường được hành vi cấp phát: bạn vừa đẩy một đối tượng non-escaping vào thế giới escaping.
 
 ## 10. Các Trường Hợp Đặc Biệt Của Java Khiến Lập Trình Viên Bất Ngờ
@@ -555,6 +592,8 @@ Cơ chế: `Integer a = 100` là autoboxing — viết tắt của `Integer.valu
 
 Bài học kép ở đây: `==` trên kiểu boxed so _identity_, không bao giờ so giá trị; và cache khiến hành vi của chúng _phụ thuộc vào giá trị theo cách trái ngược trực giác_. Luôn so số bằng `equals` (hoặc `intValue()`), luôn unbox trước khi `==` — và nhớ rằng thủ thuật tương tự tồn tại cho `Boolean` và (cache nhỏ hơn) các kiểu boxed khác.
 
+> 🧪 **Thử nghiệm:** [`IntegerCacheExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/IntegerCacheExample.java) in ra kết quả `==` cho 100, 200 và 1000: `100` — `true` (cùng instance cache); `200`, `1000` — `false`. Chạy với `-XX:AutoBoxCacheMax=2000` và `1000` lật sang `true` — cache trượt hay trúng là một flag JVM, không phải ngữ nghĩa ngôn ngữ.
+
 ### 10.2 NPE khi unbox null
 
 ```java
@@ -563,6 +602,8 @@ int result = value;        // điều gì xảy ra?
 ```
 
 `int result = value` là unboxing — được biên dịch thành `value.intValue()`. Gọi một phương thức trên `null` ném `NullPointerException`. Vậy dòng này **luôn ném NPE**, dù trông "hiển nhiên là 0". JDK hiện đại thậm chí nêu tên thủ phạm: _"Cannot invoke 'java.lang.Integer.intValue()' because 'value' is null"_ (thông điệp hữu ích từ JDK 14+). Kết bài: bất kỳ dữ liệu nào truyền vào API kiểu primitive qua ranh giới autoboxing đều mang theo một lời gọi phương thức ẩn có thể thất bại — hãy validate trước khi unbox, đừng bao giờ cho rằng nullability biến mất tại lớp parse từ tầng lưu trữ.
+
+> 🧪 **Thử nghiệm:** [`UnboxingNpeExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/UnboxingNpeExample.java) chứng minh điều đó trong bốn dòng: `Integer value = null;` rồi `int result = value;` — NPE ngay lập tức, và trên JDK 14+ thông điệp chỉ đích danh lời gọi `intValue()` bị chặn bởi null.
 
 ### 10.3 Hai cuộc đời của `"hello"`
 
@@ -585,6 +626,8 @@ Sự tinh tế sâu hơn khi string được _dựng lên_:
 
 Quy tắc ngón tay cái, mỗi cái một dòng: so nội dung bằng `equals`, luôn luôn; literal được pool hóa, `new` thì không; không bao giờ tin `==` trên string trừ khi bạn cố ý dựa vào pooling của string intern'd/compile-time; và nhớ pool nằm trong heap (từ Java 7) — hàng nghìn chuỗi `intern()` độc nhất _cũng_ ngốn heap.
 
+> 🧪 **Thử nghiệm:** [`StringPoolExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/StringPoolExample.java) so `==` trên bốn cách tạo "hello": literal — `true` (cùng phần tử pool); hằng số ghép `"hel" + "lo"` — `true` (tối ưu compile-time); `new String("hello")` — `false` (đối tượng heap mới); nối runtime `"hel" + s` — `false`. Chạy với `-Xlog:stringtable` để thấy pool được đổ đầy.
+
 ### 10.4 `finally` có thể thay đổi kết quả
 
 ```java
@@ -601,6 +644,8 @@ static int probe() {
 Câu trả lời — **2** — khiến người ta vỗ trán trong code review mỗi năm. JVM biên dịch một khối `finally` vào _mọi đường thoát_ của `try`: đường bình thường, và từng đường exception handler. Lệnh `return` trong `finally` thực thi _sau khi_ biểu thức `return 1` đã được tính nhưng _trước khi_ phương thức thực sự trả về — và một `return` được thực thi là một `return` thắng cuộc, âm thầm vứt bỏ giá trị 1 đang chờ sẵn.
 
 Thiệt hại thực tế: một hàm _trông như_ trả về giá trị dự định lại trả về thứ khối dọn dẹp quyết định; tệ hơn, `return` trong `finally` **nuốt chửng exception** ném ra trong `try` (cơ chế tương tự cũng áp dụng cho `catch`). Dọn dẹp thuộc về `finally`, nhưng _return_ từ `finally` xứng đáng sự nghi ngờ như một dòng `catch (Exception e) {}` trống trơn.
+
+> 🧪 **Thử nghiệm:** [`FinallyReturnExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/FinallyReturnExample.java) cho thấy cả hai kết cục: `return` trong `try` sau một `return` trong `finally` trả về giá trị từ `finally` (kết quả của `try` bị bỏ đi), và một exception ném trong `try` biến mất không dấu vết khi `finally` return — javap cho thấy code của `finally` được nhân bản ra mọi đường thoát.
 
 Mỗi cái bẫy trong bốn cái bẫy này không phải "Java ngu ngốc" — mỗi cái là runtime trung thành thực thi một hợp đồng mà cú pháp nguồn khiến bạn dễ đọc sai (identity được cache, lời gọi phương thức ẩn, các instance chính tắc được intern, cách điều khiển luồng được biên dịch). Đúng như chủ đề của cả bài viết này: code bạn viết là một _bản mô tả_, và cách cỗ máy đọc bản mô tả đó mới là thực tại đang chạy.
 
