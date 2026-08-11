@@ -11,7 +11,7 @@ Xin chào! Mình là **Harry (Hưng)** — nửa kỹ sư, nửa cái máy "sao 
 
 Mình **hướng tới AI**: không phải kiểu "để robot viết code giùm" (phần lớn là không), mà là kiểu "giá mà cả quy trình này… tự chạy được thì sao". Mình thích xây dựng, nhưng càng thích tối ưu: quy trình nào mất ba cú click, mình đã hình dung bản một click và thấy phiền cái hai click thừa. Mình vừa **sáng tạo vừa logic**: tối 9h vẽ ý tưởng điên rồ, 9h05 có kiến trúc nhàm chán mà hợp lý. **Cởi mở** đủ để thử stack của bạn, **thực tế** đủ để ship bản đơn giản trước.
 
-Chuyên môn mình xây dựng hệ thống backend với **Java** và **Spring Boot** — tập trung vào khả năng mở rộng, độ tin cậy, và *không* vô tình xóa sạch database production. Nhưng mình cũng đưa tính năng từ database thẳng tới từng điểm ảnh, nên frontend không phải điều bí ẩn — chỉ là nơi mình ghé qua có chủ đích.
+Chuyên môn mình xây dựng hệ thống backend với **Java** và **Spring Boot** — tập trung vào khả năng mở rộng, độ tin cậy, và _không_ vô tình xóa sạch database production. Nhưng mình cũng đưa tính năng từ database thẳng tới từng điểm ảnh, nên frontend không phải điều bí ẩn — chỉ là nơi mình ghé qua có chủ đích.
 
 ### Công việc hiện tại
 

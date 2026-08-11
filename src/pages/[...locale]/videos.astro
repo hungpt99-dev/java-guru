@@ -25,19 +25,19 @@ const localeVideos = videos.filter(v => v.locale === locale);
   <Main pageTitle={t("videos")} pageDesc={t("videos.desc")}>
     {
       localeVideos.length === 0 ? (
-        <p class="text-foreground/60 text-center">{t("pageNotFound")}</p>
+        <p class="text-center text-foreground/60">{t("pageNotFound")}</p>
       ) : (
         <div class="flex flex-col gap-8">
           {localeVideos.map(video => (
             <div>
-              <h2 class="text-accent mb-2 text-xl font-bold">{video.title}</h2>
-              <p class="text-foreground/80 mb-4">{video.description}</p>
+              <h2 class="mb-2 text-xl font-bold text-accent">{video.title}</h2>
+              <p class="mb-4 text-foreground/80">{video.description}</p>
               <iframe
                 src={`https://www.youtube.com/embed/${video.youtubeId}`}
                 title={video.title}
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                 allowfullscreen
-              ></iframe>
+              />
             </div>
           ))}
         </div>

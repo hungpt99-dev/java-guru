@@ -12,19 +12,63 @@ on:
       - "tsconfig.json"
       - "eslint.config.mjs"
       - "remark-collapse.d.ts"
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+      - "package.json"
+      - "pnpm-lock.yaml"
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# Allow one concurrent deployment; cancel in-progress runs on new pushes.
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
 jobs:
+  # Quality gate: lint + format + type-check + tests. Build only runs if these pass.
   code_quality:
     uses: ./.github/workflows/code-standards-checks.yml
 
   unit-tests:
     uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: [code_quality, unit-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛫 Checkout code
+        uses: actions/checkout@v4
+
+      - name: "📦 Install pnpm"
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.1
+
+      - name: "🔧 Setup Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: 📦 Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: 🚀 Build the project
+        run: pnpm build
+
+      - name: 📤 Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -9,9 +9,9 @@ description: "About Java Guru and the author Phạm Thanh Hưng (Harry) — a fu
 
 Hi! I'm **Harry (Hưng)** — part engineer, part "why is this not automated yet" machine.
 
-I'm **AI-driven**: not in the "I let the robot write my code" way (mostly), but in the "what if this whole workflow just… did itself?" way. I like building things, but I *love* optimizing them — if a process takes three clicks, I've already imagined the one-click version and resented the extra two. I'm equal parts **creative and logical**: I'll whiteboard a wild idea at 9pm and have a boring, sane architecture for it by 9:05. **Open-minded** enough to try your stack, **pragmatic** enough to ship the simple one first.
+I'm **AI-driven**: not in the "I let the robot write my code" way (mostly), but in the "what if this whole workflow just… did itself?" way. I like building things, but I _love_ optimizing them — if a process takes three clicks, I've already imagined the one-click version and resented the extra two. I'm equal parts **creative and logical**: I'll whiteboard a wild idea at 9pm and have a boring, sane architecture for it by 9:05. **Open-minded** enough to try your stack, **pragmatic** enough to ship the simple one first.
 
-Professionally I build backend systems with **Java** and **Spring Boot** — focused on scalability, reliability, and *not* accidentally dropping production databases. But I also take features from the database all the way to the pixel, so the frontend isn't a mystery to me — just a place I visit on purpose.
+Professionally I build backend systems with **Java** and **Spring Boot** — focused on scalability, reliability, and _not_ accidentally dropping production databases. But I also take features from the database all the way to the pixel, so the frontend isn't a mystery to me — just a place I visit on purpose.
 
 ### What I Do
 
