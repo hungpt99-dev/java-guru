@@ -59,7 +59,7 @@ Mục tiêu: giúp backend developer hiểu bản chất vấn đề, viết cod
 
 ## Hiring & hợp tác
 
-Mình **đang tìm việc** và dễ hợp tác — vị trí fullstack / backend (toàn thời gian hoặc hợp đồng). Java là thế mạnh nhất, nhưng mình cũng dùng được .NET và Python. Sẵn sàng ghép cặp làm hệ thống backend, tool open-source, hoặc MVP. Luôn chào đón người đóng góp và tester.
+Mình dễ hợp tác — sẵn sàng ghép cặp làm hệ thống backend, tool open-source, hoặc MVP. Luôn chào đón người đóng góp và tester.
 
 ## Liên hệ
 

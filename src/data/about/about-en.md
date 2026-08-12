@@ -59,7 +59,7 @@ The goal: help backend developers understand problems deeply, write better code,
 
 ## Hiring & collaboration
 
-I'm **open to work** and easy to build with — fullstack / backend roles (full-time or contract). Java is my deepest, but I'm comfortable in .NET and Python too. Happy to pair on backend systems, open-source tools, or MVPs. Contributors and testers always welcome.
+I'm easy to build with — happy to pair on backend systems, open-source tools, or MVPs. Contributors and testers always welcome.
 
 ## Contact
 
