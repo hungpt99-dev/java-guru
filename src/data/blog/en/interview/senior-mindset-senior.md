@@ -17,6 +17,67 @@ Think of it as the difference between a line cook who can follow a recipe and th
 
 > Mindset: recite a framework and you're mid-level. Walk through a tradeoff with real numbers, a production failure mode, and an honest "I'd measure before I'd commit," and you've earned the senior checkbox. Every section ends with the drill an interviewer actually runs.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: Why do behavioral interviews exist — what are they really testing?**
+  A: Not whether you're "nice," but whether you can own ambiguity, communicate trade-offs, and make the people around you better. The technical loop proves you _can_ do the work; the behavioral loop decides if you're safe to point at production at 2 a.m.
+
+- **Q: What's the difference between a junior and a senior mindset in one line?**
+  A: A junior is handed a task and executes it. A senior is handed a _problem_ and owns the outcome — they question the premise, scope the risk, and communicate what they'd trade to hit the deadline.
+
+- **Q: What's a "trade-off" and why do interviewers love the word?**
+  A: Every technical choice has a cost somewhere else (latency vs consistency, speed vs correctness, simplicity vs flexibility). Naming the trade-off proves you understand the system, not just the feature.
+
+- **Q: What does "ownership" mean to you?**
+  A: It means the work isn't done when the code merges — it's done when it's correct in production and the next person can operate it. You write the runbook, you watch the dashboards, you answer the 2 a.m. page.
+
+- **Q: Why is "I don't know" a valid senior answer?**
+  A: Because a senior who guesses and commits is more dangerous than one who says "I'd measure before I'd decide." Honest uncertainty with a plan to resolve it beats confident bluffing that ships a bug.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: Tell me about a time you made a mistake. (The classic.)**
+  A: Pick a real one with a clear arc: what happened → what you missed → what you changed (monitoring, a test, a process). The trap is blaming a teammate or describing a mistake with no lesson. The senior tell is the _system_ fix, not "I was more careful."
+
+- **Q: How do you push back on a deadline you think is unrealistic?**
+  A: With data, not emotion: here's the scope, here's the risk if we cut the test, here are three options (ship partial / slip date / add a person). Offer the trade-off and let the business choose — don't just say "no" or silently miss it.
+
+- **Q: How do you handle a junior who keeps breaking the build?**
+  A: Not by shaming. Pair once, add a pre-push check or a CI gate they can't bypass, and make the failure cheap and local. The senior move is fixing the _system_ (the guardrail), not the _person_.
+
+- **Q: "Walk me through a hard decision you made." What makes a good answer?**
+  A: A real decision with a real cost — you picked X, accepted Y as the downside, and stated the metric you'd watch to know if you were wrong. Vague "I decided to refactor" stories with no downside named read as mid-level.
+
+- **Q: How do you communicate bad news (an outage, a slipped date) to non-engineers?**
+  A: Directly, early, with the impact and the plan — not jargon, not hiding. "Search is degraded for ~5% of users, we've isolated it to the indexer, ETA 30 min, here's the customer-facing message." Calm and specific beats "we're working on it."
+
+### Senior — design & defense
+
+- **Q: Your team is stuck between "ship Friday" and "do it right." You're the senior — what do you actually do?**
+  A: Refuse the false binary. Slice the work: ship the safe 80% Friday, flag the risky 20% as a tracked follow-up with an owner and a date, and be explicit about the debt you're taking on. The decision is documented, not whispered. Name the metric that would make you refuse to ship.
+
+- **Q: Two seniors disagree on architecture in front of the team. How do you handle it?**
+  A: Make it a decision, not a debate: each states the trade-off, you time-box the argument, and you decide (or escalate with a clear recommendation). A team that watches leaders argue indefinitely learns that consensus is optional and ships nothing. The senior owns the call and explains the _reason_, not just the verdict.
+
+- **Q: You inherited an on-call rotation where everyone is burned out. Fix it.**
+  A: Treat it as a systems problem: are the pages real or noisy? Add alert tuning + runbooks so 2 a.m. pages are actionable. Share the load, cap consecutive shifts, and — most importantly — fix the top-repeat offender so the volume drops. Burnout is usually a _signal of a bad system_, not weak engineers.
+
+- **Q: "Tell me about a time you leveled up a teammate." Prove it.**
+  A: A concrete story: you saw a gap (they feared the deploy process), you paired/shadowed/rote a runbook, and six weeks later they owned it solo. The senior bar isn't "I'm smart" — it's "the people around me got better because of how I worked."
+
+- **Q: A stakeholder asks for a feature that's a bad idea. What do you say?**
+  A: "Here's what I'd build instead and why — the risk I see in the original ask is X, with this number behind it. If you still want the original, I'll build it, but I want you to see the trade-off first." You respect the decision while making the cost visible. That's senior, not subservient.
+
+#### Self-check
+
+- [ ] Junior: why behavioral exists, junior vs senior in one line, what a trade-off is, what ownership means, why "I don't know" is valid.
+- [ ] Mid: a real mistake-with-arc, how to push back with data, fixing the build-breaker via guardrails, a hard-decision story with a downside, communicating bad news clearly.
+- [ ] Senior: refuse the ship-vs-right binary with a slice, resolve a leadership disagreement as a decision, fix on-call burnout as a system, prove you leveled up someone, surface a bad-idea trade-off respectfully.
+
 ## 1. Narrate trade-offs — the shape of a senior answer
 
 A senior doesn't answer "which is better?" with a name. They say: _"it depends — here are the trade-offs, and given X I'd pick Y because…"_ That sentence is the entire interview distilled. The interviewer is not grading your pick; they're grading the _shape_: do you know what each option costs, and can you tie the choice to a concrete constraint?

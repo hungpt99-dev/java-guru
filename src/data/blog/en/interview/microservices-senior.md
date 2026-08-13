@@ -15,6 +15,67 @@ Microservices interviews test judgment more than knowledge. The most senior answ
 
 > Mindset: a junior lists patterns; a senior narrates failure modes. When you answer with a number, a postmortem, or "here's the tradeoff and when I'd flip it," you've cleared the bar.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: What's the difference between a monolith and microservices?**
+  A: A monolith is one deployable handling all domains; microservices are independently deployable services split by business capability, each with its own data. The tradeoff is team autonomy + independent scaling vs distributed complexity.
+
+- **Q: What is the single most important rule about service databases?**
+  A: Each service owns its data and exposes it only through its API — no shared database. Shared DBs quietly couple services and turn a "micro" architecture into a distributed monolith.
+
+- **Q: What's an API gateway for?**
+  A: It's the front door: routing, auth, rate limiting, and aggregation in one place, so individual services don't each reimplement cross-cutting concerns. (Though over-centralizing logic in the gateway is its own trap.)
+
+- **Q: What's service discovery?**
+  A: How services find each other's network locations at runtime (registry like Consul/Eureka, or DNS-based). Without it, you hardcode addresses and can't scale or relocate instances.
+
+- **Q: Synchronous vs asynchronous communication — what's the difference?**
+  A: Sync (HTTP/gRPC) waits for a response; the caller is blocked. Async (message/event) fires and moves on; the consumer processes later. Async decouples and absorbs spikes, but adds eventual-consistency reasoning.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: What is a distributed transaction and why is 2PC usually rejected?**
+  A: 2PC (two-phase commit) tries to make a cross-service write atomic, but it holds locks across services and fails badly under partial failure — the classic "distributed transaction is a latency and availability bomb." The senior answer is SAGA + outbox + eventual consistency.
+
+- **Q: What's the SAGA pattern and when do you use it?**
+  A: A SAGA is a sequence of local transactions, each with a compensating action to undo the previous step on failure. Use it when you must keep multiple services consistent without 2PC. Tradeoff: you accept _eventual_ consistency and must handle compensations and out-of-order events.
+
+- **Q: What's the outbox pattern and why do you need it?**
+  A: Write the business change and the event to publish in the _same_ local DB transaction (an "outbox" table), then a relay publishes the event. It solves the dual-write problem (DB committed, but the message broker call failed → lost event, or vice versa → duplicate). The relay makes the event eventually consistent.
+
+- **Q: What's the circuit breaker, and what are its states?**
+  A: It wraps a failing downstream call and trips open after a threshold of errors, failing fast instead of piling up threads. States: closed → open (reject) → half-open (probe one call). Without it, one slow dependency cascades into a full outage (the "all my dependencies are healthy but I'm down" incident).
+
+- **Q: What's a distributed monolith and how do you recognize it?**
+  A: Services that can't be deployed or scaled independently because they share a DB, call each other synchronously in request paths, or block on each other's deploys. Tell: you can't ship one service without coordinating a release train. The cure is real bounded contexts + async where possible, not more boxes.
+
+### Senior — design & defense
+
+- **Q: "Design a microservice." What's the most senior first sentence?**
+  A: Often "don't, yet" — or "which slice of the monolith do we carve first, and how do we keep shipping during the carve?" Nobody gets points for drawing boxes. The senior move is sequencing the extraction so each step is independently deployable and rollback-safe.
+
+- **Q: A downstream payment service is slow and now YOUR service is timing out and OOMing. Walk the incident.**
+  A: No timeout + no circuit breaker → your threads block on the slow call, the pool fills, requests queue, the heap fills with waiting contexts → cascade. Fix: per-call deadline (`tryLock`/HTTP timeout), circuit breaker to fail fast, bulkheads so one dependency can't consume all threads, and backpressure. Name the exact knob.
+
+- **Q: You need cross-service consistency for "reserve seat + charge card." Design it without 2PC.**
+  A: SAGA: reserve seat (local txn + event) → charge card (local txn + event) → if charge fails, compensate by releasing the seat. Outbox on each step so events are reliable. Idempotent handlers (events can redeliver). State the consistency window and what the user sees during it.
+
+- **Q: How do you keep a rolling deploy safe when services depend on each other's new APIs?**
+  A: Backward-compatible changes first (add, don't break), consumer-tolerant parsing, and contract tests in CI. Deploy the _provider_'s compatible change, then the _consumer_'s new call. Blue-green or canary so a bad deploy affects a slice, not everyone. DB migrations are forward/backward compatible (additive columns, no destructive rename until unused).
+
+- **Q: When would you deliberately NOT split a service?**
+  A: When the cost of the distributed system (network, consistency, ops, tracing) outweighs the benefit — a cohesive domain that changes together should stay one deployable. Splitting for "scalability" a service that's CPU-light is a fake win that multiplies failure modes. Judgment > dogma.
+
+#### Self-check
+
+- [ ] Junior: monolith vs microservices, database-per-service, what a gateway/discovery is, sync vs async.
+- [ ] Mid: why 2PC is rejected, SAGA + compensation, the outbox pattern, circuit-breaker states, recognize a distributed monolith.
+- [ ] Senior: "don't, yet" as the first answer, narrate a cascade incident with the exact fix, design a SAGA for a real flow, safe rolling-deploy sequencing, argue when NOT to split.
+
 ## 1. The distributed-monolith trap
 
 Premature decomposition gives you **network calls instead of method calls**, distributed transactions, and 10× operational cost with none of the benefit. Every monolith you split pays an upfront tax: the network. A same-DC HTTP round trip is **~0.1–0.5 ms**; an in-process method call is **~1 ns**. You are voluntarily moving 2–3 orders of magnitude slower and calling it architecture.

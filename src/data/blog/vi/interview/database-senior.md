@@ -15,6 +15,67 @@ Database là tầng quyết định hệ thống có scale được thật hay k
 
 > Tư duy: nhả thuật ngữ thì bạn chỉ ở tầm mid-level. Đi qua một tradeoff bằng số thật và một failure mode trong production thì bạn chạm nốt "senior". Mỗi phần dưới đây đều kết bằng bài tập phỏng vấn viên thực sự hay chạy.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: Khác nhau giữa clustered và non-clustered index?**
+  A: Clustered index _chính là_ bảng — các row được lưu theo thứ tự của nó (ở InnoDB là `PRIMARY KEY`), nên mỗi bảng chỉ có đúng một cái; lookup theo PK là một lần đi qua B-tree tới row. Non-clustered (secondary) index là một B-tree riêng, lá của nó trỏ về clustered key, nên một lookup qua secondary index mất hai bước: index → clustered key → row.
+
+- **Q: Kể tên bốn mức cô lập transaction (isolation level).**
+  A: Read uncommitted, read committed, repeatable read, serializable — tăng dần độ nghiêm ngặt. Chúng đánh đổi concurrency lấy việc ngăn anomaly.
+
+- **Q: Primary key làm được gì mà unique constraint không làm?**
+  A: PK là clustered key (InnoDB) — nó định nghĩa thứ tự vật lý của row và vừa non-null vừa unique. Unique constraint chỉ là một lời hứa non-clustered về tính duy nhất; bạn có thể có nhiều cái.
+
+- **Q: Foreign key là gì, và `ON DELETE CASCADE` làm gì?**
+  A: FK ràng buộc một cột phải tồn tại ở cột được tham chiếu của bảng khác. `CASCADE` khi xoá parent sẽ xoá (hoặc set null với `SET NULL`) các row con — tiện, nhưng một vụ mass delete có thể khoá / cascade nặng hơn bạn tưởng.
+
+- **Q: Tại sao `SELECT *` lại tệ?**
+  A: Nó kéo mọi cột (nhiều I/O, nhiều network), phá việc covering index (index không tự thoả mãn query được), và gãy khi thêm/bớt cột. Hãy gọi tên từng cột bạn cần.
+
+### Mid — tradeoff & bẫy
+
+- **Q: Tại sao `WHERE YEAR(created_at) = 2026` lại full scan dù `created_at` có index?**
+  A: Hàm trên cột che giấu nó khỏi B-tree, nên optimizer không seek theo range được — nó scan từng row, áp hàm, lọc. Viết lại thành range trên cột gốc: `created_at >= '2026-01-01' AND created_at < '2027-01-01'`. Cùng bẫy: `LIKE '%x%'`, phép toán trên cột, ép kiểu ngầm.
+
+- **Q: Khi nào composite index có ích, và quy tắc cột dẫn đầu là gì?**
+  A: Composite index phục vụ các query lọc trên _tiền tố_ của các cột, từ trái sang phải (leftmost-prefix rule). `(a, b, c)` giúp `WHERE a=?`, `(a,b)=?`, `(a,b,c)=?` nhưng KHÔNG giúp `WHERE b=?`. Đặt cột chọn lọc nhất / hay dùng nhất ở equality lên đầu, nhưng cũng cân nhắc cột có lợi cho predicate.
+
+- **Q: N+1 query là gì và bạn giết nó thế nào?**
+  A: Bạn lấy N parent, rồi một query riêng cho mỗi parent để lấy con = N+1 round trip. Sửa: một `JOIN`/`IN` batch, hoặc `@BatchSize`/`fetch join` trong ORM. Dấu hiệu: latency không bao giờ lộ trong một slow-query log vì mỗi call chỉ ~1 ms.
+
+- **Q: Tại sao pool 2000 connection lại tệ hơn pool 50 connection?**
+  A: Connection là tài nguyên _có hạn_ mà DB phải schedule. Vượt `max_connections` của DB thì mọi request mới đều timeout; nhiều connection hơn cũng nghĩa là nhiều context-switch và lock contention hơn ở phía DB. Chọn size bằng Little's law (`TPS × avg_query_time`), không phải bằng core count của máy.
+
+- **Q: Read committed vs repeatable read — anomaly nào mỗi cái vẫn cho phép?**
+  A: Read committed vẫn cho phép _non-repeatable read_ (cùng một row khác nhau giữa hai lần đọc trong một txn). Repeatable read vẫn cho phép _phantom read_ (một range query trả về các row khác nhau). Serializable chặn cả hai — với giá là concurrency (thường qua range lock / SSI).
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: Chọn size connection pool cho service 1,000 req/s với 20 ms avg query time. Giờ nếu 10% call mất 5 s thì sao?**
+  A: `1000 × 0.02s = 20` connection là con số steady-state; `cores × 10` là heuristic khởi điểm tốt và HikariCP mặc định là 10. Nhưng 10% call 5 s cần `1000 × 0.1 × 5 = 500` connection _nếu_ mỗi call chậm giữ một cái — nghĩa là vài query chậm có thể cạn pool và làm nghẽn 90% đường nhanh. Cách của senior là một pool _riêng_ có bound (hoặc timeout + circuit breaker) cho đường chậm để nó không thể làm đói đường nhanh.
+
+- **Q: "Index làm mọi thứ nhanh hơn." Bảo vệ hay phản bác — kèm chi phí phía write.**
+  A: Phản bác. Mọi index đều được duy trì trên mỗi `INSERT`/`UPDATE`/`DELETE`: thêm nhiều lần đi B-tree, thêm page split, thêm WAL. Một bảng write-heavy với 8 index trả thuế duy trì gấp 8 lần và insert chậm hơn. Cách phòng thủ: index cho những query bạn thật sự chạy; drop các index vô dụng; cân nhắc read replica cho mấy truy vấn analytical nặng.
+
+- **Q: Báo cáo nói "DB trung bình 0.1 ms nhưng app mất 800 ms." Bạn nhìn đâu trước?**
+  A: Cái _pool_, không phải DB. Nếu cả thread pool và connection pool đều xếp hàng, request đợi đến lượt lấy connection trong khi DB thì rỗi. Kiểm tra pool saturation, `connectionTimeout`, và xem `wait` time có áp đảo `query` time không. Sửa thường không phải "to hơn DB".
+
+- **Q: Đi qua một phantom read xuất hiện trong production và bạn đóng nó thế nào.**
+  A: Một batch xử lý "tất cả order chưa trả", một txn khác insert một order chưa trả mới cùng range giữa chừng → batch lọt nó (hoặc đếm trùng khi retry). Phòng thủ: `REPEATABLE READ`/`SERIALIZABLE` với range lock, hoặc `SELECT … FOR UPDATE SKIP LOCKED` để claim row nguyên tử nên các worker concurrent không đụng nhau. Nêu rõ isolation level và loại lock.
+
+- **Q: Bạn cần thêm index cho bảng 2 tỉ row mà zero downtime. Làm sao?**
+  A: Dùng online/DDL tool (`CREATE INDEX CONCURRENTLY` ở Postgres; InnoDB online DDL với `ALGORITHM=INPLACE, LOCK=NONE`) build index mà không block write — nhưng vẫn tăng tải và có thể mất hàng tiếng ở scale lớn; làm trong maintenance window, monitor replication lag, và có rollback. Đừng bao giờ `LOCK=TABLE` trên bảng nóng.
+
+#### Tự kiểm tra
+
+- [ ] Junior: giải thích clustered vs non-clustered, 4 isolation level, PK vs unique, FK cascade, tại sao `SELECT *` tệ.
+- [ ] Mid: viết lại predicate hàm-trên-cột thành range, nêu leftmost-prefix rule, giết N+1, chọn size pool bằng Little's law, kể anomaly mỗi isolation level vẫn cho phép.
+- [ ] Senior: bảo vệ connection-pool sizing dưới đuôi slow-query, định lượng chi phí index phía write, trace một vụ phantom-read, và thêm index 2B-row online không downtime.
+
 ## 1. Indexing — nơi phỏng vấn hay "chết"
 
 "Thêm index" là câu trả lời của người mới. Câu trả lời của senior giải thích vì sao cây index cao ba hay bốn tầng B-tree, cột nào đứng trước cột nào, vì sao optimizer vẫn ngoảnh mặt làm ngơ, và một index "hot" tốn bạn bao nhiêu trên mỗi lần ghi bạn không hề lên kế hoạch.

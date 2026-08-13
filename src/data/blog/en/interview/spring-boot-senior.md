@@ -15,6 +15,67 @@ Most senior Java backend roles are Spring Boot roles. Interviewers expect you to
 
 > Mindset: name the annotation and you're mid-level. Walk through the proxy internals with a production failure mode and the numbers, and you've cleared the bar. Every section below ends with the drill an interviewer actually runs.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: What is IoC / DI, in plain words?**
+  A: Inversion of Control means the framework creates and wires your objects instead of you `new`-ing them. Dependency Injection is the mechanism — dependencies are passed in (constructor) rather than fetched. The container owns the lifecycle; you declare what you need.
+
+- **Q: What's the difference between `@Component`, `@Service`, `@Repository`, `@Controller`?**
+  A: They're all stereotypes that register a bean; the specific one is semantic + adds behavior (`@Repository` translates JDBC exceptions to Spring's `DataAccessException`). Use the right one so the intent is clear and AOP applies correctly.
+
+- **Q: What is `@Autowired` and what's the modern alternative?**
+  A: `@Autowired` injects a bean by type (field/setter/constructor). The modern default is **constructor injection** (no annotation needed on a single-constructor class) — it's testable, immutable, and fails fast at startup if a dependency is missing.
+
+- **Q: What does `@SpringBootApplication` do?**
+  A: It's three annotations in one: `@Configuration` (beans), `@EnableAutoConfiguration` (magic defaults from the classpath), and `@ComponentScan` (find beans in the package tree). That's why dropping a starter on the classpath turns on a feature.
+
+- **Q: What's the difference between `@RequestParam` and `@PathVariable`?**
+  A: `@RequestParam` binds a query param (`?id=5`); `@PathVariable` binds part of the URL path (`/users/5`). Mixing them up is a common junior bug — and `@PathVariable` is how you build REST resource URLs.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: Why does `@Transactional` silently not work on a self-invocation?**
+  A: The transaction advice is a _proxy_ around the bean; an internal `this.method()` call bypasses the proxy, so no transaction starts. Fix: move the method to another bean, or inject a self-proxy (`AopContext`) — but the real fix is structure, not tricks. This is the #1 "why isn't my rollback happening" bug.
+
+- **Q: Explain the bean lifecycle in two sentences an interviewer believes.**
+  A: Instantiate → populate dependencies (inject) → run `BeanPostProcessor`s (e.g. `@PostConstruct`, the ones that apply AOP proxies) → ready. The "two kinds of post-processors" are the key: some configure beans, some wrap them in proxies — and AOP only works because the proxy is applied at that step.
+
+- **Q: What's the difference between `@Transactional(propagation=...)` settings people actually need?**
+  A: `REQUIRED` (join or create — the default), `REQUIRES_NEW` (always a new txn, suspends the outer — use for audit logs that must survive the outer rollback), and `NOT_SUPPORTED` (run without a txn). The trap: `REQUIRES_NEW` for an inner call that _should_ roll back with the outer silently commits.
+
+- **Q: Why is field injection (`@Autowired` on a field) frowned upon?**
+  A: It's untestable (you can't pass a mock without reflection), mutable (the field can be reassigned), and hides required dependencies. Constructor injection makes the contract explicit and the object valid from construction — immutability by default.
+
+- **Q: What's the difference between `@Controller` and `@RestController`?**
+  A: `@Controller` returns a view name (server-rendered); `@RestController` is `@Controller` + `@ResponseBody` — it serializes the return value (JSON) straight to the body. For an API, `@RestController` is the day-to-day choice.
+
+### Senior — design & defense
+
+- **Q: A transaction held a DB connection while it called a slow partner API — the pool emptied and the whole service fell over. Walk it.**
+  A: `@Transactional` by default wraps the _entire_ method, including the HTTP call, so the connection is pinned for the partner's latency. Fix: keep the transaction tight — load data, commit, _then_ call the API (or do it in a separate, non-transactional method). Size the pool by `rps × hold_time` and isolate the slow call on its own pool with a deadline.
+
+- **Q: Auto-configuration "magically" turned on something you didn't want. How do you find and disable it?**
+  A: `spring-autoconfigure-metadata` + `Condition`s decide what's on; `spring.autoconfigure.exclude` disables a specific one, and `@ConditionalOnMissingBean` is why your own bean overrides the default. The senior move is to read the starter's auto-config class, not to guess — and to prefer explicit config for anything security-sensitive.
+
+- **Q: You have 200 `@Bean` methods and startup is 40 s. How do you cut it?**
+  A: Lazy initialization (`spring.main.lazy-initialization=true`) defers bean creation until first use; component-scan scopes kept tight; and look for beans doing I/O at construction (a connection tested in a `@PostConstruct` is a startup tax). Be honest: 40 s might be acceptable for a monolith — measure before optimizing.
+
+- **Q: `@Async` methods aren't running async. Why, and the fix?**
+  A: `@Async` needs a proxy _and_ an `@EnableAsync` config with a task executor; a self-invocation bypasses the proxy (same trap as `@Transactional`), and the default executor is a single-thread `SimpleAsyncTaskExecutor` (not pooled — it spawns a thread per call). Fix: enable it, inject a real `ThreadPoolTaskExecutor`, and call from another bean.
+
+- **Q: Design a `@RestController` for a money transfer — what cross-cutting concerns do you NOT skip?**
+  A: Idempotency key (duplicate POST = one transfer), input validation (`@Valid`), authorization (is this user allowed?), a transaction boundary that does _not_ include the notification call, structured logging with a trace id, and a clear error contract. The senior tell: the endpoint is mostly guardrails around a tiny business core.
+
+#### Self-check
+
+- [ ] Junior: IoC/DI in plain words, the stereotype annotations, `@Autowired` vs constructor injection, what `@SpringBootApplication` does, `@RequestParam` vs `@PathVariable`.
+- [ ] Mid: why self-invocation breaks `@Transactional`, the two post-processor phases, propagation settings that bite, why field injection is bad, `@Controller` vs `@RestController`.
+- [ ] Senior: narrate the transaction-holds-connection incident + fix, disable unwanted auto-config by reading it, cut startup time with measurement, fix `@Async` not running, list the guardrails a money-transfer endpoint needs.
+
 ## 1. IoC and DI — the container is a contract, not a drawer
 
 Inversion of Control is _who owns `new`_. Dependency Injection is _how the wiring gets delivered_. Together they answer "who constructs this object and when" — the container owns the graph, you declare dependencies, it satisfies them. The depth lives in the two decisions that fall out: how you accept a dependency, and what you hand to a bean that outlives its scope.

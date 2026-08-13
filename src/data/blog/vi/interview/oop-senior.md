@@ -15,6 +15,67 @@ Lập trình hướng đối tượng là chiếc vé vào cửa. Junior đọc 
 
 > Tư duy: khi phỏng vấn viên nói "team của anh cần một tính năng mới," câu trả lời senior không bao giờ là "thêm một nhánh `if`." Nó là "trục thay đổi này nằm ở đâu — và tôi dựng thứ gì mà mai tôi không phải sửa?" Định nghĩa thì qua cửa junior; **quyết định dưới ràng buộc** mới qua vạch senior.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: Mỗi chữ cái SOLID nghĩa là gì?**
+  A: S — Single Responsibility, O — Open/Closed, L — Liskov Substitution, I — Interface Segregation, D — Dependency Inversion. Junior đọc thuộc; senior chỉ được chỗ code vi phạm một cái và cái giá sửa nó.
+
+- **Q: Khác nhau giữa interface và abstract class?**
+  A: Interface là một hợp đồng thuần túy (không state, đa kế thừa); abstract class giữ được state và cung cấp implementation một phần (đơn kế thừa). Dùng interface để định nghĩa một vai trò; abstract class để share code giữa anh em gần nhau.
+
+- **Q: Khác nhau giữa inheritance và composition?**
+  A: Inheritance = "is-a" (share implementation của parent); composition = "has-a" (giữ một instance và delegate). Composition thường được ưu tiên vì linh hoạt và ít coupled hơn.
+
+- **Q: Polymorphism trong một câu?**
+  A: Một interface, nhiều implementation — caller viết against abstraction và runtime chọn behavior cụ thể (method override, hoặc interface dispatch).
+
+- **Q: Bốn trụ cột OOP lại — và `private` thuộc về cái nào?**
+  A: Encapsulation, abstraction, inheritance, polymorphism. `private`/`protected` là encapsulation — giấu state sau một mặt điều khiển để thay đổi nằm local.
+
+### Mid — tradeoff & bẫy
+
+- **Q: Tại sao "favor composition over inheritance" hơn một khẩu hiệu?**
+  A: Inheritance coupling bạn vào implementation của parent và gãy khi requirement cross-cut (một class cần hai behavior từ hai parent — nhưng Java chỉ đơn kế thừa). Composition cho bạn swap behavior lúc runtime qua dependency inject. Bẫy: một cây kế thừa sâu nơi mỗi thay đổi lan cả lên lẫn xuống.
+
+- **Q: Nêu một Open/Closed violation cụ thể và cách sửa.**
+  A: Một `InvoiceCalculator` với `if (type == PDF) … else if (type == XLSX)` — mỗi format mới lại sửa class (không đóng cho modification). Sửa: một interface `Renderer` + một class mỗi format, chọn bằng một map. Thêm format giờ là thêm class, không sửa code cũ.
+
+- **Q: Liskov violation người ta thực sự ship là gì?**
+  A: Một subclass tăng cường precondition hoặc yếu đi postcondition — vd `Square extends Rectangle` nhưng `setWidth` cũng phải set height, phá contract rectangle caller依赖. Sửa thường là "đừng ép IS-A" — model chúng như sibling dưới một abstraction chung.
+
+- **Q: "Fat interface" có vấn đề gì, sửa thế nào?**
+  A: Một interface 12 method ép mọi implementer stub behavior nó không cần (cái `RemoteControl` có `startCar` trên `ToyCar`). Sửa: tách thành role interface (`Printable`, `Scannable`) để client chỉ dependency thứ nó dùng — Interface Segregation.
+
+- **Q: Dependency Inversion — khác gì "depend on abstractions"?**
+  A: DIP nói module cao không nên dependency module thấp; cả hai dependency abstraction, và binding xảy ra ở rìa (constructor injection). Lợi: bạn swap repo Postgres thành in-memory trong test mà không động service. Thiếu nó, business logic hàn chết vào DB driver.
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: "Thêm CSV export cho report." Code đi đâu, và gì bạn từ chối làm?**
+  A: Từ chối cái `if/else` trong class cũ (phạm OCP). Thêm interface `ReportExporter`, implementation `CsvExporter`, register nó, rồi inject/select by format. Dấu hiệu senior: tôi biết _trục thay đổi_ này là gì (output format) và cô lập nó để format sau là additive, không xâm lấn.
+
+- **Q: Bạn kế thừa một cây kế thừa 6 tầng không ai hiểu. Làm gì — viết lại hay để đó?**
+  A: Đừng viết lại ngày một. Đầu tiên, characterize behavior bằng characterization test để refactor không break ngầm. Rồi flatten dần phần rủi ro thành composition, sau các test đó, từng subclass một. Big-bang rewrite code đang chạy là cách bạn tạo ra một incident tệ hơn.
+
+- **Q: Khi nào inheritance thực sự đúng hơn composition?**
+  A: Khi có một "is-a" thực sự với implementation shared _không_ phân kỳ — vd `BaseEntity` với id/version/audit field, hoặc Template Method mà skeleton ổn định và chỉ các bước thay đổi. Tha thứ coupling vì abstraction ổn định. Nêu trường hợp composition sẽ thành ceremony.
+
+- **Q: Bảo vệ "interface cho mọi dependency" — và đâu nó thành cargo-cult.**
+  A: Một interface mỗi dependency tuyệt vời khi có hai implementation hoặc bạn test against một fake. Nó thành cargo-cult khi một class có một caller và zero alternate implementation — bạn thêm một lớp indirection vô ích. Judgment senior: introduce seam khi implementation thứ hai (hoặc test) thực sự xuất hiện, không phải phòng trước.
+
+- **Q: Đi qua một thiết kế "follow SOLID" nhưng kinh khủng khi làm việc.**
+  A: Một `UserService` bị xé thành 14 class nhỏ sau 14 interface — mỗi thay đổi động 6 file, và các "abstraction" chỉ có một implementation (ceremony, không phải engineering). Bài học: SOLID phục vụ changeability và testability, không phải số lượng file. Tôi sẽ collapse các single-impl interface và giữ chỉ những seam thực sự đáng.
+
+#### Tự kiểm tra
+
+- [ ] Junior: chữ cái SOLID, interface vs abstract class, inheritance vs composition, polymorphism, `private` thuộc về đâu.
+- [ ] Mid: vì sao composition-over-inheritance, một OCP violation thật + sửa, một LSP break đã ship, sửa fat-interface, DIP vs "depend on abstractions".
+- [ ] Senior: code mới đi đâu không phạm OCP, refactor an toàn một cây sâu, khi nào inheritance đúng, interface-cargo-cult, postmortem một thiết kế SOLID-mà-awful.
+
 ## 1. SOLID — bản áp dụng thực tế, và các cái bẫy
 
 "Nêu định nghĩa SOLID" chỉ là màn sàng lọc junior. Senior thì bị hỏi cách **áp dụng**, rồi bị ép bảo vệ những chỗ mà áp dụng theo sách vở là sai. Đi qua cả năm, nhưng hãy sẵn sàng đào sâu ba cái thực sự cắn trên production: Open/Closed, Dependency Inversion, và Liskov.

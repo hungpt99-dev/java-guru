@@ -15,6 +15,67 @@ Junior biết cú pháp Java. Senior biết **JVM đang làm gì, tại sao nó 
 
 > Tư duy: "tùy thuộc, và đây là đánh đổi" đánh bại đọc thuộc lòng mọi lúc. Khoảnh khắc bạn trả lời bằng một trade-off, một con số, hay một câu chuyện postmortem thay vì một định nghĩa — bạn đã qua vạch.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: Khác nhau giữa `==` và `.equals()` trong Java?**
+  A: `==` so sánh tham chiếu (có phải cùng một object); `.equals()` so sánh _giá trị_ (có thể override). Và `Integer.valueOf` cache từ -128..127, nên `==` trên Integer "chạy" trong khoảng đó rồi cắn ở 128 — bug qua hết test rồi chết trên prod.
+
+- **Q: Bốn trụ cột của OOP là gì?**
+  A: Encapsulation, abstraction, inheritance, polymorphism — nhưng senior phải nói được _tại sao_ mỗi cái tồn tại (vd encapsulation giới hạn bán kính chấn động của thay đổi), không chỉ nhắc từ.
+
+- **Q: Khác nhau giữa `ArrayList` và `LinkedList`?**
+  A: `ArrayList` là mảng co giãn — O(1) truy cập ngẫu nhiên, O(n) chèn/xoá ở giữa; `LinkedList` là danh sách liên kết hai chiều — O(1) thêm/xoá ở hai đầu, O(n) truy cập. Mặc định dùng `ArrayList` trừ khi bạn chèn/xoá liên tục ở đầu.
+
+- **Q: `final` lên class / method / biến nghĩa là gì?**
+  A: `final` class = không subclass; `final` method = không override; `final` biến = gán một lần. Một reference `final` vẫn cho phép mutate object nó trỏ tới (reference cố định, không phải state).
+
+- **Q: Khác nhau giữa `String`, `StringBuilder`, và `StringBuffer`?**
+  A: `String` bất biến (mỗi phép nối tạo object mới). `StringBuilder` mutable và không đồng bộ (nhanh, single-thread). `StringBuffer` là bản đồng bộ của nó (chỉ dùng khi chia sẻ giữa nhiều thread). Trong loop, `StringBuilder` tránh bão object `String` vứt đi.
+
+### Mid — tradeoff & bẫy
+
+- **Q: Tại sao double-checked locking gãy nếu thiếu `volatile`?**
+  A: Lệnh read không đồng bộ có thể thấy một singleton _đang xây dựng dở dang_ — store reference có thể nhảy lên trước các write của constructor, nên thread khác thấy reference khác null nhưng object mới làm xong một nửa. `volatile` tạo happens-before từ write-constructor → read, bịt lỗ hổng.
+
+- **Q: `i++` trên một `volatile int` — an toàn không?**
+  A: Không. `volatile` cho visibility + ordering, không cho tính nguyên tử. `i++` là read-modify-write; hai thread có thể cùng đọc 41 và cùng ghi 42. Dùng `AtomicInteger` (một CAS) hoặc `LongAdder` dưới tranh chấp cao (nhanh gấp vài lần nhờ stripe qua các cell).
+
+- **Q: False sharing là gì và sửa thế nào?**
+  A: Hai field độc lập nằm cùng một cache line 64 byte ping-pong qua các core mỗi lần ghi, ngay cả trong code lock-free. Nạn nhân kinh điển là mảng counter `long[]` per-thread. `@Contended` (JEP 142) đệm field ra các line riêng; một coherence miss tốn ~100 ns mỗi lần ping.
+
+- **Q: `synchronized` vs `ReentrantLock` — khi nào dùng cái nào?**
+  A: `synchronized` không tranh chấp gần như miễn phí (update mark-word, ~chục ns); tranh chấp phải park/unpark vào kernel (micro-giây). `ReentrantLock` thêm `tryLock(timeout)`, nhiều `Condition`, và fairness — nhưng bạn phải `unlock()` trong `finally` và ưu tiên `tryLock(2, SECONDS)` để lock kẹt không treo thread.
+
+- **Q: `CompletableFuture.thenApplyAsync` chạy trên pool nào, và gì gãy?**
+  A: Trên `ForkJoinPool.commonPool()` (parallelism = cores−1). Code blocking (JDBC, sleep) bên trong làm đói pool và kẹt mọi thứ phía sau dù box rỗi. Truyền một executor riêng cỡ cho việc blocking (hoặc dùng virtual thread).
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: Một service 2.000 req/s, mỗi cái block ~50 ms trong JDBC. Chọn size thread pool. Giờ 10% mất 5 s — đổi gì?**
+  A: `2000 × 0,05 = 100` worker steady-state (Little's law). Nhưng đuôi 10%-tại-5s cần `2000 × 0,1 × 5 = 1000` worker _nếu_ mỗi call chậm giữ một cái — nên vài query chậm cạn pool và kẹt 90% đường nhanh. Cách của senior: bound pool, dùng `CallerRunsPolicy` tạo backpressure, và cô lập đường chậm trên executor riêng có deadline.
+
+- **Q: Virtual thread giúp khi nào, không khi nào, và gì vẫn pin carrier sau JDK 24?**
+  A: Giúp I/O-bound blocking (hàng triệu HTTP/DB call đồng thời). Không giúp CPU-bound (vẫn N CPU). Sau JEP 491 (JDK 24) `synchronized` không còn pin; pin tồn dư là native frame (JNI/FFM), class loading, và file I/O local trên Linux. `ReentrantLock` không bao giờ pin — `LockSupport.park` unmount virtual thread.
+
+- **Q: Thấy `OutOfMemoryError: Metaspace` sau mỗi redeploy mà không thêm class. Lệnh đầu tiên?**
+  A: `jcmd <pid> VM.native_memory` và `-XX:MaxMetaspaceSize`. Nguyên nhân là classloader leak: thứ gì đó giữ root cái loader cũ (static field, JDBC driver trong `DriverManager`, proxy cache) nên metadata không bao giờ unload. Vài MB mỗi redeploy thành 2 GB sau trăm lần deploy.
+
+- **Q: Một method nóng vẫn chậm sau 10 phút chạy. JIT có thể đang làm gì, và chứng minh thế nào?**
+  A: Tiered compilation (C1→C2) với OSR; nó có thể **megamorphic** (quá nhiều kiểu receiver để inline) hoặc kẹt recompile quá `-XX:CompileThreshold`. Chứng minh bằng `-Xlog:jit+compilation=debug` — bạn sẽ thấy recompilation churn, không phải "cần box to hơn".
+
+- **Q: `SELECT * FROM orders WHERE YEAR(created_at)=2026` chậm dù có index — à đó là SQL. Java analog nào cắn ngang nhiên thế?**
+  A: Gọi một method trong loop làm `findById` mỗi phần tử (N+1), hoặc `computeIfAbsent` đệ quy trên cùng một key (Java 8 deadlock cái bin). Cả hai giấu O(n²) / deadlock sau những loop vô tội — dấu hiệu senior là "nó giấu ở đâu", không phải "có tồn tại không".
+
+#### Tự kiểm tra
+
+- [ ] Junior: `==` vs `.equals`, bốn trụ cột, `ArrayList` vs `LinkedList`, `final`, `String` vs `StringBuilder`.
+- [ ] Mid: sửa DCL bằng `volatile`, vì sao `volatile int++` không an toàn, false sharing + `@Contended`, `synchronized` vs `ReentrantLock`, cái bẫy `commonPool`.
+- [ ] Senior: chọn size pool bằng Little's law dưới đuôi chậm, nêu lúc nào virtual thread giúp/pin, chẩn đoán Metaspace leak, chứng minh lỗi JIT từ log, chỉ mặt N+1 / `computeIfAbsent` phía Java.
+
 ## 1. Heap, GC, và bài toán pause
 
 Họ sẽ hỏi: "Chuyện gì xảy ra khi bạn `new` một object?" Một ứng viên mid dừng ở "nó nằm trên heap." Senior nói về **ở đâu**, **nhanh bao nhiêu**, và **pause đáng giá gì** — vì đó mới là thứ cắn trên production. Mọi câu trong phần này đều có một đáp án bằng số; phỏng vấn viên lắng nghe con số, không phải danh từ.

@@ -17,6 +17,67 @@ Hãy nghĩ tới khác biệt giữa một đầu bếp line cook làm theo côn
 
 > Tư duy: đọc thuộc một framework thì bạn chỉ ở tầm mid-level. Đi qua một trade-off bằng số thật, một failure mode trong production, và một câu "tôi sẽ đo trước khi chốt" trung thực — thì bạn chạm nốt "senior". Mỗi phần dưới đây đều kết bằng bài drill mà phỏng vấn viên thực sự chạy.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: Tại sao có phỏng vấn behavioral — họ thực sự test gì?**
+  A: Không phải bạn có "ngoan" không, mà là bạn có sở hữu sự mơ hồ, giao tiếp trade-off, và khiến người xung quanh tốt hơn không. Vòng kỹ thuật chứng minh bạn _làm được_; vòng behavioral quyết định bạn có an toàn để chỉ tay vào production lúc 2h sáng không.
+
+- **Q: Khác nhau giữa tư duy junior và senior trong một câu?**
+  A: Junior được giao một task và thực thi nó. Senior được giao một _vấn đề_ và sở hữu kết quả — họ chất vấn tiền đề, khoanh vùng rủi ro, và giao tiếp cái họ sẽ đổi để kịp deadline.
+
+- **Q: "Trade-off" là gì và tại sao phỏng vấn viên thích từ đó?**
+  A: Mọi lựa chọn kỹ thuật đều có một cái giá ở chỗ khác (latency vs consistency, tốc độ vs đúng đắn, đơn giản vs linh hoạt). Nêu được trade-off chứng minh bạn hiểu hệ thống, không chỉ tính năng.
+
+- **Q: "Ownership" với bạn nghĩa là gì?**
+  A: Là công việc chưa xong khi code merge — nó xong khi nó đúng trên production và người kế tiếp vận hành được. Bạn viết runbook, canh dashboard, trả lời page lúc 2h sáng.
+
+- **Q: Tại sao "tôi không biết" là một câu trả lời senior hợp lệ?**
+  A: Vì một senior đoán rồi chốt nguy hiểm hơn một senior nói "tôi sẽ đo trước khi quyết." Không chắc chắn trung thực kèm kế hoạch giải quyết đánh bại tự tin giả vờ ship một bug.
+
+### Mid — tradeoff & bẫy
+
+- **Q: Kể về một lần bạn mắc lỗi. (Kinh điển.)**
+  A: Chọn một cái thật có cấu trúc rõ: chuyện gì → bạn bỏ sót gì → bạn đổi gì (monitoring, một test, một process). Bẫy là đổ lỗi teammate hoặc kể một lỗi không bài học. Dấu hiệu senior là sửa ở _hệ thống_, không phải "tôi cẩn thận hơn".
+
+- **Q: Bạn push back một deadline bạn thấy phi thực tế thế nào?**
+  A: Bằng data, không bằng cảm xúc: đây là scope, đây là rủi ro nếu cắt test, đây là ba option (ship partial / lùi date / thêm người). Đưa trade-off để business chọn — đừng chỉ nói "không" hay lặng lẽ trễ.
+
+- **Q: Xử lý một junior liên tục break build thế nào?**
+  A: Không phải chì chiết. Pair một lần, thêm pre-push check hoặc CI gate họ không bypass được, và làm cho failure rẻ và local. Cách của senior là sửa _hệ thống_ (cái guardrail), không phải _con người_.
+
+- **Q: "Đi qua một quyết định khó bạn từng làm." Câu trả lời tốt là gì?**
+  A: Một quyết định thật với một cái giá thật — bạn chọn X, chấp nhận Y là downside, và nêu metric bạn sẽ canh để biết mình sai. Những câu "tôi quyết định refactor" mù mờ không nêu downside đọc như mid-level.
+
+- **Q: Giao tiếp tin xấu (outage, trễ date) với non-engineer thế nào?**
+  A: Trực tiếp, sớm, kèm impact và kế hoạch — không jargon, không giấu. "Search degraded cho ~5% user, chúng tôi cô lập vào indexer, ETA 30 phút, đây là customer-facing message." Bình tĩnh và cụ thể đánh bại "chúng tôi đang xử lý".
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: Team bạn kẹt giữa "ship Thứ Sáu" và "làm cho đúng." Bạn là senior — thực sự làm gì?**
+  A: Từ chối cái nhị phân giả. Cắt việc: ship 80% an toàn Thứ Sáu, flag 20% rủi ro thành follow-up có owner và date, và nói rõ cái debt bạn đang gánh. Quyết định được ghi chép, không thì thầm. Nêu metric mà tại đó bạn sẽ từ chối ship.
+
+- **Q: Hai senior bất đồng kiến trúc trước team. Bạn xử lý sao?**
+  A: Biến nó thành quyết định, không phải tranh luận: mỗi người nêu trade-off, bạn time-box cuộc cãi, và bạn chốt (hoặc escalate kèm recommend rõ). Một team xem leader cãi không hồi kết học được rằng consensus là tùy chọn và chẳng ship gì. Senior sở hữu cú chốt và giải thích _lý do_, không chỉ verdict.
+
+- **Q: Bạn kế thừa một on-call rotation mà ai cũng burn out. Sửa.**
+  A: Coi là bài toán hệ thống: page có thật hay noise? Thêm alert tuning + runbook để page 2h sáng actionable. Share tải, cap ca liên tiếp, và — quan trọng nhất — sửa cái top-repeat offender để volume giảm. Burnout thường là _tín hiệu của hệ thống xấu_, không phải engineer yếu.
+
+- **Q: "Kể về lúc bạn nâng tầm một teammate." Chứng minh.**
+  A: Một câu chuyện cụ thể: bạn thấy một gap (họ sợ quy trình deploy), bạn pair/shadow/viết runbook, và sáu tuần sau họ own nó solo. Bar senior không phải "tôi thông minh" — là "người quanh tôi tốt lên vì cách tôi làm việc".
+
+- **Q: Một stakeholder đòi một tính năng là ý tồi. Bạn nói gì?**
+  A: "Đây là gì tôi sẽ build thay và tại sao — rủi ro tôi thấy ở cái gốc là X, với con số này đằng sau. Nếu bạn vẫn muốn cái gốc, tôi build, nhưng tôi muốn bạn thấy trade-off trước." Bạn tôn trọng quyết định trong khi làm chi phí visible. Đó là senior, không phải phục tùng.
+
+#### Tự kiểm tra
+
+- [ ] Junior: tại sao có behavioral, junior vs senior một câu, trade-off là gì, ownership nghĩa là gì, vì sao "tôi không biết" hợp lệ.
+- [ ] Mid: một lỗi-thật-có-cấu-trúc, push back bằng data, sửa build-breaker qua guardrail, câu chuyện quyết định khó có downside, giao tiếp tin xấu rõ ràng.
+- [ ] Senior: từ chối nhị phân ship-vs-đúng bằng cách cắt, giải quyết bất đồng lãnh đạo thành quyết định, sửa on-call burnout như hệ thống, chứng minh bạn nâng tầm người, surface một ý-tồi trade-off một cách tôn trọng.
+
 ## 1. Narrate trade-off — hình dạng của một câu trả lời senior
 
 Senior không trả lời "cái nào hơn?" bằng một cái tên. Họ nói: _"tùy thuộc — đây là trade-off, và với X tôi chọn Y vì…"_ Câu đó là cả buổi phỏng vấn được cô đặc lại. Phỏng vấn viên không chấm lựa chọn của bạn; họ chấm _hình dạng_: bạn có biết mỗi phương án phải trả giá gì, và có gắn lựa chọn vào một ràng buộc cụ thể không?

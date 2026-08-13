@@ -17,6 +17,67 @@ Junior thuộc lòng ba delivery semantics. Senior kể được chính xác kho
 
 > Tư duy: nhả thuật ngữ thì bạn chỉ ở tầm mid-level. Đi qua một tradeoff bằng số thật và một failure mode trong production thì bạn chạm nốt "senior". Mỗi phần dưới đây đều kết bằng bài tập phỏng vấn viên thực sự hay chạy.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: Ba delivery semantics trong Kafka là gì?**
+  A: At-most-once (có thể mất), at-least-once (có thể trùng), exactly-once (không mất, không trùng). Producer mặc định at-least-once; consumer phải dedupe hoặc làm processing idempotent để tiệm cận exactly-once.
+
+- **Q: Topic, partition, và consumer group là gì?**
+  A: Topic là một log; nó chia thành các partition (mỗi cái là một chuỗi immutable có thứ tự). Consumer group là tập consumer chia sẻ công việc — mỗi partition được tiêu thụ bởi đúng một thành viên của group.
+
+- **Q: Consumer offset đại diện cho gì?**
+  A: Vị trí của record tiếp theo cần đọc trong một partition. Offset đã commit cho consumer resume sau restart hoặc rebalance. `auto-commit` commit định kỳ; manual commit cho bạn kiểm soát biên consume-process-commit.
+
+- **Q: Khác nhau giữa queue và topic?**
+  A: Queue truyền thống giao mỗi message cho một consumer; topic broadcast cho mọi consumer group subscribe. Đó là lý do một topic có thể nuôi analytics, audit, và service chính cùng lúc.
+
+- **Q: `acks=all` nghĩa là gì?**
+  A: Producer chờ leader _và_ mọi in-sync replica acknowledge write mới coi là thành công — bền vững hơn, đổi bằng latency. `acks=1` chỉ chờ leader; `acks=0` bắn và quên.
+
+### Mid — tradeoff & bẫy
+
+- **Q: `enable.idempotence=true` — nó có bảo vệ cú ghi Postgres nằm ở phía bên kia consumer không?**
+  A: Không. Idempotence chỉ dedupe retry producer→broker trong nội bộ Kafka. Khi consumer ghi Postgres, một redelivery (crash trước khi commit offset) ghi lại. Exactly-once end-to-end cần một _sink_ idempotent (upsert by key) hoặc transactional outbox.
+
+- **Q: Một poison record âm thầm làm kẹt một partition suốt vài giờ trong khi dashboard vẫn xanh. Tại sao, và sửa?**
+  A: Consumer throw trên record đó, không bao giờ commit offset, Kafka redeliver nó mãi mãi — một record độc chặn cả partition. Sửa: dead-letter queue (route record xấu sau N retry) và alert trên consumer lag — metric thực sự cho thấy sự kẹt.
+
+- **Q: Chọn số partition thế nào?**
+  A: Bằng throughput và parallelism của consumer, không đoán mò: `partitions ≈ max(target_producer_MBps / per_partition_MBps, target_consumer_instances)`. Nhiều partition = parallelism hơn nhưng cũng nhiều file mở, nhiều rebalance, và election lâu hơn nếu broker chết.
+
+- **Q: Rebalance storm là gì, tại sao nó đóng băng queue?**
+  A: Consumer join/leave group liên tục (poll chậm, GC pause dài, heartbeat timeout), kích rebalance thu hồi mọi partition, tạm dừng tiêu thụ, rồi assign lại. Sửa: tune `session.timeout.ms`/`heartbeat.interval.ms`, giữ poll loop nhanh, và dùng cooperative rebalancing (incremental) nếu được.
+
+- **Q: Consumer lag tăng — nhìn đâu trước?**
+  A: Đây là bài toán _throughput_ (consumer không kịp — thêm instance/partition) hay _processing_ (mỗi record chậm — một downstream call chậm). Lag per-partition cho biết là một partition nóng hay toàn cục. Metric chứng minh _consumer_, không phải broker, là nút thắt là consumer lag vs broker CPU.
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: Cần exactly-once cho "Kafka → consume → ghi Postgres". Thiết kế.**
+  A: Hoặc (a) transactional outbox trong Postgres + một relay publish sang Kafka nguyên tử với business write (DB là source of truth), hoặc (b) idempotent sink: consumer upsert by key deterministic và commit offset trong cùng một local transaction. `enable.idempotence` + `ack=all` cover producer; sink cover consumer. Nêu bạn chọn cái nào và tại sao.
+
+- **Q: Một cuộc leader election partition mất 30 s mà mọi dashboard xung quanh vẫn xanh. Giải thích.**
+  A: Broker chết kích election leader cho replica của partition đó; cho tới khi một ISR leader mới được bầu, partition không available cho write — nhưng partition khác và service khác vẫn ổn, nên dashboard toàn cục vẫn xanh. Dấu hiệu là per-partition unavailability + producer timeout, không phải đỏ toàn hệ thống. Sửa: thêm replica, `election.timeout` nhanh hơn, và producer retry với backoff.
+
+- **Q: Chọn size cluster cho 50 MB/s ingest, retention 3 ngày, record 1 KB. Bao nhiêu broker?**
+  A: 50 MB/s × 3 ngày ≈ 13 TB raw; ×replication factor 3 ≈ 39 TB, ÷usable-per-broker (vd 5 TB) ≈ 8 broker tối thiểu, cộng headroom rebalancing. Throughput mỗi broker ~hàng trăm MB/s, nên broker bị bound bởi disk/retention ở đây, không phải CPU. Nêu giả định và knob bạn sẽ canh (disk, không phải core).
+
+- **Q: Đi qua một vụ duplicate-payment do rebalance và bạn đóng nó thế nào.**
+  A: Consumer xử lý xong một payment, crash trước khi commit offset, rebalance assign lại partition, redelivery xử lý lại. Đóng bằng idempotent processing (dedupe by `paymentId` trong một unique DB constraint) để redelivery thành no-op. Postmortem: timing commit offset, không phải Kafka, là bug.
+
+- **Q: Khi nào bạn KHÔNG dùng Kafka cho việc này?**
+  A: Với request/response hoặc RPC latency thấp, queue/topic thêm một hop và at-least-once semantics bạn phải thiết kế xung quanh. Với single-producer/single-consumer latency chặt, một call trực tiếp hoặc broker nhẹ hơn có thể đơn giản hơn. Kafka tỏa sáng với fan-out, replay, và decoupling ở scale — hãy chỉ mặt trường hợp nó bị overkill.
+
+#### Tự kiểm tra
+
+- [ ] Junior: 3 semantics, topic/partition/consumer-group, offset là gì, queue vs topic, `acks=all`.
+- [ ] Mid: vì sao idempotence không bảo vệ sink, poison-record+DLQ, bài toán size partition, nguyên nhân rebalance-storm, lag-là-metric.
+- [ ] Senior: thiết kế exactly-once end-to-end, giải thích leader election 30 s, size cluster bằng retention, trace vụ duplicate-payment do rebalance, chỉ mặt khi Kafka là sai công cụ.
+
 ## 1. Cái log chính là sản phẩm — partitions, offsets, và thứ tự
 
 Kafka không phải một message queue "tình cờ nhanh". Nó là một **distributed, immutable, append-only commit log**. Cái khung đó chính là câu trả lời senior: mọi thứ khác — consumer group, retention, kể cả "exactly once" — là hệ quả của cái log, không phải một feature gắn thêm lên trên.
