@@ -1,6 +1,6 @@
 ---
-title: "Senior Java Interview: OOP and Design Principles"
-description: "OOP at the senior level is about applied SOLID, composition over inheritance, and interface design at scale — not reciting definitions."
+title: "Java Interview Prep #2: OOP & Design Principles — Junior to Senior"
+description: "OOP at the senior level is applied SOLID, composition over inheritance, and interface design at scale — not reciting definitions. Junior names the principles; senior shows where each one costs you."
 pubDatetime: 2026-08-10T10:05:00+07:00
 featured: false
 draft: false
@@ -11,401 +11,77 @@ tags:
   - design-principles
 ---
 
-Object-oriented programming is the entry ticket. A junior recites "a class is a blueprint" and "SOLID is five letters." A senior treats design as **structural engineering**: every decision has a load path, a failure mode, and a price, and the interview is about whether you can justify the walls you'd leave standing.
-
-> Mindset: when the interviewer says "your team needs a new feature," the senior response is never "add a branch." It's "which axis of change is this — and what do I build that I won't have to edit tomorrow?" Definitions pass juniors; **decisions under constraints** clear the senior bar.
-
-## 1. SOLID — the applied version, with the traps
-
-"Define SOLID" is a screen for juniors. Seniors get asked to apply it, then to defend the places where applying it naively is wrong. Walk all five, but be ready to go deeper on the three that actually bite in production: Open/Closed, Dependency Inversion, and Liskov.
-
-### Open/Closed — the axis of change
-
-The textbook says "open for extension, closed for modification." The real question is **which axis changes fastest** — OCP is a strategy for the unstable part of your system, not a global law. Apply it first where you add a new case every sprint:
-
-```java
-// WRONG — every new payment method is another branch in this if/else tower.
-// Adding Apple Pay means editing pay() — an edit to working code, a merge
-// conflict on the same lines every sprint, a regression surface that grows
-// with every feature.
-PaymentResult pay(Order order) {
-    if (order.method() == PaymentMethod.CARD)        return cardGateway.charge(order);
-    else if (order.method() == PaymentMethod.BANK)   return bankGateway.transfer(order);
-    else if (order.method() == PaymentMethod.WALLET) return walletGateway.pay(order);
-    throw new UnsupportedOperationException(order.method().name());
-}
-
-// RIGHT — the registry is the extension point. A new method = one new class
-// plus one registration line. The dispatch table is stable; the set of
-// strategies grows.
-Map<PaymentMethod, PaymentHandler> handlers = Map.of(
-    PaymentMethod.CARD,   new CardHandler(cardGateway),
-    PaymentMethod.BANK,   new BankHandler(bankGateway),
-    PaymentMethod.WALLET, new WalletHandler(walletGateway)
-);
-PaymentResult pay(Order order) {
-    return handlers.get(order.method()).handle(order);
-}
-```
-
-> What interviewers actually probe: "we're adding a 4th payment method — walk me through the change." "Add an `else if`" fails the OCP check. "The registry gets one entry; the new class implements the contract" passes it — and then they immediately ask the counter-question below.
-
-**The counter-trap — OCP is not free.** A registry of one-method strategies is ceremony if the set never grows. And pattern matching changed the calculus: with a **sealed enum**, an exhaustive `switch` is _also_ closed for modification — adding a value without handling it breaks the build instead of breaking the runtime:
-
-```java
-// RIGHT (alternative) — sealed domain: the compiler enforces coverage.
-// Adding PaymentMethod.BITCOIN fails the build until every switch handles it.
-PaymentResult pay(Order order) {
-    return switch (order.method()) {
-        case CARD   -> cardGateway.charge(order);
-        case BANK   -> bankGateway.transfer(order);
-        case WALLET -> walletGateway.pay(order);
-    };
-}
-```
-
-The senior tell is naming the two modes and picking deliberately. **Closed world** (sealed + exhaustive switch): the domain changes rarely and all-at-once, and you want compile-time proof you missed a case. **Open world** (strategy registry, `ServiceLoader`, plugin classes): third parties or runtime add variants independently, and compile-time exhaustiveness would be a lie. Building a plugin framework for a two-case enum is the over-engineering interviewers watch for.
-
-### Dependency Inversion — who owns the interface
-
-Dependency **Injection** is passing a dependency in. Dependency **Inversion** is deciding who writes the contract. They are not the same, and conflating them is the most common mid-level answer.
-
-The plug-and-socket framing: a wall socket is a standard **owned by the building**, and every appliance conforms to it — the lamp doesn't get to invent its own socket and demand the wall change. DIP is the same. Your `OrderService` (the consumer, the building) declares `PaymentGateway` (the socket). Stripe's SDK is the appliance — an **adapter** that implements your port. That's why it's called _inversion_: the high-level module defines the abstraction the low-level module implements, not the reverse.
-
-```java
-// WRONG — the consumer reached into the world and grabbed a concrete thing.
-// The order domain now depends on Stripe's SDK — at compile time, at test
-// time, and forever.
-class OrderService {
-    private final StripeGateway gateway = new StripeGateway();
-    PaymentResult pay(Order order) { return gateway.charge(order); }
-}
-
-// RIGHT — the consumer owns the port; the adapter conforms to it.
-// Stripe could vanish tonight and the domain wouldn't recompile.
-class OrderService {
-    private final PaymentGateway gateway;
-    OrderService(PaymentGateway gateway) { this.gateway = gateway; }
-    PaymentResult pay(Order order) { return gateway.charge(order); }
-}
-
-interface PaymentGateway { PaymentResult charge(Order order); }
-class StripeGatewayAdapter implements PaymentGateway { /* delegate to the SDK */ }
-```
-
-This is _why_ Spring exists — not to "make DI easy," but to wire adapters to ports so the domain stays clean. But the real payoff isn't the framework, it's the **test seam**:
-
-> Production story: `OrderService` news up `StripeGateway` in its constructor, so the retry-on-timeout path can't be unit-tested — every test either hits Stripe's sandbox or patches a static. That's not a testing problem, it's a DIP violation that shows up as a testing problem. The moment the dependency became injectable, the flaky integration test became a three-line unit test with a fake.
-
-**The trap on the other side — interface explosion.** DIP does not mean "extract an interface for every class." A `UserService` interface with exactly one implementation, one consumer, and no test double is ceremony with a tax: every change touches two files, and the interface is a lie waiting to drift from the impl. The honest rule: an abstraction must earn its keep — a second implementation, a test double, or a contract boundary with an external system. Otherwise write the concrete class and inject its dependencies.
-
-### Liskov — the one that actually breaks in production
-
-LSP is where definitions die, because the violation is invisible in code review and detonates at runtime inside a `HashMap`. The contract: a subtype must be usable wherever its supertype is promised — **preconditions not strengthened, postconditions not weakened, invariants preserved.** Two production-grade examples.
-
-**The equals-symmetry trap.** Add state to a subclass and `equals` silently becomes asymmetric, corrupting `Set`/`Map` behavior:
-
-```java
-class Point {
-    final int x, y;
-    Point(int x, int y) { this.x = x; this.y = y; }
-    @Override public boolean equals(Object o) {
-        return o instanceof Point p && p.x == x && p.y == y;
-    }
-    @Override public int hashCode() { return 31 * x + y; }
-}
-
-class ColoredPoint extends Point {
-    final Color color;
-    ColoredPoint(int x, int y, Color c) { super(x, y); this.color = c; }
-    @Override public boolean equals(Object o) {
-        if (!(o instanceof ColoredPoint)) return false;   // ← asymmetry
-        return super.equals(o) && ((ColoredPoint) o).color == color;
-    }
-}
-
-Point p = new Point(1, 2);
-ColoredPoint cp = new ColoredPoint(1, 2, Color.RED);
-p.equals(cp);   // true — Point ignores color
-cp.equals(p);   // false — ColoredPoint demands color → symmetry broken
-```
-
-```java
-// RIGHT — composition instead of inheritance: ColoredPoint is NOT a Point,
-// it HAS a Point. No subtype, no broken contract, no surprise in a HashSet.
-record ColoredPoint(Point point, Color color) {}
-```
-
-**Covariance and contravariance.** LSP leaks into the type system. Arrays are **covariant and reified** — `Object[]` can hold a `String[]`, and the error shows up at runtime:
-
-```java
-Object[] objs = new String[10];
-objs[0] = 42;                 // compile: fine → runtime: ArrayStoreException
-```
-
-Generics are **invariant** — the compiler stops the same bug before it ships:
-
-```java
-List<String> words = new ArrayList<>();
-List<Object> objects = words;               // compile error — invariant
-List<? extends Object> any = words;         // covariance via bounded wildcard (read-only)
-List<? super String> sink = new ArrayList<Object>();  // contravariance (write-only)
-```
-
-Remember **PECS** — producer `extends`, consumer `super` — and say out loud that a `List<Dog>` is not a `List<Animal>` even though `Dog` is an `Animal`: "is-a" on types does not carry over to generic containers, because a mutable container's contract ("you may add any `Animal`") would be weakened by the subtype.
-
-**The throwing subtype.** A subclass that overrides a method to throw — "I'll just make `add()` throw for this special collection" — violates LSP by strengthening the precondition. The right shape is a **decorator** (`Collections.unmodifiableList`) that fails fast and loudly, not a subtype that pretends to be mutable. Interviewers probe this with: "how do you make an immutable list without breaking the contract?"
-
-### Single Responsibility and Interface Segregation — the God object's obituary
-
-These two are one idea at different granularities: **SRP is about classes, ISP about interfaces, and both are about "one axis of change."** A 500-line `OrderService` that is repository, validator, orchestrator, and mapper changes for four reasons and is impossible to reason about. A 40-method `UserService` interface forces every implementer to stub 35 methods — and worse, forces every _caller_ to see 40 capabilities it must not use.
-
-```java
-// WRONG — a single fat interface. Every implementer stubs 35 methods;
-// every caller depends on 40 capabilities.
-interface UserService {
-    User findById(long id);
-    void update(User u);
-    byte[] exportAuditReport(Period p);      // why is this here?
-    void sendWelcomeEmail(long id);          // or this?
-    List<User> search(String q, Page p);
-    // ... 35 more
-}
-
-// RIGHT — role interfaces. A caller depends on the slice it needs; a class
-// implements several roles and no method is dead weight.
-interface UserReader   { User findById(long id); }
-interface UserWriter   { void update(User u); }
-interface AuditExporter { byte[] exportAuditReport(Period p); }
-
-class UserServiceImpl implements UserReader, UserWriter, AuditExporter { ... }
-```
-
-> What interviewers actually probe: "here's a 400-line service — how do you know it's wrong before you read line 300?" The senior answer isn't the interface; it's naming the **three axes of change** in it. If you can list them, SRP is not a slogan.
+OOP is the part of the interview where interviewers stop asking "what" and start asking "why". Anyone can name the four pillars; a senior can tell you the last time inheritance bit them and why they refactored to composition. This post climbs from the textbook to the trade-off table.
 
-## 2. Composition over inheritance — the fragile base class, in the wild
-
-"Why favor composition?" The junior answer is "inheritance is bad." The senior answer is one incident: a change to the parent silently broke fifty subclasses that assumed things about `super` the parent never promised.
-
-The fragile base class problem is structural, not stylistic. Inheritance couples you to the parent's **implementation**, not its contract: you inherit `protected` fields, you call `super`, and the parent's methods invoke hooks (`afterPut`) in an order the subclass didn't write. The base class can't change its internals without risking every subclass, and the subclass can't reason about its own behavior without reading the parent. They are welded at the ribs.
-
-```java
-// WRONG — a base class full of hidden coupling. MetricsCounter trusts that
-// afterPut is called exactly once per put, in order. The next release of
-// AbstractCache adds a second hook, reorders the calls, or skips afterPut on
-// dedup — and MetricsCounter silently counts wrong. Nobody's code "changed."
-abstract class AbstractCache {
-    private final Map<String, byte[]> store = new HashMap<>();
-    public final void put(String k, byte[] v) {
-        store.put(k, v);
-        afterPut(k, v);
-    }
-    protected void afterPut(String k, byte[] v) {}
-}
-
-class MetricsCounter extends AbstractCache {
-    @Override protected void afterPut(String k, byte[] v) { metrics.increment("puts"); }
-}
-
-// RIGHT — behavior is assembled, not inherited. The decorator wraps the
-// delegate and the caller picks the stack. No subclass depends on another
-// class's internals; every behavior is testable in isolation.
-interface Cache { void put(String k, byte[] v); }
-
-class MetricCache implements Cache {
-    private final Cache delegate;
-    MetricCache(Cache delegate) { this.delegate = delegate; }
-    public void put(String k, byte[] v) {
-        long start = System.nanoTime();
-        delegate.put(k, v);
-        metrics.record("cache.put.ns", System.nanoTime() - start);
-    }
-}
-
-Cache cache = new MetricCache(new TtlCache(new MemCache()));
-```
-
-Inheritance also breaks at the contract level: `ColoredPoint extends Point` (section 1) is an inheritance problem hiding as an equals problem — adding state to a subclass is the single most common way to violate LSP without noticing. And the `Stack extends Vector` fiasco is the textbook case: a stack is _not_ a vector, and inheriting `add(int, E)` lets callers insert into the middle of a stack. "Is-a" must hold in the real world, not just in the UML diagram.
-
-**When inheritance is right** — say this out loud, it's the differentiator. Inheritance is a tool, not a sin. Use it when the subclass is a genuine specialization that provides **hooks, not behavior**: Template Method. `JdbcTemplate` letting you supply a `RowMapper`, Spring's `AbstractMessageConverter` letting subclasses fill in `supports`/`writeInternal`, `HttpServlet` overriding `doGet`. The parent owns the flow (the skeleton) and the subclass fills the slots, and the parent's contract is explicit. The failure mode is the opposite: a subclass that _overrides whole methods_ and then calls `super` on them is fighting the parent, and that's the smell.
-
-**The honest cost of composition.** Don't oversell it: wrapping means delegation boilerplate, deeper stack traces, and a runtime graph that's hard to trace ("which of these five decorators dropped my cache line?"). The senior tradeoff is granularity — compose where the axis changes, delegate where the flow is fixed, and never decorate for decoration's sake.
-
-## 3. Interface design at scale — polymorphism beyond the textbook
-
-A junior sees an interface as "a class template." A senior sees an interface as a **contract with an owner** — and modern Java changed what that contract can express.
-
-### Sealed types — the closed world, enforced by the compiler
-
-Before Java 17, polymorphism was open by default: anyone could add a `Shape`, and the `instanceof` chain (or `if/else` tower) kept growing. **Sealed interfaces** (Java 17) close the world deliberately, and **pattern matching** (Java 21) makes dispatch exhaustive and checked at compile time:
-
-```java
-sealed interface OrderEvent permits OrderPlaced, OrderPaid, OrderCancelled {}
-record OrderPlaced(Long orderId, Instant at) implements OrderEvent {}
-record OrderPaid(Long orderId, Money amount) implements OrderEvent {}
-record OrderCancelled(Long orderId, String reason) implements OrderEvent {}
-
-String label(OrderEvent e) {
-    return switch (e) {
-        case OrderPlaced p    -> "placed at " + p.at();
-        case OrderPaid p      -> "paid " + p.amount();
-        case OrderCancelled c -> "cancelled: " + c.reason();
-        // no default needed — the compiler proves the switch is exhaustive
-    };
-}
-```
-
-`label` dispatches on **shape** (which record it is), not on a `type` field — and the compiler eliminates the "missed a case" bug that a `type` enum plus `if/else` always carried. Sealed hierarchy + records + pattern matching is Java's answer to algebraic data types, and it beats both the stringly-typed dispatch and the strategy-registry-as-ceremony in the common case.
-
-The senior distinction (echoing section 1): **sealed = closed world, stable algebra, compile-time exhaustiveness.** Strategy/plugin/`ServiceLoader` = **open world, pluggable variants, runtime registration.** When an interviewer says "design the event handling," the differentiator is _who_ gets to add a variant and _when_ it must be caught — compile time or deploy time.
-
-### Records, value objects, and the equality contract
-
-A `record` (Java 16+) is a class whose identity contract is **all components** — `equals`/`hashCode`/`toString`/accessors derived from the component list, `final` by construction. That makes records the natural home for value objects, and value objects with _pure_ behavior are exactly right:
-
-```java
-record Money(long cents) {
-    Money { if (cents < 0) throw new IllegalArgumentException("negative money"); }  // invariant in the constructor
-    Money add(Money o)  { return new Money(cents + o.cents); }
-    boolean isNegative() { return cents < 0; }
-    @Override public String toString() { return "%d.%02d".formatted(cents / 100, cents % 100); }
-}
-```
-
-The senior nuance on "records carrying logic": the real smell is a record coordinating **stateful** or cross-object business rules. A `Money` that validates its invariant and defines its arithmetic is a _good_ record; an `OrderPlaced` event that reaches out to a repository is a _bad_ one. Keep coordination in services; keep values in values.
-
-And the tradeoff people miss: a record's equality is by **all fields**, which is the right default for value semantics and the wrong default for entities. An `Order` that is "the same order" by `id` even when fields changed must **not** be a record — its equality must be hand-written over the business key, or it will corrupt `Set`s and `Map`s. Same LSP lesson as `ColoredPoint`, mirrored.
+> Mindset: junior implements the interface; senior decides whether the interface should exist at all, and what it costs the next five years of the codebase.
 
-## 4. Tell, don't ask — encapsulation has a database bill
+## Junior — foundations
 
-"Tell, don't ask" sounds like style advice. At senior level it's a **performance and correctness** principle, because a getter is not free — it can be a lazy-loaded proxy that fires a query.
+**Q1. What are the four pillars of OOP?**
+Encapsulation (hide state behind behavior), Abstraction (expose intent, not mechanism), Inheritance (reuse by specialization), Polymorphism (one interface, many implementations). The trap: naming them is free; applying them without creating a brittle hierarchy is the actual skill.
 
-Feature envy is the symptom: a caller that reaches through an aggregate, pulls its collections, and computes with them. That is both a design smell and an N+1 query factory.
+**Q2. What is the difference between an abstract class and an interface?**
+An abstract class can hold state and implement methods; a class extends only one. An interface is a contract — pre-Java 8 only method signatures, now it can carry `default` and `static` methods but no fields (except `public static final` constants). Since Java 8 you can `implement` many interfaces but extend one class. Prefer interfaces for the _type_ and abstract classes only when you need shared state/behavior.
 
-```java
-// WRONG — the caller reached INTO the order and computed with its innards.
-// order.getItems() is a lazy-loaded collection: this fires one SELECT per
-// order. 1,000 orders → 1,001 queries. Fine with 5 rows in tests; dies in
-// prod with a million — and no single query looks slow, so it survives every
-// slow-query log.
-long totalItems = 0;
-for (Order order : orders) {
-    totalItems += order.getItems().size();
-}
-
-// RIGHT — the aggregate answers the question. One intent, no reach-in.
-long totalItems = 0;
-for (Order order : orders) {
-    totalItems += order.getLineItemCount();
-}
-```
+**Q3. What is polymorphism and how does it work in Java?**
+Subtype polymorphism: a variable of a supertype refers to any subtype, and the runtime dispatches the overridden method. Method dispatch is virtual by default — `Animal a = new Dog(); a.speak()` calls `Dog.speak()`. Overloading is _not_ polymorphism (it is resolved at compile time by signature).
 
-But "tell, don't ask" alone is not enough — a naive `getLineItemCount()` may still lazy-load the whole collection. The senior fix is deciding **which layer answers the question**. The database counts faster than the JVM can load:
+**Q4. What is the difference between method overriding and overloading?**
+Overriding: same signature in a subclass, runtime-dispatched (`@Override`). Overloading: same name, different parameter types, resolved at compile time. A classic pitfall: overloaded methods with `Object` vs `String` args — `foo(null)` is ambiguous and fails to compile if both exist.
 
-```sql
--- the same question, answered by the database in one round trip.
--- A point lookup is a B+tree walk: 3–4 page fetches, ~100 ns each when the
--- pages are hot in the buffer pool → sub-millisecond. The N+1 version above
--- was 1,001 network round trips × ~1 ms each ≈ a full second of latency
--- that never appears in any single slow-query log.
-SELECT o.id, COUNT(li.id)
-FROM orders o
-LEFT JOIN line_items li ON li.order_id = o.id
-GROUP BY o.id;
-```
-
-```java
-// RIGHT — project the DTO you actually need; don't load the entity graph.
-@Query("select new OrderSummary(o.id, o.customerName, size(o.items)) from Order o")
-List<OrderSummary> findAllSummaries();
-```
-
-> What interviewers actually probe: they hand you a `for` loop calling `getItems()` and ask "how many queries does this make, and where does the time go?" The senior answer connects the design smell (feature envy, Law of Demeter) to a concrete number (1,001 queries, ~1 s extra) and then fixes the _layer_, not the loop.
-
-### The resource behind the method call
-
-Every `repository.findById` is a claim on a bounded resource — a connection-pool slot and a worker thread — so interface design has a concurrency bill too. Size the pool with Little's law, the same way you size a thread pool: `pool_size = throughput × per-call time`. At 2,000 req/s with 25 ms average DB time, that's 50 connections — not "200 because the box has 64 cores." A design that chases getters across aggregates spends that pool ten times faster than a design that answers one aggregate question per call. The N+1 above isn't just slow — it's a connection-pool burnout vector, because each lazy load holds a connection while it re-queries. The bounded resource is the real subject; the getter chain is just how you overspend it.
-
-## 5. The functional-Java trap — when OOP, when functional, and what it costs
-
-"OOP is dead, long live functional programming" is a red flag. So is "OOP forever, streams are unreadable." The senior position: **they are different tools for different invariants.**
-
-- **Streams / functional composition** for data **transforms** — pipelines over collections, mapping/filtering/reducing — where the data is transient and there is no state to protect.
-- **OOP / encapsulation** for **behavior-rich state** — aggregates, money, orders, caches — where the invariant ("an order can't be paid twice," "a connection is either open or closed") lives behind methods, not exposed fields.
-
-The anti-pattern to name is the **anemic domain model**: entities reduced to getters/setters with all logic hoisted into `*Service` classes. It's convenient for JPA and comfortable for beginners, but the invariants stop living anywhere — `setStatus(CANCELLED)` works on a shipped order, `balance` can go negative, and the "rules" are scattered across twelve services. The senior move isn't "make everything rich" (persistence mapping fights you); it's **guarding the state transitions that matter**:
-
-```java
-// WRONG — the invariant lives in nobody's code. Any caller can do this:
-order.setStatus(OrderStatus.CANCELLED);
-order.setPaidAt(null);
-
-// RIGHT — the transition is a method that enforces the rule.
-order.cancel("out of stock");   // throws if already shipped, sets cancelledAt
-order.pay(amount);              // throws if already paid
-```
-
-### What the functional style actually costs — the numbers
-
-It's fashionable to say "streams are free." Almost true — and here is why, with the numbers interviewers respect:
-
-```
-The pipeline allocates: a Stream, lambdas, a Spliterator, an accumulator
-ArrayList. That sounds wasteful — but allocation on a modern JVM is a TLAB
-pointer bump (no lock, no system call), so the JVM happily does tens of
-millions of throwaway allocations per second. Escape analysis lets the JIT
-scalar-replace the short-lived objects, and young-gen GC copies only the
-surviving ~10%, so the pause is dominated by live bytes copied, not by the
-transforms. Net: a clean stream chain is effectively free against the pause
-budget. The GC tax you actually fear comes from objects that escape into
-long-lived collections — i.e., a design that *retains* what a transform
-produced.
-```
-
-The real cost of abstraction isn't GC — it's **dispatch**. A monomorphic call site (one concrete receiver type) is inlined by the JIT, and the "interface call" costs nothing. A **megamorphic** site (a hot loop dispatching over many implementers — say, the strategy registry from section 1) costs ~3–5 ns per call **and blocks inlining of the body**, which can cost 10× more than the dispatch itself. That's why an interface with 40 implementers is also a JIT problem, not just a design smell. `-XX:+PrintInlining` is the tool that proves it. "How expensive is an interface call?" → "inline-able: ~free; megamorphic: a few ns plus a missed optimization — and the missed optimization is the real bill."
-
-And one API-design trap to name: `Optional`/`Stream` as a substitute for a clear contract. `Optional<List<T>>` is a type-level lie — an empty list already encodes "none" — and `null` returns hide bugs. The return type _is_ part of your API; design it the way you design the interface. Make the empty case explicit, never ambiguous.
-
-## 6. Production failure modes of "clean code"
-
-The deepest senior trap is applying design principles so zealously that they become the incident. Interviewers love this section because everyone has seen the aftermath.
-
-- **Premature abstraction.** The three-layer tower for a lookup: `Controller → Service interface → Service impl → Mapper interface → Mapper impl → Repository`, where the service has one method and one caller. Every change now touches five files, and the interfaces are lies. The rule of thumb: **an abstraction earns its keep** — one consumer, zero test doubles, and no second impl on the roadmap means delete the interface, not add a sixth layer. Adding abstraction is debt you take on, not a virtue you apply.
-
-- **Circular dependency as an architecture smell.** Two packages that import each other — `orders` needs `payments`, `payments` needs `orders` — is not a Spring config problem, it's a missing boundary. The fix is DIP at the _module_ level: the higher-level concept (the domain) declares a port, and the other implements it. If you find yourself describing "we fixed the cycle with Spring `@Lazy`," the cycle is still there — you just stopped noticing.
-
-- **Unguarded invariants.** The flip side of the anemic model: a "rich" aggregate whose setters are `public` so the ORM can hydrate it — which means every caller can also mutate it. The senior move is explicit transitions (section 5) and/or making the state immutable once constructed. An invariant nobody enforces is not a design; it's a bug farm.
-
-- **The flexible API that's unconstrainable.** "Let's be flexible: a generic `process(Map<String, Object> params)`." Now every caller invents its own keys, typos pass silently, and there is no compile-time contract at all. Type-safety is a feature of an interface; the moment you accept `Map<String,Object>`, you've traded the compiler's help for a runtime `ClassCastException` farm. A senior _narrows_ interfaces; it never widens them.
-
-- **Interfaces that drift from the code.** The `UserService` interface whose impl gained ten methods that were never added to the interface — callers end up casting or using reflection. If the interface isn't the only entry point, the abstraction is decorative. Delete it or make it real.
-
-## 7. Self-check
-
-- [ ] Apply OCP to a feature request without editing the old class — and name when OCP is the wrong tool.
-- [ ] Explain DIP with the "who owns the contract" framing, a Spring example, and the interface-explosion counter-trap.
-- [ ] Show the `ColoredPoint` equals trap, and why `List<Dog>` is not a `List<Animal>`.
-- [ ] Give a real case where inheritance bit you (fragile base class) and the composition fix.
-- [ ] Contrast sealed + pattern matching vs a strategy registry — when is each right, and who adds the 4th variant?
-- [ ] When is a record the right value object, and when does it violate the equality contract?
-- [ ] Count the queries in a `getItems()` loop, and fix it at the right layer (SQL vs DTO projection).
-- [ ] Explain what a megamorphic call site costs, and how to prove it with `-XX:+PrintInlining`.
-- [ ] Find the anemic domain model in a snippet and guard the invariant that matters.
-- [ ] Name three ways "clean code" turns into a production incident.
-
-## 8. Interviewer follow-ups
-
-When your first answer lands, they start drilling. Be ready for these:
-
-- "We add a 5th payment method next sprint. Walk me through the exact files you touch — and why that design was the right axis."
-- "You injected `PaymentGateway`. Who wrote that interface, and what happens when Stripe changes their SDK?"
-- "`ColoredPoint extends Point` — find the bug in 30 seconds. Now fix it without breaking `HashSet<Point>`."
-- "Is `Stack` a bad `Vector` subclass? What's the general rule that catches it?"
-- "Sealed interface with three records, or a strategy map with three handlers — which do you build, and who adds the 4th variant?"
-- "Your `record Money` has `add`. Why is that a good record, if 'records with logic are a smell' is too simple?"
-- "This loop calls `order.getItems()` a thousand times. Count the queries, and tell me where the second is actually spent."
-- "You claim abstraction is nearly free at runtime. Prove it — what does the JIT do to a monomorphic call site, and what breaks inlining?"
-- "Your `OrderService` is 400 lines with five responsibilities. What do you extract first, and why does the order matter?"
-- "Every change to `BaseRepository` breaks three subclasses. Rebuild it — but don't tell me inheritance is evil."
-
-That's the OOP bar for senior.
+**Q5. What does `equals`/`hashCode` contract require?**
+If `a.equals(b)` then `a.hashCode() == b.hashCode()`. The converse is not required but equal hashCodes should be rare (good distribution). If you override `equals` you MUST override `hashCode`, or objects break in `HashMap`/`HashSet` (two equal keys land in different buckets).
+
+**Q6. What is the difference between `abstract` and `interface` default methods?**
+An abstract class method has a body the subclass may or may not override. An interface `default` method provides behavior a class inherits without implementing — used for backward-compatible API evolution (e.g. `Collection.removeIf`). Override a `default` in the implementing class to change it.
+
+## Mid — tradeoffs & pitfalls
+
+**Q1. When is inheritance the wrong tool?**
+When the relationship is not a true "is-a" with stable shared behavior. Inheritance couples the subclass to the parent's implementation forever — change the superclass and every subclass breaks. The "fragile base class" problem: a seemingly safe change to a superclass silently alters subclass behavior. Reach for **composition** (wrap the dependency, delegate) when the shared code is "has-a" rather than "is-a".
+
+**Q2. Explain SOLID, briefly, and give one real misuse of each.**
+
+- **S**ingle Responsibility: a class changes for one reason. Misuse: a `UserService` that also sends email and writes audit logs — three reasons to change.
+- **O**pen/Closed: open for extension, closed for modification. Misuse: a `switch(type)` that you edit every time a new type appears.
+- **L**iskov: subtypes must be substitutable. Misuse: `Square extends Rectangle` then `setWidth` breaks the rectangle invariant.
+- **I**nterface Segregation: many small interfaces beat one fat one. Misuse: a `Worker` interface forcing `cleanToilet()` on a `Programmer`.
+- **D**ependency Inversion: depend on abstractions, not concretions. Misuse: `new MySQLRepository()` hardcoded in a service.
+
+**Q3. What is the difference between `Comparator` and `Comparable`?**
+`Comparable` defines the _natural_ ordering of a type (`compareTo`, one definition). `Comparator` is an _external_ ordering strategy (pass to `sort`, many can exist). Use `Comparable` for the obvious default; `Comparator` when the sort depends on context (by name, by date, descending).
+
+**Q4. Why are getters/setters not real encapsulation?**
+A public getter/setter pair with no invariant is just a public field with extra steps — state is still wide open. Real encapsulation exposes _behavior_: `account.withdraw(amount)` instead of `account.setBalance(x)`. The object protects its invariants; callers ask for outcomes, not mutate fields directly. Anemic domain models (entities with only getters/setters) are a code smell.
+
+**Q5. What is the difference between `==` on objects and identity vs equality — and boxed types?**
+Covered in core, but the OOP angle: two `Integer` from `valueOf` in the -128..127 cache compare `==` true; outside it false. Relying on `==` for boxed types is a latent bug. Always `equals` for value comparison of wrappers, and beware autoboxing allocations in hot loops.
+
+**Q6. When would you use a `record` (Java 16+)?**
+When the type is _data carrier_: immutable, `equals`/`hashCode`/`toString` auto-generated, all fields final. Perfect for DTOs, API responses, value objects. Don't use a `record` when you need mutable state, inheritance, or behavioral richness — that's a class. `record Point(int x, int y)` is all you need for a coordinate; a `BankAccount` is not a record.
+
+## Senior — design & defense
+
+**Q1. Defend composition over inheritance with a concrete refactor you'd make.**
+"I'd take a `ReportGenerator extends ExcelWriter` and flip it: `ReportGenerator` holds a `Writer` (interface) it delegates to. Reason: the Excel coupling meant any change to spreadsheet formatting risked the report logic, and we couldn't unit-test the report without a real spreadsheet. Composition let us inject a `FakeWriter` in tests and add `PdfWriter` with zero changes to `ReportGenerator`. Cost: one extra interface and a constructor arg — cheap insurance against the fragile base class."
+
+**Q2. A team wants a base `BaseEntity` with 30 fields and every JPA entity extends it. What do you say?**
+"I'd split it. A true `BaseEntity` (id, version, createdAt, updatedAt, auditing) is fine — that's a genuine 'is-a' with stable shared state. But 30 fields means it's actually a grab-bag; subtypes inherit columns they don't use, queries get wider, and a change ripples everywhere. I'd push the 26 domain-specific fields down into the entities that own them and keep `BaseEntity` to the 4 audit fields. Measured win: narrower tables, clearer ownership, fewer accidental couplings."
+
+**Q3. How do you design an interface so it survives five years of new requirements?**
+"I keep it small and behavioral, not a CRUD dump. I favor `sealed` hierarchies (Java 17+) when the set of subtypes is closed — the compiler forces you to handle every case in `switch`, so adding a subtype is a compile error until you've dealt with it everywhere. I expose capabilities as narrow interfaces (`Readable`, `Flushable`) rather than one `MegaService`. And I use `default` methods only for genuinely optional behavior, never to sneak in state."
+
+**Q4. Liskov Substitution — walk a real violation and its fix.**
+"The classic `Square extends Rectangle`: setting width must also set height to stay a square, but that breaks `Rectangle`'s contract that width and height are independent. Any code doing `r.setWidth(5); r.setHeight(10); assert r.area()==50` now lies. Fix: don't model square as a rectangle subtype — extract a `Shape` with `area()` and implement both independently, or use a single `Rectangle` that forbids zero/negative and represents a square as w==h. Subtyping is a promise; if you can't keep it, don't make it."
+
+**Q5. You have an interface with 12 methods but most callers use 2. Redesign it.**
+"That's Interface Segregation violation. I'd split into focused roles: `Reader` (read), `Writer` (write), `Lifecycle` (start/stop), and let a concrete class implement all three if it needs to. Callers depend only on what they use, so a change to `Writer` never recompiles a read-only consumer. The implementing class is unchanged in behavior; only the _types_ it's exposed through get narrower. This also makes mocking in tests trivial — you stub the 2 methods you care about."
+
+**Q6. How do you prove your OOD is good, not just 'clean' in the interview?**
+"I'd point at the change I just made and the cost of the alternative: count the reasons each class changes, the number of call sites that break when a requirement shifts, and the test surface. Good OOD means a new feature touches one class, not twelve. I'd sketch the dependency graph — if it's a DAG with stable abstractions at the top and volatile details at the bottom (dependency inversion), that's the proof. Not 'I used SOLID', but 'here is the diff when the requirement changed, and it was small'."
+
+#### Self-check
+
+- [ ] Junior: I can name the four pillars, abstract class vs interface, override vs overload, and the `equals`/`hashCode` contract.
+- [ ] Mid: I can spot fragile-base-class, misuse of each SOLID letter, anemic models, and when `record` fits.
+- [ ] Senior: I can refactor inheritance→composition with a cost/benefit, apply LSP to a real violation, and defend an interface design by the size of the change when requirements shift.
