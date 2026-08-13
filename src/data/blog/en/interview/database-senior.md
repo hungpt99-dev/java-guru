@@ -22,7 +22,7 @@ The database is the layer that actually decides whether your system scales. Inte
 ### Junior — foundations
 
 - **Q: What's the difference between a clustered and a non-clustered index?**
-  A: A clustered index *is* the table — rows are stored in its order (InnoDB's `PRIMARY KEY`), so there's exactly one per table; lookups by PK are one B-tree walk to the row. A non-clustered (secondary) index is a separate B-tree whose leaves point back to the clustered key, so a secondary-index lookup is two hops: index → clustered key → row.
+  A: A clustered index _is_ the table — rows are stored in its order (InnoDB's `PRIMARY KEY`), so there's exactly one per table; lookups by PK are one B-tree walk to the row. A non-clustered (secondary) index is a separate B-tree whose leaves point back to the clustered key, so a secondary-index lookup is two hops: index → clustered key → row.
 
 - **Q: Name the four SQL transaction isolation levels.**
   A: Read uncommitted, read committed, repeatable read, serializable — in increasing strictness. They trade concurrency for anomaly prevention.
@@ -42,27 +42,27 @@ The database is the layer that actually decides whether your system scales. Inte
   A: A function on the column hides it from the B-tree, so the optimizer can't do a range seek — it scans every row, applies the function, filters. Rewrite as a raw-column range: `created_at >= '2026-01-01' AND created_at < '2027-01-01'`. Same trap: `LIKE '%x%'`, arithmetic on the column, implicit casts.
 
 - **Q: When is a composite index useful, and what's the leading-column rule?**
-  A: Composite indexes serve queries that filter on a *prefix* of the columns, left to right (the leftmost-prefix rule). `(a, b, c)` helps `WHERE a=?`, `(a,b)=?`, `(a,b,c)=?` but NOT `WHERE b=?` alone. Put the most selective / most-filtered-leading column first, but also the one that benefits equality predicates.
+  A: Composite indexes serve queries that filter on a _prefix_ of the columns, left to right (the leftmost-prefix rule). `(a, b, c)` helps `WHERE a=?`, `(a,b)=?`, `(a,b,c)=?` but NOT `WHERE b=?` alone. Put the most selective / most-filtered-leading column first, but also the one that benefits equality predicates.
 
 - **Q: N+1 query — what is it and how do you kill it?**
   A: You fetch N parents, then one query per parent for its children = N+1 round trips. Fix: a single `JOIN`/`IN` batch, or `@BatchSize`/`fetch join` in ORM. The tell: latency that never shows in any single slow-query log because each call is ~1 ms.
 
 - **Q: Why is a 2000-connection pool worse than a 50-connection one?**
-  A: Connections are a *bounded* resource the DB must schedule. Past the DB's `max_connections` every new request times out; more connections also mean more context-switch and lock contention on the DB side. Size by Little's law (`TPS × avg_query_time`), not by box core count.
+  A: Connections are a _bounded_ resource the DB must schedule. Past the DB's `max_connections` every new request times out; more connections also mean more context-switch and lock contention on the DB side. Size by Little's law (`TPS × avg_query_time`), not by box core count.
 
 - **Q: Read committed vs repeatable read — what anomaly does each still allow?**
-  A: Read committed still allows *non-repeatable reads* (same row differs between reads in the same txn). Repeatable read still allows *phantom reads* (a range query returns different rows). Serializable prevents both — at the cost of concurrency (often via range locks / SSI).
+  A: Read committed still allows _non-repeatable reads_ (same row differs between reads in the same txn). Repeatable read still allows _phantom reads_ (a range query returns different rows). Serializable prevents both — at the cost of concurrency (often via range locks / SSI).
 
 ### Senior — design & defense
 
 - **Q: Size the connection pool for a service doing 1,000 req/s with 20 ms avg query time. Now what if 10% of calls take 5 s?**
-  A: `1000 × 0.02s = 20` connections is the steady-state number; `cores × 10` is a fine starting heuristic and HikariCP defaults to 10. But the 10% at 5 s case needs `1000 × 0.1 × 5 = 500` connections *if* every slow call holds one — which means a handful of slow queries can exhaust the pool and stall the 90% fast path. The senior move is a *separate* bounded pool (or timeout + circuit breaker) for the slow path so it can't starve the fast one.
+  A: `1000 × 0.02s = 20` connections is the steady-state number; `cores × 10` is a fine starting heuristic and HikariCP defaults to 10. But the 10% at 5 s case needs `1000 × 0.1 × 5 = 500` connections _if_ every slow call holds one — which means a handful of slow queries can exhaust the pool and stall the 90% fast path. The senior move is a _separate_ bounded pool (or timeout + circuit breaker) for the slow path so it can't starve the fast one.
 
 - **Q: "Indexes make everything fast." Defend or refute — with the write-side cost.**
   A: Refute. Every index is maintained on every `INSERT`/`UPDATE`/`DELETE`: more B-tree walks, more page splits, more WAL. A write-heavy table with 8 indexes pays 8× the index-maintenance tax and slower inserts. The defense: index for the queries you actually run; drop the vanity indexes; consider a read replica for heavy analytical reads.
 
 - **Q: A report says "the DB averages 0.1 ms but the app takes 800 ms." Where do you look first?**
-  A: The *pool*, not the DB. If the thread pool and connection pool both queue, requests wait in line for a connection while the DB sits idle. Check pool saturation, `connectionTimeout`, and whether `wait` time dwarfs `query` time. The fix is rarely "bigger DB."
+  A: The _pool_, not the DB. If the thread pool and connection pool both queue, requests wait in line for a connection while the DB sits idle. Check pool saturation, `connectionTimeout`, and whether `wait` time dwarfs `query` time. The fix is rarely "bigger DB."
 
 - **Q: Walk me through a phantom read appearing in production and how you closed it.**
   A: A batch processes "all unpaid orders," another txn inserts a new unpaid order in the same range mid-batch → the batch misses it (or double-counts on retry). Defense: `REPEATABLE READ`/`SERIALIZABLE` with range locks, or `SELECT … FOR UPDATE SKIP LOCKED` to claim rows atomically so concurrent workers don't collide. Name the isolation level and the lock type.

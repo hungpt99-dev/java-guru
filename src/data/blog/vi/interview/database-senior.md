@@ -22,7 +22,7 @@ Database là tầng quyết định hệ thống có scale được thật hay k
 ### Junior — nền tảng
 
 - **Q: Khác nhau giữa clustered và non-clustered index?**
-  A: Clustered index *chính là* bảng — các row được lưu theo thứ tự của nó (ở InnoDB là `PRIMARY KEY`), nên mỗi bảng chỉ có đúng một cái; lookup theo PK là một lần đi qua B-tree tới row. Non-clustered (secondary) index là một B-tree riêng, lá của nó trỏ về clustered key, nên một lookup qua secondary index mất hai bước: index → clustered key → row.
+  A: Clustered index _chính là_ bảng — các row được lưu theo thứ tự của nó (ở InnoDB là `PRIMARY KEY`), nên mỗi bảng chỉ có đúng một cái; lookup theo PK là một lần đi qua B-tree tới row. Non-clustered (secondary) index là một B-tree riêng, lá của nó trỏ về clustered key, nên một lookup qua secondary index mất hai bước: index → clustered key → row.
 
 - **Q: Kể tên bốn mức cô lập transaction (isolation level).**
   A: Read uncommitted, read committed, repeatable read, serializable — tăng dần độ nghiêm ngặt. Chúng đánh đổi concurrency lấy việc ngăn anomaly.
@@ -42,27 +42,27 @@ Database là tầng quyết định hệ thống có scale được thật hay k
   A: Hàm trên cột che giấu nó khỏi B-tree, nên optimizer không seek theo range được — nó scan từng row, áp hàm, lọc. Viết lại thành range trên cột gốc: `created_at >= '2026-01-01' AND created_at < '2027-01-01'`. Cùng bẫy: `LIKE '%x%'`, phép toán trên cột, ép kiểu ngầm.
 
 - **Q: Khi nào composite index có ích, và quy tắc cột dẫn đầu là gì?**
-  A: Composite index phục vụ các query lọc trên *tiền tố* của các cột, từ trái sang phải (leftmost-prefix rule). `(a, b, c)` giúp `WHERE a=?`, `(a,b)=?`, `(a,b,c)=?` nhưng KHÔNG giúp `WHERE b=?`. Đặt cột chọn lọc nhất / hay dùng nhất ở equality lên đầu, nhưng cũng cân nhắc cột có lợi cho predicate.
+  A: Composite index phục vụ các query lọc trên _tiền tố_ của các cột, từ trái sang phải (leftmost-prefix rule). `(a, b, c)` giúp `WHERE a=?`, `(a,b)=?`, `(a,b,c)=?` nhưng KHÔNG giúp `WHERE b=?`. Đặt cột chọn lọc nhất / hay dùng nhất ở equality lên đầu, nhưng cũng cân nhắc cột có lợi cho predicate.
 
 - **Q: N+1 query là gì và bạn giết nó thế nào?**
   A: Bạn lấy N parent, rồi một query riêng cho mỗi parent để lấy con = N+1 round trip. Sửa: một `JOIN`/`IN` batch, hoặc `@BatchSize`/`fetch join` trong ORM. Dấu hiệu: latency không bao giờ lộ trong một slow-query log vì mỗi call chỉ ~1 ms.
 
 - **Q: Tại sao pool 2000 connection lại tệ hơn pool 50 connection?**
-  A: Connection là tài nguyên *có hạn* mà DB phải schedule. Vượt `max_connections` của DB thì mọi request mới đều timeout; nhiều connection hơn cũng nghĩa là nhiều context-switch và lock contention hơn ở phía DB. Chọn size bằng Little's law (`TPS × avg_query_time`), không phải bằng core count của máy.
+  A: Connection là tài nguyên _có hạn_ mà DB phải schedule. Vượt `max_connections` của DB thì mọi request mới đều timeout; nhiều connection hơn cũng nghĩa là nhiều context-switch và lock contention hơn ở phía DB. Chọn size bằng Little's law (`TPS × avg_query_time`), không phải bằng core count của máy.
 
 - **Q: Read committed vs repeatable read — anomaly nào mỗi cái vẫn cho phép?**
-  A: Read committed vẫn cho phép *non-repeatable read* (cùng một row khác nhau giữa hai lần đọc trong một txn). Repeatable read vẫn cho phép *phantom read* (một range query trả về các row khác nhau). Serializable chặn cả hai — với giá là concurrency (thường qua range lock / SSI).
+  A: Read committed vẫn cho phép _non-repeatable read_ (cùng một row khác nhau giữa hai lần đọc trong một txn). Repeatable read vẫn cho phép _phantom read_ (một range query trả về các row khác nhau). Serializable chặn cả hai — với giá là concurrency (thường qua range lock / SSI).
 
 ### Senior — thiết kế & bảo vệ
 
 - **Q: Chọn size connection pool cho service 1,000 req/s với 20 ms avg query time. Giờ nếu 10% call mất 5 s thì sao?**
-  A: `1000 × 0.02s = 20` connection là con số steady-state; `cores × 10` là heuristic khởi điểm tốt và HikariCP mặc định là 10. Nhưng 10% call 5 s cần `1000 × 0.1 × 5 = 500` connection *nếu* mỗi call chậm giữ một cái — nghĩa là vài query chậm có thể cạn pool và làm nghẽn 90% đường nhanh. Cách của senior là một pool *riêng* có bound (hoặc timeout + circuit breaker) cho đường chậm để nó không thể làm đói đường nhanh.
+  A: `1000 × 0.02s = 20` connection là con số steady-state; `cores × 10` là heuristic khởi điểm tốt và HikariCP mặc định là 10. Nhưng 10% call 5 s cần `1000 × 0.1 × 5 = 500` connection _nếu_ mỗi call chậm giữ một cái — nghĩa là vài query chậm có thể cạn pool và làm nghẽn 90% đường nhanh. Cách của senior là một pool _riêng_ có bound (hoặc timeout + circuit breaker) cho đường chậm để nó không thể làm đói đường nhanh.
 
 - **Q: "Index làm mọi thứ nhanh hơn." Bảo vệ hay phản bác — kèm chi phí phía write.**
   A: Phản bác. Mọi index đều được duy trì trên mỗi `INSERT`/`UPDATE`/`DELETE`: thêm nhiều lần đi B-tree, thêm page split, thêm WAL. Một bảng write-heavy với 8 index trả thuế duy trì gấp 8 lần và insert chậm hơn. Cách phòng thủ: index cho những query bạn thật sự chạy; drop các index vô dụng; cân nhắc read replica cho mấy truy vấn analytical nặng.
 
 - **Q: Báo cáo nói "DB trung bình 0.1 ms nhưng app mất 800 ms." Bạn nhìn đâu trước?**
-  A: Cái *pool*, không phải DB. Nếu cả thread pool và connection pool đều xếp hàng, request đợi đến lượt lấy connection trong khi DB thì rỗi. Kiểm tra pool saturation, `connectionTimeout`, và xem `wait` time có áp đảo `query` time không. Sửa thường không phải "to hơn DB".
+  A: Cái _pool_, không phải DB. Nếu cả thread pool và connection pool đều xếp hàng, request đợi đến lượt lấy connection trong khi DB thì rỗi. Kiểm tra pool saturation, `connectionTimeout`, và xem `wait` time có áp đảo `query` time không. Sửa thường không phải "to hơn DB".
 
 - **Q: Đi qua một phantom read xuất hiện trong production và bạn đóng nó thế nào.**
   A: Một batch xử lý "tất cả order chưa trả", một txn khác insert một order chưa trả mới cùng range giữa chừng → batch lọt nó (hoặc đếm trùng khi retry). Phòng thủ: `REPEATABLE READ`/`SERIALIZABLE` với range lock, hoặc `SELECT … FOR UPDATE SKIP LOCKED` để claim row nguyên tử nên các worker concurrent không đụng nhau. Nêu rõ isolation level và loại lock.
