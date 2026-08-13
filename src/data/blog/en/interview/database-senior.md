@@ -15,6 +15,67 @@ The database is the layer that actually decides whether your system scales. Inte
 
 > Mindset: recite facts and you're mid-level. Walk through a tradeoff with real numbers and a production failure mode, and you've earned the "senior" checkbox. Every section below ends with the drill an interviewer actually runs.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: What's the difference between a clustered and a non-clustered index?**
+  A: A clustered index *is* the table — rows are stored in its order (InnoDB's `PRIMARY KEY`), so there's exactly one per table; lookups by PK are one B-tree walk to the row. A non-clustered (secondary) index is a separate B-tree whose leaves point back to the clustered key, so a secondary-index lookup is two hops: index → clustered key → row.
+
+- **Q: Name the four SQL transaction isolation levels.**
+  A: Read uncommitted, read committed, repeatable read, serializable — in increasing strictness. They trade concurrency for anomaly prevention.
+
+- **Q: What does a primary key do that a unique constraint doesn't?**
+  A: A PK is the clustered key (InnoDB) — it defines physical row order and is non-null + unique. A unique constraint is just a non-clustered uniqueness guarantee; you can have several.
+
+- **Q: What is a foreign key, and what does `ON DELETE CASCADE` do?**
+  A: A FK constrains a column to exist in another table's referenced column. `CASCADE` makes deleting the parent delete (or null, with `SET NULL`) the dependent rows — convenient, but a mass delete can lock/cascade harder than you expect.
+
+- **Q: Why does `SELECT *` hurt?**
+  A: It pulls every column (more I/O, more network), defeats covering indexes (the index can't satisfy the query alone), and breaks when columns are added/removed. Name the columns you need.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: Why is `WHERE YEAR(created_at) = 2026` a full scan even when `created_at` is indexed?**
+  A: A function on the column hides it from the B-tree, so the optimizer can't do a range seek — it scans every row, applies the function, filters. Rewrite as a raw-column range: `created_at >= '2026-01-01' AND created_at < '2027-01-01'`. Same trap: `LIKE '%x%'`, arithmetic on the column, implicit casts.
+
+- **Q: When is a composite index useful, and what's the leading-column rule?**
+  A: Composite indexes serve queries that filter on a *prefix* of the columns, left to right (the leftmost-prefix rule). `(a, b, c)` helps `WHERE a=?`, `(a,b)=?`, `(a,b,c)=?` but NOT `WHERE b=?` alone. Put the most selective / most-filtered-leading column first, but also the one that benefits equality predicates.
+
+- **Q: N+1 query — what is it and how do you kill it?**
+  A: You fetch N parents, then one query per parent for its children = N+1 round trips. Fix: a single `JOIN`/`IN` batch, or `@BatchSize`/`fetch join` in ORM. The tell: latency that never shows in any single slow-query log because each call is ~1 ms.
+
+- **Q: Why is a 2000-connection pool worse than a 50-connection one?**
+  A: Connections are a *bounded* resource the DB must schedule. Past the DB's `max_connections` every new request times out; more connections also mean more context-switch and lock contention on the DB side. Size by Little's law (`TPS × avg_query_time`), not by box core count.
+
+- **Q: Read committed vs repeatable read — what anomaly does each still allow?**
+  A: Read committed still allows *non-repeatable reads* (same row differs between reads in the same txn). Repeatable read still allows *phantom reads* (a range query returns different rows). Serializable prevents both — at the cost of concurrency (often via range locks / SSI).
+
+### Senior — design & defense
+
+- **Q: Size the connection pool for a service doing 1,000 req/s with 20 ms avg query time. Now what if 10% of calls take 5 s?**
+  A: `1000 × 0.02s = 20` connections is the steady-state number; `cores × 10` is a fine starting heuristic and HikariCP defaults to 10. But the 10% at 5 s case needs `1000 × 0.1 × 5 = 500` connections *if* every slow call holds one — which means a handful of slow queries can exhaust the pool and stall the 90% fast path. The senior move is a *separate* bounded pool (or timeout + circuit breaker) for the slow path so it can't starve the fast one.
+
+- **Q: "Indexes make everything fast." Defend or refute — with the write-side cost.**
+  A: Refute. Every index is maintained on every `INSERT`/`UPDATE`/`DELETE`: more B-tree walks, more page splits, more WAL. A write-heavy table with 8 indexes pays 8× the index-maintenance tax and slower inserts. The defense: index for the queries you actually run; drop the vanity indexes; consider a read replica for heavy analytical reads.
+
+- **Q: A report says "the DB averages 0.1 ms but the app takes 800 ms." Where do you look first?**
+  A: The *pool*, not the DB. If the thread pool and connection pool both queue, requests wait in line for a connection while the DB sits idle. Check pool saturation, `connectionTimeout`, and whether `wait` time dwarfs `query` time. The fix is rarely "bigger DB."
+
+- **Q: Walk me through a phantom read appearing in production and how you closed it.**
+  A: A batch processes "all unpaid orders," another txn inserts a new unpaid order in the same range mid-batch → the batch misses it (or double-counts on retry). Defense: `REPEATABLE READ`/`SERIALIZABLE` with range locks, or `SELECT … FOR UPDATE SKIP LOCKED` to claim rows atomically so concurrent workers don't collide. Name the isolation level and the lock type.
+
+- **Q: You need to add an index to a 2-billion-row table with zero downtime. How?**
+  A: Online/DDL tools (`CREATE INDEX CONCURRENTLY` in Postgres; InnoDB online DDL with `ALGORITHM=INPLACE, LOCK=NONE`) build the index without blocking writes — but they still add load and can take hours at scale; do it in a maintenance window, monitor replication lag, and have a rollback. Never `LOCK=TABLE` on a hot table.
+
+#### Self-check
+
+- [ ] Junior: explain clustered vs non-clustered, the 4 isolation levels, PK vs unique, FK cascade, why `SELECT *` hurts.
+- [ ] Mid: rewrite a function-on-column predicate to a range, state the leftmost-prefix rule, kill an N+1, size a pool with Little's law, name the anomaly each isolation level still allows.
+- [ ] Senior: defend connection-pool sizing under a slow-query tail, quantify the write-side index cost, trace a phantom-read incident, and add a 2B-row index online without downtime.
+
 ## 1. Indexing — where interviews go to die
 
 "Add an index" is the beginner answer. The senior answer explains why the index is three or four B-tree levels tall, which columns go in which order, why the optimizer still refuses to touch it, and what a hot index costs you on every write you didn't plan for.
