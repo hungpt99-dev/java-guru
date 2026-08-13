@@ -1,6 +1,6 @@
 ---
 title: "Java Interview Prep #4: Database & SQL — Junior to Senior"
-description: "The database layer decides real-world scale. Senior candidates must speak fluently about indexing, transaction isolation, connection pooling, and the ORM trap."
+description: "The database layer decides real-world scale. Senior candidates must speak fluently about indexing, transaction isolation, connection pooling, and the ORM trap — with real SQL, not just prose."
 pubDatetime: 2026-08-10T10:15:00+07:00
 featured: false
 draft: false
@@ -11,77 +11,160 @@ tags:
   - sql
 ---
 
-The database is where "it works on my machine" dies. Junior developers write `SELECT *` and wonder why prod is slow; seniors can explain why a query does a sequential scan and what index would fix it. This post climbs from joins to isolation anomalies to pool exhaustion.
+The database is where "it works on my machine" dies. Junior developers write `SELECT *` and wonder why prod is slow; seniors can show the exact `EXPLAIN` proving why a query does a sequential scan and which index fixes it. This post climbs from joins to isolation anomalies to pool exhaustion — with SQL you can actually run.
 
-> Mindset: junior writes a query that returns the right rows; senior writes one that returns the right rows _and_ won't take the site down at 10x traffic.
+> Mindset: junior writes a query that returns the right rows; senior writes one that returns the right rows _and_ won't take the site down at 10x traffic — and can prove it with `EXPLAIN ANALYZE`.
 
 ## Junior — foundations
 
 **Q1. What is a primary key, foreign key, and index?**
-A primary key uniquely identifies a row (enforced unique + not null). A foreign key references a PK in another table, enforcing referential integrity. An index is a data structure (usually B-tree) that speeds lookups on a column at the cost of write overhead and storage. Without an index, a `WHERE` scans the whole table.
+A primary key uniquely identifies a row (enforced unique + not null). A foreign key references a PK in another table, enforcing referential integrity. An index is a B-tree that speeds lookups at the cost of write overhead. Without an index, `WHERE` does a sequential scan — on a 10M-row table that's ~10M row reads (~hundreds of ms to seconds); with an index it's ~4 B-tree levels (~4 random reads, ~0.5 ms).
 
 **Q2. What is the difference between `INNER JOIN` and `LEFT JOIN`?**
-`INNER JOIN` returns only rows with matches in both tables. `LEFT JOIN` returns all rows from the left table, with matched right-table columns or NULLs when there's no match. A classic bug: using `INNER` when you need orphaned rows, silently dropping data.
+`INNER JOIN` returns only matched rows; `LEFT JOIN` returns all left rows with matched right columns or NULLs. A classic bug — using `INNER` when you need orphans drops data silently:
+
+```sql
+-- WRONG: drops users with no orders
+SELECT u.name, o.id FROM users u JOIN orders o ON o.user_id = u.id;
+
+-- RIGHT: keeps every user, shows NULL when they have no orders
+SELECT u.name, o.id FROM users u LEFT JOIN orders o ON o.user_id = u.id;
+```
 
 **Q3. What is the difference between `WHERE` and `HAVING`?**
-`WHERE` filters rows _before_ grouping; `HAVING` filters groups _after_ `GROUP BY`. You cannot use an aggregate in `WHERE` (`WHERE COUNT(*) > 1` is invalid); use `HAVING`.
+`WHERE` filters rows before grouping; `HAVING` filters groups after `GROUP BY`. You cannot use an aggregate in `WHERE` — it's a syntax error:
+
+```sql
+-- WRONG
+SELECT user_id, COUNT(*) FROM orders WHERE COUNT(*) > 1 GROUP BY user_id;
+-- RIGHT
+SELECT user_id, COUNT(*) FROM orders GROUP BY user_id HAVING COUNT(*) > 1;
+```
 
 **Q4. What is a transaction and ACID?**
-A transaction groups operations into an all-or-nothing unit. ACID: **A**tomicity (all or nothing), **C**onsistency (valid state transitions), **I**solation (concurrent txns don't interfere), **D**urability (committed data survives crashes). A bank transfer is the textbook example: debit and credit must both happen or neither.
+A transaction groups operations into an all-or-nothing unit. ACID: **A**tomicity (all or nothing), **C**onsistency (valid state), **I**solation (concurrent txns don't interfere), **D**urability (committed data survives crashes). A transfer: debit A and credit B must both commit or both roll back — never leave money vanished.
 
-**Q5. What is the difference between `COUNT(*)`, `COUNT(col)`, and `COUNT(DISTINCT col)`?**
-`COUNT(*)` counts rows (including NULLs). `COUNT(col)` counts non-NULL values in that column. `COUNT(DISTINCT col)` counts unique non-NULL values. Mixing them up changes your numbers silently.
+**Q5. What is the difference between `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`?**
+`COUNT(*)` counts rows (incl. NULLs); `COUNT(col)` counts non-NULL values; `COUNT(DISTINCT col)` counts unique non-NULL. On a 1M-row table, mixing them silently changes your number — a common reporting bug.
 
-**Q6. What are the main column types for storing money and why not `FLOAT`?**
-Never store money as `FLOAT`/`DOUBLE` — binary floating point can't represent decimals exactly (0.1 + 0.2 ≠ 0.3), causing rounding drift. Use `DECIMAL(p, s)` / `NUMERIC` (exact, fixed scale) or store integer minor units (cents). The "use integer cents" approach avoids decimal math entirely in code.
+**Q6. Why not store money as `FLOAT`?**
+Binary floats can't represent decimals exactly (0.1 + 0.2 ≠ 0.3), causing rounding drift that makes ledgers not reconcile. Use `DECIMAL(19,4)` or store integer minor units (cents):
+
+```sql
+-- WRONG: never
+amount FLOAT;
+-- RIGHT
+amount DECIMAL(19,4);   -- 19 digits, 4 after the decimal
+-- or in app code: store BIGINT cents, format only at the edge
+```
 
 ## Mid — tradeoffs & pitfalls
 
 **Q1. How does a B-tree index work, and when is it useless?**
-A B-tree index keeps rows sorted by the indexed column, so equality and range scans are O(log n) instead of O(n). For 1B rows a B-tree is ~4 levels deep — ~4 random reads to find a row. It becomes useless when: the predicate uses a function on the column (`WHERE YEAR(created) = 2024` can't use the `created` index — use a functional/indexed expression or range), or when the filter is so unselective (returns >~20–30% of rows) the planner prefers a full scan anyway.
+A B-tree keeps rows sorted by the indexed column, so equality/range scans are O(log n) instead of O(n). For 1B rows a B-tree is ~4 levels deep — ~4 random reads (~0.5 ms each) to find a row, vs a full scan of 1B rows (~tens of seconds). It's useless when the predicate wraps the column in a function (can't use the index) or is so unselective it returns >~20–30% of rows (planner prefers a scan):
+
+```sql
+-- WRONG: function on column -> index on created_at NOT used
+SELECT * FROM orders WHERE YEAR(created_at) = 2024;
+-- RIGHT: range that the index serves
+SELECT * FROM orders WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01';
+```
 
 **Q2. What is a composite index and the leftmost-prefix rule?**
-A composite (multi-column) index like `(a, b, c)` is sorted by a, then b, then c. It can serve queries that filter on `a`, `(a, b)`, or `(a, b, c)` — the **leftmost prefix** — but NOT a query that filters only on `b` or `c`. Order the columns by selectivity and by which predicates you actually use. A wrong column order is a dead index.
+`(a, b, c)` is sorted by a, then b, then c. It serves queries filtering on `a`, `(a,b)`, or `(a,b,c)` — but NOT `b` or `c` alone. Order by selectivity. Wrong column order = a dead index:
 
-**Q3. Explain the transaction isolation levels and their anomalies.**
+```sql
+-- index: (customer_id, created_at)
+SELECT * FROM orders
+ WHERE customer_id = 42 ORDER BY created_at DESC;   -- uses index ✓
+SELECT * FROM orders WHERE created_at > '2024-01-01'; -- ignores index ✗ (no leftmost a)
+```
 
-- **Read uncommitted**: sees dirty (uncommitted) reads. Rarely used.
-- **Read committed**: no dirty reads, but non-repeatable reads (same row differs between reads in one txn).
-- **Repeatable read**: same row reads consistently within a txn; may still get phantom reads (new rows appear).
-- **Serializable**: full isolation, like running serially — safest, slowest.
-  Most engines default to read committed (Postgres repeatable read). Higher isolation = fewer anomalies = more locking/overhead.
+**Q3. Explain isolation levels and their anomalies.**
+
+- **Read committed**: no dirty reads; non-repeatable reads possible (same row differs mid-txn).
+- **Repeatable read**: consistent within a txn; phantoms possible.
+- **Serializable**: fully isolated, like running serially — safest, slowest (can be 5–10× slower than read committed under contention).
+  Most engines default to read committed (Postgres repeatable read). Higher isolation = fewer anomalies = more locking.
 
 **Q4. What is a deadlock and how do you avoid it?**
-A deadlock is two transactions each holding a lock the other needs. Databases detect and roll back one. Avoid by **accessing resources in a consistent global order** (always update accounts in ID order), keeping transactions short, and not holding locks across network calls. Always be ready to retry a rolled-back txn.
+Two transactions each hold a lock the other needs. The DB detects and rolls one back (raise `40P01` in Postgres). Avoid by accessing resources in a **consistent global order** and keeping txns short:
 
-**Q5. What is an N+1 query problem and how do you fix it?**
-Your ORM loads a list of N parents, then issues N separate queries for their children ("N+1"). Fix: eager fetch / `JOIN FETCH` / batch fetch (`@BatchSize`) so it's 1 or few queries. N+1 is the #1 silent performance killer in JPA/Hibernate apps — it looks fine in tests (small data) and melts in prod.
+```sql
+-- Both services update accounts; ALWAYS update in id order to avoid cross-deadlock
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;  -- lower id first
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;  -- then higher
+COMMIT;
+```
 
-**Q6. What is connection pooling and why would you exhaust it?**
-A pool reuses DB connections (opening one is expensive, ~ms to tens of ms). You exhaust it by: (1) leaking connections (forgot to close / not using try-with-resources), (2) holding a connection inside a long transaction or external call, (3) too-low `maxPoolSize` for your concurrency. Symptom: `Timeout: could not get a connection`. Tune `maximumPoolSize` to (core_concurrency × avg_query_time / target_latency) and never do slow work on a pooled connection.
+**Q5. What is the N+1 problem and how do you fix it?**
+Your ORM loads N parents, then issues N separate child queries. At N=1000 that's 1001 round-trips (~each 1–5 ms → ~1–5 s added). Fix with a join or batch fetch:
+
+```sql
+-- WRONG (N+1): 1 query for orders, then 1 per order for its items
+SELECT * FROM orders WHERE user_id = 42;
+SELECT * FROM order_items WHERE order_id = ?;   -- repeated 1000x
+
+-- RIGHT: 1 query, all items
+SELECT o.id, i.sku, i.qty
+FROM orders o JOIN order_items i ON i.order_id = o.id
+WHERE o.user_id = 42;
+```
+
+**Q6. What is connection pooling and why exhaust it?**
+Opening a DB connection costs ~5–20 ms. A pool reuses them. You exhaust it by leaking connections (no try-with-resources) or holding one inside a slow call, so `HikariPool` throws `ConnectionTimeoutException` after `connectionTimeout` (default 30 s). Rule of thumb: `pool_size ≈ concurrency × (avg_query_ms / target_latency_ms)`.
 
 ## Senior — design & defense
 
 **Q1. A report query on a 500M-row table times out. Walk the diagnosis and fix.**
-"I'd `EXPLAIN ANALYZE` it — usually it's a sequential scan because the predicate wraps the column in a function, or the index isn't leftmost-matching. If it's an aggregation report, I'd ask whether it needs to be real-time: often a materialized view refreshed every 5–15 min is the right answer, turning a 30 s scan into a 50 ms read. If it must be live, I add a covering composite index so the planner does an index-only scan. I prove the fix with `EXPLAIN ANALYZE` before/after and confirm p95."
+"I'd `EXPLAIN ANALYZE` — usually a sequential scan because the predicate wraps a column in a function or the index isn't leftmost-matching. If it's an aggregation, a materialized view refreshed every 5–15 min turns a 30 s scan into a 50 ms read. If it must be live, a **covering index** lets the planner do an index-only scan (no heap fetch). Proof before/after:"
 
-**Q2. Design a schema for an orders table at 1M orders/day. Indexing strategy?**
-"I'd partition by time (e.g. monthly range partitions) so old partitions can be archived and recent queries scan less. Index `(customer_id, created_at)` for the common 'my orders, newest first' query (leftmost prefix + sort), and a separate index on `status` only if it's selective. I'd avoid indexing every column — each index slows writes, and at 1M/day write amplification matters. I'd also move hot analytics to a read replica / columnar store rather than hammer the primary."
+```sql
+-- Before: Seq Scan on orders  (cost=0.00..8_500_000 rows=120_000_000)
+-- After adding (status, created_at) INCLUDE (total):
+--   Index Only Scan using ix_orders_status_created ... (cost=0.00..1_200)
+```
 
-**Q3. How do you choose isolation level for a payment service, and defend it with a failure mode?**
-"For payments I'd use `REPEATABLE READ` or `SERIALIZABLE` on the critical transfer path — a non-repeatable read there could double-debit. Cost: more locks, possible serialization failures under contention, so I keep those transactions tiny (just the balance math, no external calls) and retry on serialization failure. For read-heavy reporting I'd drop to `READ COMMITTED` on a replica. The defense is: the anomaly you can't tolerate dictates the level; you pay for isolation only where the money is."
+"I confirm p95 drops from ~30 s to <100 ms."
 
-**Q4. You're seeing lock waits and timeouts under moderate load. Find the cause.**
-"I'd look at `pg_locks` / `SHOW ENGINE INNODB STATUS` for the blocking session and the statement it holds. Nine times out of ten it's a long transaction holding a row lock while it does something slow (a call, a log, a sleep) — the lock is held for seconds instead of milliseconds. Fix: shrink the transaction to the minimal writes, move the slow work outside it, and add a lock timeout so a blocked txn fails fast instead of cascading. I measure lock-wait time before/after."
+**Q2. Design a schema for 1M orders/day. Indexing strategy?**
+"Partition by month (range partitions) so old data archives and recent queries scan less. Index `(customer_id, created_at)` for 'my orders, newest first' (leftmost + sort). I'd avoid indexing every column — each index adds ~10–20% write amplification, and at 1M/day that matters. Push hot analytics to a read replica."
 
-**Q5. ORM or raw SQL — when do you drop JPA for hand-written SQL?**
-"When the query is complex (deep joins, window functions, bulk updates) or performance-critical, JPA's generated SQL is opaque and often does N+1 or fetches too much. I'd use a thin JDBC/`JdbcTemplate` or jOOQ query with exactly the columns I need, mapped to a DTO. Rule: JPA for CRUD on simple entities; hand-written SQL (or jOOQ) for reports, bulk ops, and hot paths. I never let the ORM hide a full-table fetch in production."
+```sql
+CREATE TABLE orders (
+  id BIGSERIAL PRIMARY KEY,
+  customer_id BIGINT NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  total DECIMAL(19,4) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+) PARTITION BY RANGE (created_at);
 
-**Q6. How do you defend a connection-pool sizing number to your team?**
-"I size it from Little's Law: `pool_size ≈ target_concurrency × (avg_query_time / acceptable_latency)`. If queries average 5 ms and I need 200 concurrent, that's ~200 × (0.005 / 0.1) ≈ 10, but I pad for variance and failover, landing ~20–30, not 200. Oversizing wastes DB connections (each holds memory + a backend process) and can _worsen_ throughput by increasing lock contention. I set `maximumPoolSize` deliberately, monitor wait time, and tune from real numbers — not `200` because 'more is better'."
+CREATE INDEX ix_orders_cust_created ON orders (customer_id, created_at DESC);
+```
+
+**Q3. Choose isolation for a payment service, defended by failure mode.**
+"For the transfer path I use `REPEATABLE READ`/`SERIALIZABLE` — a non-repeatable read could double-debit. Cost: more locks and possible serialization failures (Postgres `serialization_failure`, SQLSTATE 40001) under contention, so I keep those txns tiny (just the balance math) and retry on 40001. For read-heavy reporting I drop to `READ COMMITTED` on a replica. The anomaly you can't tolerate dictates the level — you pay for isolation only where the money is."
+
+**Q4. You see lock waits under moderate load. Find the cause.**
+"I'd query `pg_locks` joined to `pg_stat_activity` for the blocking PID and its statement. Nine times out of ten a long txn holds a row lock while doing a slow external call — the lock lives for seconds instead of ms. Fix: shrink the txn to minimal writes, move the slow work outside it, set `lock_timeout = 2s` so a blocked txn fails fast instead of cascading. I measure lock-wait time before/after."
+
+**Q5. ORM or raw SQL — when do you drop JPA?**
+"When the query is complex (deep joins, window functions, bulk updates) or hot, JPA's generated SQL is opaque and often does N+1. I use `JdbcTemplate`/jOOQ with exactly the columns I need"
+
+```java
+// WRONG: loads the whole entity graph, then a field
+Order o = repo.findById(42L).get();  // + lazy collections = N+1
+// RIGHT: one projection, one query
+String sql = "SELECT status, total FROM orders WHERE id = ?";
+return jdbcTemplate.queryForObject(sql, (rs,r) -> new OrderView(rs.getString(1), rs.getBigDecimal(2)), id);
+```
+
+**Q6. Defend a connection-pool size with Little's Law.**
+"`pool ≈ target_concurrency × (avg_query_ms / acceptable_latency_ms)`. At 5 ms avg and 200 concurrent, that's ~200 × (0.005 / 0.1) ≈ 10, padded for variance to ~20–30 — not 200. Oversizing wastes DB connections (each holds a backend process + ~5–10 MB) and can _worsen_ throughput via lock contention. I set `maximumPoolSize` from real numbers, monitor wait time, and tune."
 
 #### Self-check
 
-- [ ] Junior: I can explain PK/FK/index, INNER vs LEFT join, WHERE vs HAVING, ACID, and why not FLOAT for money.
-- [ ] Mid: I can explain B-tree indexing, composite leftmost-prefix, isolation levels, deadlocks, N+1, and pool exhaustion.
-- [ ] Senior: I can diagnose a slow report query with EXPLAIN ANALYZE, design partitioning + indexing for 1M/day, pick isolation by failure mode, and size a connection pool from Little's Law with real numbers.
+- [ ] Junior: I can explain PK/FK/index, INNER vs LEFT join, WHERE vs HAVING, ACID, and why not FLOAT for money — with SQL.
+- [ ] Mid: I can explain B-tree indexing + function-wrap pitfall, composite leftmost-prefix, isolation levels, deadlock avoidance, N+1, and pool exhaustion.
+- [ ] Senior: I can diagnose a slow report with EXPLAIN ANALYZE + covering index, design partitioning/indexing for 1M/day, pick isolation by failure mode, find lock waits, drop JPA for hand-written SQL, and size a pool from Little's Law.
