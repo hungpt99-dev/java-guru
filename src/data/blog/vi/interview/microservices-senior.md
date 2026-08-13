@@ -15,6 +15,67 @@ Phỏng vấn microservices test **phán đoán** nhiều hơn kiến thức. C�
 
 > Tư duy: junior liệt kê patterns; senior kể lại failure modes. Khi bạn trả lời bằng một con số, một câu chuyện postmortem, hay một câu "đây là đánh đổi và lúc nào tôi lật ngược nó" — bạn đã qua vạch.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: Khác nhau giữa monolith và microservices?**
+  A: Monolith là một deployable gánh mọi domain; microservices là các service deploy độc lập chia theo business capability, mỗi cái có data riêng. Tradeoff là autonomy team + scale độc lập vs độ phức tạp phân tán.
+
+- **Q: Quy tắc quan trọng nhất về database của service?**
+  A: Mỗi service sở hữu data của nó và chỉ expose qua API — không shared database. Shared DB ngầm coupling các service và biến kiến trúc "micro" thành một distributed monolith.
+
+- **Q: API gateway dùng để làm gì?**
+  A: Là cửa trước: routing, auth, rate limiting, aggregation trong một chỗ, nên các service lẻ không phải tự implement cross-cutting concern. (Dù dồn logic vào gateway quá mức cũng là một bẫy riêng.)
+
+- **Q: Service discovery là gì?**
+  A: Cách các service tìm địa chỉ mạng của nhau lúc runtime (registry như Consul/Eureka, hoặc DNS-based). Thiếu nó bạn hardcode address và không scale hay relocate instance được.
+
+- **Q: Giao tiếp đồng bộ vs bất đồng bộ — khác gì?**
+  A: Sync (HTTP/gRPC) chờ response; caller bị block. Async (message/event) bắn rồi đi tiếp; consumer xử lý sau. Async decouple và hấp thụ spike, nhưng thêm tư duy eventual-consistency.
+
+### Mid — tradeoff & bẫy
+
+- **Q: Distributed transaction là gì và tại sao 2PC thường bị loại?**
+  A: 2PC (two-phase commit) cố làm một write xuyên service nguyên tử, nhưng nó giữ lock xuyên service và gãy nát dưới partial failure — kinh điển là "distributed transaction là quả bom latency và availability." Câu trả lời senior là SAGA + outbox + eventual consistency.
+
+- **Q: SAGA pattern là gì và khi nào dùng?**
+  A: SAGA là chuỗi các local transaction, mỗi cái có một compensating action để undo bước trước nếu fail. Dùng khi bạn phải giữ nhiều service nhất quán mà không cần 2PC. Tradeoff: chấp nhận _eventual_ consistency và phải xử lý compensation cùng event out-of-order.
+
+- **Q: Outbox pattern là gì và tại sao cần?**
+  A: Ghi business change và event cần publish trong _cùng một_ local DB transaction (một bảng "outbox"), rồi một relay publish event. Nó giải quyết dual-write problem (DB committed nhưng gọi broker fail → mất event, hoặc ngược lại → trùng). Relay làm event eventual consistent.
+
+- **Q: Circuit breaker là gì, các trạng thái?**
+  A: Nó bọc một call downstream fail và trip open sau một ngưỡng lỗi, fail nhanh thay vì chất đống thread. Trạng thái: closed → open (reject) → half-open (thử một call). Thiếu nó, một dependency chậm cascade thành outage toàn cục (vụ "dependency khỏe mà tôi lại down").
+
+- **Q: Distributed monolith là gì và nhận biết thế nào?**
+  A: Những service không deploy/scale độc lập được vì share DB, gọi sync trên request path, hoặc block lẫn nhau khi deploy. Dấu hiệu: bạn không ship nổi một service mà không phối hợp release train. Thuốc là bounded context thực sự + async где có thể, không phải thêm box.
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: "Thiết kế một microservice." Câu đầu tiên senior nhất là gì?**
+  A: Thường là "chưa, đừng" — hoặc "khoét phần nào của monolith trước, và ship thế nào trong lúc khoét?" Không ai được điểm vì vẽ thêm hộp. Cách của senior là xếp trình tự extraction sao cho mỗi bước deploy độc lập và rollback an toàn.
+
+- **Q: Một payment service downstream chậm và giờ service CỦA BẠN timeout rồi OOM. Đi vụ incident.**
+  A: Không timeout + không circuit breaker → thread block trên call chậm, pool đầy, request xếp hàng, heap đầy các context chờ → cascade. Sửa: per-call deadline (`tryLock`/HTTP timeout), circuit breaker fail nhanh, bulkhead để một dependency không ăn hết thread, và backpressure. Nêu đúng cái knob.
+
+- **Q: Cần nhất quán xuyên service cho "reserve seat + charge card." Thiết kế không dùng 2PC.**
+  A: SAGA: reserve seat (local txn + event) → charge card (local txn + event) → nếu charge fail, compensate bằng release seat. Outbox trên mỗi bước để event tin cậy. Handler idempotent (event có thể redeliver). Nêu consistency window và user thấy gì trong đó.
+
+- **Q: Giữ một rolling deploy an toàn khi service phụ thuộc API mới của nhau?**
+  A: Backward-compatible change trước (thêm, không break), consumer-tolerant parsing, và contract test trong CI. Deploy change tương thích của _provider_ trước, rồi call mới của _consumer_. Blue-green hoặc canary để deploy xấu chỉ ảnh hưởng một slice. DB migration tương thích hai chiều (thêm column, không rename phá hủy đến khi unused).
+
+- **Q: Khi nào bạn CỐ Ý không tách service?**
+  A: Khi chi phí hệ phân tán (network, consistency, ops, tracing) vượt lợi ích — một domain gắn kết thay đổi cùng nhau nên ở một deployable. Tách "vì scalability" một service CPU-light là win giả nhân bản failure mode. Judgment > dogma.
+
+#### Tự kiểm tra
+
+- [ ] Junior: monolith vs microservices, database-per-service, gateway/discovery là gì, sync vs async.
+- [ ] Mid: vì sao 2PC bị loại, SAGA + compensation, outbox pattern, trạng thái circuit-breaker, nhận biết distributed monolith.
+- [ ] Senior: "chưa, đừng" là câu đầu, kể vụ cascade với đúng cách sửa, thiết kế SAGA cho một flow thật, xếp trình tự rolling-deploy an toàn, biện luận khi KHÔNG tách.
+
 ## 1. Bẫy distributed-monolith
 
 Chia nhỏ sớm quá mang lại **network call thay cho method call**, distributed transaction, và **10× chi phí vận hành** mà không được lợi gì. Mọi monolith bạn tách đều nộp một khoản thuế trả trước: cái network. Một round trip HTTP cùng datacenter là **~0,1–0,5 ms**; một method call trong process là **~1 ns**. Bạn đang tự nguyện chậm hơn 2–3 bậc độ lớn và gọi đó là kiến trúc.

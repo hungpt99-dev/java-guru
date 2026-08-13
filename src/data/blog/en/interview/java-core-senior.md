@@ -15,6 +15,67 @@ A junior knows Java syntax. A senior knows **what the JVM is doing, why it behav
 
 > Mindset: "it depends, and here's the trade-off" beats reciting facts every time. The moment you answer with a tradeoff, a number, or a postmortem instead of a definition, you've cleared the bar.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: What's the difference between `==` and `.equals()` in Java?**
+  A: `==` compares references (are they the same object); `.equals()` compares _value_ (overridable). And `Integer.valueOf` caches -128..127, so `==` on boxed integers "works" in that range and bites at 128 — a bug that passes tests and dies in prod.
+
+- **Q: What are the four pillars of OOP?**
+  A: Encapsulation, abstraction, inheritance, polymorphism — but a senior can say _why_ each one exists (e.g. encapsulation bounds the blast radius of change), not just the words.
+
+- **Q: What's the difference between `ArrayList` and `LinkedList`?**
+  A: `ArrayList` is a growable array — O(1) random access, O(n) insert/delete in the middle; `LinkedList` is a doubly-linked list — O(1) add/remove at ends, O(n) access. Default to `ArrayList` unless you insert/remove constantly at the head.
+
+- **Q: What does `final` mean on a class / method / variable?**
+  A: `final` class = no subclass; `final` method = no override; `final` variable = assigned once. A `final` reference can still mutate the object it points to (the reference is fixed, not the state).
+
+- **Q: What's the difference between `String`, `StringBuilder`, and `StringBuffer`?**
+  A: `String` is immutable (every concat allocates). `StringBuilder` is mutable and non-synchronized (fast, single-thread). `StringBuffer` is the synchronized twin (use only when shared across threads). In a loop, `StringBuilder` avoids a storm of throwaway `String` objects.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: Why is double-checked locking broken without `volatile`?**
+  A: The unsynchronized read can observe a _partially constructed_ singleton — the reference store can float before the constructor's writes, so another thread sees a non-null but half-built instance. `volatile` creates the constructor-write → read happens-before edge that closes it.
+
+- **Q: `i++` on a `volatile int` — is it safe?**
+  A: No. `volatile` gives visibility + ordering, not atomicity. `i++` is read-modify-write; two threads can both read 41 and both write 42. Use `AtomicInteger` (one CAS) or `LongAdder` under heavy contention (several× faster because it stripes across cells).
+
+- **Q: What is false sharing and how do you fix it?**
+  A: Two independent fields on the same 64-byte cache line ping-pong across cores on every write, even in lock-free code. A per-thread `long[]` counter is the classic victim. `@Contended` (JEP 142) pads fields onto separate lines; a coherence miss costs ~100 ns per ping.
+
+- **Q: `synchronized` vs `ReentrantLock` — when do you reach for which?**
+  A: Uncontended `synchronized` is nearly free (a mark-word update, ~tens of ns); contended pays a park/unpark into the kernel (microseconds). `ReentrantLock` adds `tryLock(timeout)`, multiple `Condition`s, and fairness — but you must `unlock()` in `finally` and prefer `tryLock(2, SECONDS)` so a stuck lock can't hang the thread.
+
+- **Q: `CompletableFuture.thenApplyAsync` runs on which pool, and what breaks?**
+  A: On `ForkJoinPool.commonPool()` (parallelism = cores−1). Blocking work (JDBC, sleep) inside it starves the pool and stalls everything downstream even when the box is idle. Pass an explicit executor sized for the blocking work (or use virtual threads).
+
+### Senior — design & defense
+
+- **Q: A service does 2,000 req/s, each blocks ~50 ms in JDBC. Size the thread pool. Now 10% take 5 s — what changes?**
+  A: `2000 × 0.05 = 100` workers steady-state (Little's law). But the 10%-at-5s tail needs `2000 × 0.1 × 5 = 1000` workers _if_ every slow call holds one — so a few slow queries exhaust the pool and stall the fast 90%. Senior move: bound the pool, use `CallerRunsPolicy` for backpressure, and isolate the slow path on its own executor with a deadline.
+
+- **Q: When do virtual threads help, when not, and what still pins a carrier after JDK 24?**
+  A: They help I/O-bound blocking (millions of concurrent HTTP/DB calls). They don't help CPU-bound work (still N CPUs). After JEP 491 (JDK 24) `synchronized` no longer pins; residual pinning is native frames (JNI/FFM), class loading, and local file I/O on Linux. A `ReentrantLock` never pinned — `LockSupport.park` unmounts the virtual thread.
+
+- **Q: You see `OutOfMemoryError: Metaspace` after a redeploy with no class added. First command?**
+  A: `jcmd <pid> VM.native_memory` and `-XX:MaxMetaspaceSize`. The cause is a classloader leak: something roots the old loader (static field, JDBC driver in `DriverManager`, cached proxy) so metadata never unloads. A few MB per redeploy becomes 2 GB after a hundred deploys.
+
+- **Q: A hot method is still slow after 10 minutes of traffic. What's the JIT possibly doing, and how do you prove it?**
+  A: Tiered compilation (C1→C2) with OSR; it may be **megamorphic** (too many receiver types to inline) or stuck recompiling past `-XX:CompileThreshold`. Prove with `-Xlog:jit+compilation=debug` — you'll see recompilation churn, not "we need a bigger box."
+
+- **Q: `SELECT * FROM orders WHERE YEAR(created_at)=2026` is slow though indexed — wait, that's SQL. What's the Java analog that bites just as hard?**
+  A: Calling a method inside a loop that does a `findById` per element (N+1), or `computeIfAbsent` recursively on the same key (Java 8 deadlocks the bin). Both hide O(n²) / deadlock behind innocent-looking loops — the senior tells are "where does it hide," not "does it exist."
+
+#### Self-check
+
+- [ ] Junior: `==` vs `.equals`, the four pillars, `ArrayList` vs `LinkedList`, `final`, `String` vs `StringBuilder`.
+- [ ] Mid: fix DCL with `volatile`, why `volatile int++` isn't safe, false sharing + `@Contended`, `synchronized` vs `ReentrantLock`, the `commonPool` trap.
+- [ ] Senior: size a pool with Little's law under a slow tail, state when virtual threads help/pin, diagnose a Metaspace leak, prove a JIT issue from a log, name the Java-side N+1 / `computeIfAbsent` traps.
+
 ## 1. Heap, GC, and the pause math
 
 Expect: "What happens when you `new` an object?" A mid answer stops at "it goes on the heap." A senior talks about **where**, **how fast**, and **what the pause costs** — because that's what actually bites in production. Every question in this section has a numeric answer; interviewers listen for the number, not the noun.

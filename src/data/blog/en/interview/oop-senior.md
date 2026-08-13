@@ -15,6 +15,67 @@ Object-oriented programming is the entry ticket. A junior recites "a class is a 
 
 > Mindset: when the interviewer says "your team needs a new feature," the senior response is never "add a branch." It's "which axis of change is this — and what do I build that I won't have to edit tomorrow?" Definitions pass juniors; **decisions under constraints** clear the senior bar.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: What does each SOLID letter stand for?**
+  A: S — Single Responsibility, O — Open/Closed, L — Liskov Substitution, I — Interface Segregation, D — Dependency Inversion. A junior can recite them; a senior can point at the code that violates one and the cost of fixing it.
+
+- **Q: What's the difference between an interface and an abstract class?**
+  A: An interface is a pure contract (no state, multiple inheritance); an abstract class can hold state and provide partial implementation (single inheritance). Use an interface to define a role; an abstract class to share code among close relatives.
+
+- **Q: What's the difference between inheritance and composition?**
+  A: Inheritance = "is-a" (shares the parent's implementation); composition = "has-a" (holds an instance and delegates). Composition is usually favored because it's more flexible and less coupled.
+
+- **Q: What is polymorphism, in one sentence?**
+  A: One interface, many implementations — the caller writes against the abstraction and the runtime picks the concrete behavior (method override, or interface dispatch).
+
+- **Q: What are the four pillars of OOP again — and which one does `private` belong to?**
+  A: Encapsulation, abstraction, inheritance, polymorphism. `private`/`protected` are encapsulation — hiding state behind a controlled surface so change stays local.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: Why is "favor composition over inheritance" more than a slogan?**
+  A: Inheritance couples you to the parent's implementation and breaks when requirements cross-cut (a class needs two behaviors from two parents — but Java has single inheritance). Composition lets you swap a behavior at runtime via an injected dependency. The trap: a deep hierarchy where every change ripples up and down the tree.
+
+- **Q: Tell me a concrete Open/Closed violation and the fix.**
+  A: A `InvoiceCalculator` with `if (type == PDF) … else if (type == XLSX)` — every new format edits the class (not closed for modification). Fix: a `Renderer` interface + one class per format, selected by a map. Now adding a format means adding a class, not editing existing code.
+
+- **Q: What's the Liskov violation people actually ship?**
+  A: A subclass that strengthens a precondition or weakens a postcondition — e.g. `Square extends Rectangle` but `setWidth` must also set height, breaking the rectangle contract callers rely on. The fix is usually "don't force the IS-A" — model them as siblings under a common abstraction instead.
+
+- **Q: Why is a "fat interface" a problem, and what's the fix?**
+  A: An interface with 12 methods forces every implementer to stub behavior it doesn't need (the `RemoteControl` with `startCar` on a `ToyCar`). Fix: split into role interfaces (`Printable`, `Scannable`) so clients depend only on what they use — Interface Segregation.
+
+- **Q: Dependency Inversion — what's the difference between it and "depend on abstractions"?**
+  A: DIP says high-level modules shouldn't depend on low-level ones; both depend on abstractions, and the binding happens at the edge (constructor injection). The win: you can swap the Postgres repo for an in-memory one in a test without touching the service. Without it, business logic is welded to the DB driver.
+
+### Senior — design & defense
+
+- **Q: "Add CSV export to the report." Where does the code go, and what do you refuse to do?**
+  A: Refuse the `if/else` in the existing class (OCP violation). Add a `ReportExporter` interface, a `CsvExporter` implementation, register it, and inject/select by format. The senior tell: I know _which axis of change_ this is (output format) and I isolate it so the next format is additive, not invasive.
+
+- **Q: You inherited a 6-level inheritance tree that nobody understands. What do you do — rewrite it or leave it?**
+  A: Don't rewrite on day one. First, characterize behavior with characterization tests so I can refactor without silent breakage. Then flatten the risky parts to composition incrementally, behind those tests, one subclass at a time. A big-bang rewrite of working code is how you create a worse incident.
+
+- **Q: When is inheritance actually the right call over composition?**
+  A: When there's a genuine "is-a" with shared _implementation_ that won't diverge — e.g. `BaseEntity` with id/version/audit fields, or a `Template Method` where the skeleton is stable and only steps vary. Forgive the coupling because the abstraction is stable. Name the case where composition would be ceremony.
+
+- **Q: Defend "interface for every dependency" — and where it becomes cargo-cult.**
+  A: An interface per dependency is great when there are two implementations or you test against a fake. It's cargo-cult when a class has one caller and zero alternate implementations — you've added a layer of indirection for no benefit. Senior judgment: introduce the seam when the second implementation (or the test) actually appears, not preemptively.
+
+- **Q: Walk me through a design that "followed SOLID" but was awful to work in.**
+  A: A `UserService` split into 14 tiny classes behind 14 interfaces — every change touched six files, and the "abstractions" had one implementation each (ceremony, not engineering). The lesson: SOLID serves changeability and testability, not file count. I'd collapse the single-impl interfaces and keep only the seams that earn their keep.
+
+#### Self-check
+
+- [ ] Junior: SOLID letters, interface vs abstract class, inheritance vs composition, polymorphism, what `private` belongs to.
+- [ ] Mid: why composition-over-inheritance, a real OCP violation + fix, a shipped LSP break, fat-interface fix, DIP vs "depend on abstractions."
+- [ ] Senior: where new code goes without violating OCP, how to safely refactor a deep hierarchy, when inheritance is right, interface-cargo-cult, a SOLID-but-awful design postmortem.
+
 ## 1. SOLID — the applied version, with the traps
 
 "Define SOLID" is a screen for juniors. Seniors get asked to apply it, then to defend the places where applying it naively is wrong. Walk all five, but be ready to go deeper on the three that actually bite in production: Open/Closed, Dependency Inversion, and Liskov.

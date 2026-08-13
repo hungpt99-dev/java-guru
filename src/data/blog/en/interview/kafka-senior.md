@@ -17,6 +17,67 @@ A junior knows the three delivery semantics. A senior can narrate the exact inst
 
 > Mindset: recite semantics and you're mid-level. Walk through a tradeoff with real numbers and a production failure mode, and you've earned the "senior" checkbox. Every section below ends with the drill an interviewer actually runs.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: What are the three delivery semantics in Kafka?**
+  A: At-most-once (may lose), at-least-once (may duplicate), exactly-once (no loss, no dup). Producers default to at-least-once; consumers must dedupe or make processing idempotent to approach exactly-once.
+
+- **Q: What's a topic, partition, and consumer group?**
+  A: A topic is a log; it's split into partitions (each an ordered, immutable sequence). A consumer group is a set of consumers sharing the work — each partition is consumed by exactly one member of the group.
+
+- **Q: What does a consumer offset represent?**
+  A: The position of the next record to read in a partition. Committed offsets let a consumer resume after a restart or rebalance. `auto-commit` commits periodically; manual commit gives you control over the consume-process-commit boundary.
+
+- **Q: What's the difference between a queue and a topic?**
+  A: A traditional queue delivers each message to one consumer; a Kafka topic broadcasts to all consumer groups that subscribe. That's why one topic can feed analytics, audit, and the core service at once.
+
+- **Q: What does `acks=all` mean?**
+  A: The producer waits for the leader _and_ all in-sync replicas to acknowledge the write before considering it successful — stronger durability, at the cost of latency. `acks=1` waits only for the leader; `acks=0` fires and forgets.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: `enable.idempotence=true` — does it protect the Postgres write on the other side of my consumer?**
+  A: No. Idempotence only de-dupes producer→broker retries within Kafka. Once your consumer writes to Postgres, a redelivery (crash before offset commit) writes again. Exactly-once end-to-end needs an idempotent _sink_ (upsert by key) or transactional outbox.
+
+- **Q: A single poison record silently stalls one partition for hours while dashboards stay green. Why, and the fix?**
+  A: The consumer throws on that record, never commits the offset, and Kafka redelivers it forever — a 1-record poison blocks the whole partition. Fix: a dead-letter queue (route the bad record after N retries) and alert on consumer lag, which is the metric that actually shows the stall.
+
+- **Q: How do you pick partition count?**
+  A: By throughput and consumer parallelism, not a guess: `partitions ≈ max(target_producer_MBps / per_partition_MBps, target_consumer_instances)`. More partitions = more parallelism but also more open files, more rebalances, and longer election if a broker dies.
+
+- **Q: What causes a rebalance storm, and why does it freeze your queues?**
+  A: Consumers repeatedly join/leave the group (slow poll, long GC pause, heartbeat timeout), triggering a rebalance that revokes all partitions, pauses consumption, and reassigns. Fix: tune `session.timeout.ms`/`heartbeat.interval.ms`, keep poll loops fast, and use cooperative rebalancing (incremental) where possible.
+
+- **Q: Consumer lag is climbing — where do you look first?**
+  A: Whether it's a _throughput_ problem (the consumer can't keep up — add instances/partitions) or a _processing_ problem (each record is slow — a slow downstream call). Lag per partition tells you if it's one hot partition or global. The metric that proves the _consumer_, not the broker, is the bottleneck is consumer lag vs broker CPU.
+
+### Senior — design & defense
+
+- **Q: You need exactly-once across "Kafka → consume → write Postgres." Design it.**
+  A: Either (a) transactional outbox in Postgres + a relay that publishes to Kafka atomically with the business write (the DB is the source of truth), or (b) idempotent sink: consumer upserts by a deterministic key and commits the offset in the same local transaction. `enable.idempotence` + `ack=all` covers the producer; the sink covers the consumer. Name which you picked and why.
+
+- **Q: A partition leader election took 30 s and every dashboard around it stayed green. Explain.**
+  A: Broker failure triggers leader election for that partition's replicas; until a new ISR leader is elected, that partition is unavailable for writes — but other partitions and other services are fine, so global dashboards look healthy. The tell is per-partition unavailability + producer timeouts, not a system-wide red. Fix: more replicas, faster `election.timeout`, and producers that retry with backoff.
+
+- **Q: Size a cluster for 50 MB/s ingest with 3-day retention at 1 KB records. How many brokers?**
+  A: 50 MB/s × 3 days = ~13 TB raw; ×replication factor 3 = ~39 TB, ÷usable-per-broker (say 5 TB) ≈ 8 brokers minimum, plus headroom for rebalancing. Throughput per broker is ~hundreds of MB/s, so brokers are disk/retention-bound here, not CPU. State the assumption and the knob you'd watch (disk, not cores).
+
+- **Q: Walk me through a duplicate-payment incident caused by a rebalance and how you closed it.**
+  A: Consumer processed a payment, crashed before committing the offset, rebalance reassigned the partition, redelivery processed it again. Close it with idempotent processing (dedupe by `paymentId` in a unique DB constraint) so the redelivery is a no-op. The postmortem: offset-commit timing, not Kafka itself, was the bug.
+
+- **Q: When would you NOT use Kafka for this?**
+  A: For request/response or low-latency RPC, a queue/topic adds a hop and at-least-once semantics you must design around. For a single-producer/single-consumer with tight latency, a direct call or a lighter broker may be simpler. Kafka earns its keep with fan-out, replay, and decoupling at scale — name the case where it's overkill.
+
+#### Self-check
+
+- [ ] Junior: the 3 semantics, topic/partition/consumer-group, what an offset is, queue vs topic, `acks=all`.
+- [ ] Mid: why idempotence doesn't protect the sink, poison-record+DLQ, partition sizing math, rebalance-storm cause, lag-as-the-metric.
+- [ ] Senior: design exactly-once end-to-end, explain a 30 s leader election, size a cluster by retention, trace a duplicate-payment rebalance incident, name when Kafka is the wrong tool.
+
 ## 1. The log is the product — partitions, offsets, order
 
 Kafka is not a message queue that happens to be fast. It's a **distributed, immutable, append-only commit log**. That framing is the whole senior answer: everything else — consumer groups, retention, even "exactly once" — is a consequence of the log, not a feature bolted on top.

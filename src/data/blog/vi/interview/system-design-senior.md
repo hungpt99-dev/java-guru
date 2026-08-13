@@ -17,6 +17,67 @@ Junior vẽ ô vuông. Senior kể chuyện tradeoff: "Tôi cache 1% key nóng t
 
 > Tư duy: nhả ra một diagram thì bạn chỉ ở tầm mid-level. Đi qua một tradeoff bằng số thật và một failure mode ngoài production, và bạn chạm được ô "senior". Bạn không cần thiết kế Twitter — bạn cần thiết kế đúng phần của Twitter sẽ gãy đầu tiên, và nói to điều đó ra.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: Các bước của một câu trả lời system-design?**
+  A: Làm rõ yêu cầu (functional + non-functional: scale, latency, consistency) → ước lượng capacity → phác họa component cấp cao → đào sâu 1-2 phần khó nhất → nêu failure mode. Interviewer chấm _hình dạng_ tư duy, không phải diagram "đúng".
+
+- **Q: Khác nhau giữa latency và throughput?**
+  A: Latency = thời gian cho một request (ms); throughput = bao nhiêu request mỗi giây (req/s). Một hệ có thể latency thấp nhưng throughput thấp (single-threaded) hoặc throughput cao nhưng tail latency cao (một queue). Bạn tối ưu chúng bằng các đòn bẩy khác nhau.
+
+- **Q: Cache là gì và tại sao dùng?**
+  A: Một store nhanh (RAM) giữ kết quả của việc tính toán đắt đỏ (DB query, compute) nên read lặp rẻ. Điểm: hầu hết read traffic đánh vào một hot set nhỏ, nên cache biến một path bound-DB thành path memory (micro-giây vs milli-giây).
+
+- **Q: SQL vs NoSQL — khi nào chọn cái nào?**
+  A: Relational khi cần ACID + join + query linh hoạt trên data có cấu trúc. NoSQL (document/columnar/KV) khi cần horizontal scale trên một access pattern đơn giản (single-key lookup, write volume lớn). Chọn bằng _access pattern_, không phải hype.
+
+- **Q: Khác nhau giữa horizontal và vertical scaling?**
+  A: Vertical = box to hơn (thêm CPU/RAM, gặp trần, downtime để resize). Horizontal = nhiều box sau một load balancer (gần không giới hạn, cần statelessness + shared storage). Mặc định senior cho service stateless là horizontal.
+
+### Mid — tradeoff & bẫy
+
+- **Q: Cache aside vs write-through — khi nào dùng cái nào?**
+  A: Cache-aside (app read cache, miss thì load DB và populate): đơn giản, xử lý cold cache đẹp, nhưng một miss có thể stampede. Write-through (write đi vào cache + DB cùng lúc): read luôn nhanh, nhưng mọi write trả giá cache cost. Bẫy: chọn một cái mà không nêu write/read ratio của workload.
+
+- **Q: "Stale 60 giây là ổn." Giờ thiết kế cache invalidation.**
+  A: TTL-based (expire sau 60 s) đơn giản nhất; event-based invalidation (khi write, purge key) tươi hơn nhưng cần một event tin cậy. Senior nêu _stale-read window_ business chấp nhận và thiết kế tới nó — và biết "cache invalidation" là bài toán khó kinh điển vì delete đua với write.
+
+- **Q: CAP theorem — chọn hai, và thực sự nghĩa là gì?**
+  A: Dưới một network partition bạn đánh đổi Consistency (mọi node thấy cùng data) lấy Availability (mọi request có response). CP systems (vd strongly-consistent DBs) reject trong partition; AP systems (vd Dynamo-style) phục vụ stale-but-present. "Chọn hai" thực sự là "bạn hy sinh gì _trong lúc partition_".
+
+- **Q: Bạn sẽ shard một bảng user 10 TB thế nào?**
+  A: Bằng một shard key (hash user_id) để mỗi shard sở hữu một range key và query nằm single-shard. Bẫy: một key tệ (signup-date) tạo hot shard; một join cross-shard thành scatter-gather. Nêu key, kế hoạch reshard, và cross-shard query bạn sẽ tránh.
+
+- **Q: Gì gãy đầu tiên ở 10× traffic — và biết trước khi xảy ra thế nào?**
+  A: Thường là một shared resource duy nhất: một DB, một cache, một downstream. Bạn không đoán — bạn load-test để tìm cái knee, và thêm circuit breaker + backpressure để một dependency chậm degrade nhẹ thay vì cascade. Nêu _một_ resource bạn sẽ canh.
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: Thiết kế một URL shortener cho 100M link mới/ngày, 1B read/ngày. Size nó.**
+  A: Writes ~1,2k/s, reads ~11,5k/s. Một key 7-char base62 = ~3,5 nghìn tỷ combo — dư sức. Storage: 1B link × ~500 B = 500 GB + replica. Reads áp đảo, nên cache 1% nóng trong Redis (phục vụ ~99% reads). Cách của senior là nêu bottleneck (read path) và giải quyết _cái đó_, không over-build.
+
+- **Q: Một cache stampede vừa làm đổ DB của bạn trên một hot key. Đi vụ đó và cách sửa.**
+  A: Một hot key expire; 10k request cùng miss, cùng đánh DB, nó ngã. Sửa: request coalescing (single-flight — một request load, những cái khác chờ), jittered TTL (key không cùng expire một lúc), và một hot-key local cache. Postmortem: miss path, không phải cache, là nguy hiểm.
+
+- **Q: Thiết kế cho "99,99% available" — thực sự tốn gì?**
+  A: 99,99% = ~52 phút downtime/năm. Nó ép multi-AZ (một AZ chết, bạn sống), không single point of failure, và automated failover. Trade-off: 99,99% tốn nhiều hơn 99,9% (redundancy, runbook, game-day). Judgment senior: price cái SLA và để business chọn, đừng gold-plate mặc định.
+
+- **Q: Bạn cần strongly-consistent cross-region writes. Bảo vệ thiết kế.**
+  A: Đắt: synchronous replication xuyên region thêm inter-region latency (hàng chục ms) vào mọi write, và một partition nghĩa là unavailability. Câu trả lời senior thường là "đừng" — giữ authoritative write ở một region, replicate async cho read, và chỉ trả giá consistency cho những record cụ thể cần nó (vd balance), không phải whole system.
+
+- **Q: "Cache ngây thơ là nơi ẩn náu của outage." Cho một ví dụ cụ thể.**
+  A: Một cache cache cả _error_ hoặc _empty result_ — một DB hiccup ngắn giờ phục vụ "not found" 60 s, nên user thấy data thiếu ngay cả khi DB đã hồi phục. Hoặc một cache trả giá stale trong flash sale và oversell. Thiết kế senior coi cache như một _bản copy có freshness contract_, không phải source of truth, và test stale window rõ ràng.
+
+#### Tự kiểm tra
+
+- [ ] Junior: các bước của một câu trả lời design, latency vs throughput, cache là gì, SQL vs NoSQL, horizontal vs vertical scaling.
+- [ ] Mid: cache-aside vs write-through, thiết kế invalidation tới một staleness SLA, CAP dưới partition, chọn shard-key + reshard, tìm resource gãy đầu tiên.
+- [ ] Senior: size một URL shortener end-to-end, kể + sửa một cache stampede, price một SLA 99,99%, bảo vệ cross-region consistency (thường "đừng"), chỉ mặt chỗ ẩn náu của cache-outage.
+
 ## 1. Vòng lặp phỏng vấn — họ thực sự chấm điểm cái gì
 
 Vòng lặp trông như năm bước tuần tự. Đúng vậy, nhưng thứ tự đó chỉ là ngụy trang — bảng điểm được điền trong mười giây đầu của mỗi bước.

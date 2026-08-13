@@ -17,6 +17,67 @@ A junior draws boxes. A senior narrates a tradeoff: "I'll cache the hot 1% in Re
 
 > Mindset: recite a diagram and you're mid-level. Walk through a tradeoff with real numbers and a production failure mode, and you've earned the "senior" checkbox. You don't need to design Twitter — you need to design the part of Twitter that would actually break first, and say so out loud.
 
+## Interview question ladder (Junior → Mid → Senior)
+
+> Drill these out loud. Junior = "do you know the concept"; Mid = "do you know the tradeoffs"; Senior = "can you defend a decision under pressure, with a number and a postmortem."
+
+### Junior — foundations
+
+- **Q: What are the steps of a system-design answer?**
+  A: Clarify requirements (functional + non-functional: scale, latency, consistency) → estimate capacity → sketch the high-level components → dive into the 1-2 hardest parts → name the failure modes. Interviewers grade the _shape_ of your thinking, not a "correct" diagram.
+
+- **Q: What's the difference between latency and throughput?**
+  A: Latency = time for one request (ms); throughput = how many per second (req/s). A system can have low latency but low throughput (single-threaded) or high throughput but high tail latency (a queue). You optimize them with different levers.
+
+- **Q: What's a cache and why do we use one?**
+  A: A fast store (RAM) that holds the results of expensive work (DB query, compute) so repeated reads are cheap. The point: most read traffic hits a tiny hot set, so a cache turns a DB-bound path into a memory path (microseconds vs milliseconds).
+
+- **Q: SQL vs NoSQL — when do you pick which?**
+  A: Relational when you need ACID + joins + flexible queries on structured data. NoSQL (document/columnar/KV) when you need horizontal scale on a simple access pattern (single-key lookups, huge write volume). Pick by the _access pattern_, not the hype.
+
+- **Q: What's the difference between horizontal and vertical scaling?**
+  A: Vertical = bigger box (more CPU/RAM, hits a ceiling, downtime to resize). Horizontal = more boxes behind a load balancer (near-unlimited, needs statelessness + shared storage). The senior default is horizontal for stateless services.
+
+### Mid — tradeoffs & pitfalls
+
+- **Q: Cache aside vs write-through — when do you use each?**
+  A: Cache-aside (app reads cache, on miss loads DB and populates): simple, handles a cold cache gracefully, but a miss can stampede. Write-through (writes go to cache + DB together): reads are always fast, but every write pays the cache cost. The trap: choosing one without stating the write/read ratio of the workload.
+
+- **Q: "60-second staleness is fine." Now design the cache invalidation.**
+  A: TTL-based (expire after 60 s) is the simplest; event-based invalidation (on write, purge the key) is fresher but needs a reliable event. The senior names the _stale-read window_ the business accepts and designs to it — and knows that "cache invalidation" is the famous hard problem because deletes race with writes.
+
+- **Q: CAP theorem — pick two, and what does that actually mean?**
+  A: Under a network partition you trade Consistency (every node sees the same data) for Availability (every request gets a response). CP systems (e.g. strongly-consistent DBs) reject during a partition; AP systems (e.g. Dynamo-style) serve stale-but-present. "Pick two" is really "what do you sacrifice _during a partition_."
+
+- **Q: How would you shard a 10 TB user table?**
+  A: By a shard key (user_id hash) so each shard owns a range of keys and queries stay single-shard. The trap: a bad key (signup-date) creates hot shards; a join across shards becomes a scatter-gather. State the key, the resharding plan, and the cross-shard query you'll avoid.
+
+- **Q: What breaks first at 10× traffic — and how do you find out before it happens?**
+  A: Usually the single shared resource: one DB, one cache, one downstream. You don't guess — you load-test to find the knee, and you add a circuit breaker + backpressure so a slow dependency degrades gracefully instead of cascading. Name the _one_ resource you'd watch.
+
+### Senior — design & defense
+
+- **Q: Design a URL shortener for 100M new links/day, 1B reads/day. Size it.**
+  A: Writes ~1.2k/s, reads ~11.5k/s. A 7-char base62 key = ~3.5 trillion combos — plenty. Storage: 1B links × ~500 B = 500 GB + replicas. Reads dominate, so cache the hot 1% in Redis (serves ~99% of reads). The senior move is naming the bottleneck (read path) and solving _that_, not over-building.
+
+- **Q: A cache stampede just took down your DB on a hot key. Walk it and the fix.**
+  A: A popular key expires; 10k requests all miss simultaneously, all hit the DB, it falls over. Fix: request coalescing (single-flight — one request loads, others wait), jittered TTLs (keys don't all expire at once), and a hot-key local cache. The postmortem: the miss path, not the cache, was the danger.
+
+- **Q: Design for "99.99% available" — what does that actually cost?**
+  A: 99.99% = ~52 min/year downtime. It forces multi-AZ (one AZ dies, you survive), no single points of failure, and automated failover. The trade-off: 99.99% costs far more than 99.9% (redundancy, runbooks, game-days). Senior judgment: price the SLA and let the business choose, don't gold-plate by default.
+
+- **Q: You need strongly-consistent cross-region writes. Defend the design.**
+  A: That's expensive: synchronous replication across regions adds inter-region latency (tens of ms) to every write, and a partition means unavailability. The senior answer often is "don't" — keep the authoritative write in one region, replicate async for reads, and only pay the consistency cost for the specific records that need it (e.g. balances), not the whole system.
+
+- **Q: The naive cache is "where the outage hides." Give a concrete example.**
+  A: A cache that caches _errors_ or _empty results_ — a brief DB hiccup now serves "not found" for 60 s, so users see missing data even after the DB recovers. Or a cache that returns a stale price during a flash sale and oversells. The senior design treats the cache as a _copy with a freshness contract_, not a source of truth, and tests the stale window explicitly.
+
+#### Self-check
+
+- [ ] Junior: the steps of a design answer, latency vs throughput, what a cache is, SQL vs NoSQL, horizontal vs vertical scaling.
+- [ ] Mid: cache-aside vs write-through, design invalidation to a staleness SLA, CAP under partition, shard-key choice + resharding, find the first-break resource.
+- [ ] Senior: size a URL shortener end-to-end, narrate + fix a cache stampede, price a 99.99% SLA, defend cross-region consistency (usually "don't"), name a cache-outage hiding spot.
+
 ## 1. The interview loop — what they're actually scoring
 
 The loop looks like a sequence of five steps. It is, but the sequence is a disguise — the scorecard is filled in during the first ten seconds of each step.

@@ -15,6 +15,67 @@ tags:
 
 > Tư duy: nêu được tên annotation thì bạn ở tầm mid-level. Đi qua nội tại proxy với một failure mode production và con số thật, bạn đã vượt bar. Mỗi phần dưới đây đều kết bằng bài tập phỏng vấn viên thực sự hay chạy.
 
+## Thang câu hỏi phỏng vấn (Junior → Mid → Senior)
+
+> Tự drill to tiếng. Junior = "bạn có biết khái niệm"; Mid = "bạn có biết tradeoff"; Senior = "bạn có thể bảo vệ quyết định dưới áp lực, kèm một con số và một postmortem."
+
+### Junior — nền tảng
+
+- **Q: IoC / DI là gì, bằng lời đơn giản?**
+  A: Inversion of Control nghĩa là framework tạo và wire các object thay vì bạn tự `new`. Dependency Injection là cơ chế — dependency được truyền vào (constructor) thay vì tự fetch. Container sở hữu lifecycle; bạn khai báo thứ bạn cần.
+
+- **Q: Khác nhau giữa `@Component`, `@Service`, `@Repository`, `@Controller`?**
+  A: Đều là stereotype đăng ký một bean; cái cụ thể là ngữ nghĩa + thêm behavior (`@Repository` dịch JDBC exception thành Spring's `DataAccessException`). Dùng đúng cái để intent rõ và AOP áp dụng đúng.
+
+- **Q: `@Autowired` là gì và alternative hiện đại?**
+  A: `@Autowired` inject một bean by type (field/setter/constructor). Mặc định hiện đại là **constructor injection** (không cần annotation trên class đơn-constructor) — testable, immutable, và fail fast lúc startup nếu thiếu dependency.
+
+- **Q: `@SpringBootApplication` làm gì?**
+  A: Là ba annotation trong một: `@Configuration` (beans), `@EnableAutoConfiguration` (default ma thuật từ classpath), và `@ComponentScan` (tìm bean trong cây package). Đó là lý do thả một starter lên classpath là bật một feature.
+
+- **Q: Khác nhau giữa `@RequestParam` và `@PathVariable`?**
+  A: `@RequestParam` bind một query param (`?id=5`); `@PathVariable` bind một phần của URL path (`/users/5`). Nhầm hai cái là bug junior kinh điển — và `@PathVariable` là cách bạn dựng REST resource URL.
+
+### Mid — tradeoff & bẫy
+
+- **Q: Tại sao `@Transactional` im lặng không chạy trên self-invocation?**
+  A: Transaction advice là một _proxy_ quanh bean; một call nội bộ `this.method()` bypass proxy, nên không transaction nào bắt đầu. Sửa: chuyển method sang bean khác, hoặc inject self-proxy (`AopContext`) — nhưng sửa thật là cấu trúc, không phải trick. Đây là bug #1 "tại sao rollback của tôi không xảy ra".
+
+- **Q: Giải thích bean lifecycle trong hai câu interviewer tin.**
+  A: Instantiate → populate dependency (inject) → chạy `BeanPostProcessor`s (vd `@PostConstruct`, những cái áp proxy AOP) → sẵn sàng. "Hai loại post-processor" là key: một vài configure bean, một vài wrap chúng trong proxy — và AOP chỉ chạy vì proxy được áp ở bước đó.
+
+- **Q: Khác nhau giữa `@Transactional(propagation=...)` người ta thực sự cần?**
+  A: `REQUIRED` (join hoặc create — mặc định), `REQUIRES_NEW` (luôn txn mới, suspend cái ngoài — dùng cho audit log phải sống sót khi outer rollback), và `NOT_SUPPORTED` (chạy không txn). Bẫy: `REQUIRES_NEW` cho một inner call mà _nên_ rollback với outer thì lại commit im lặng.
+
+- **Q: Tại sao field injection (`@Autowired` trên field) bị chê?**
+  A: Nó untestable (không pass mock không qua reflection), mutable (field có thể gán lại), và giấu dependency bắt buộc. Constructor injection làm contract rõ và object valid từ lúc construct — immutable by default.
+
+- **Q: Khác nhau giữa `@Controller` và `@RestController`?**
+  A: `@Controller` trả về một view name (server-rendered); `@RestController` là `@Controller` + `@ResponseBody` — nó serialize giá trị trả về (JSON) thẳng vào body. Với một API, `@RestController` là lựa chọn ngày thường.
+
+### Senior — thiết kế & bảo vệ
+
+- **Q: Một transaction giữ DB connection trong khi gọi một partner API chậm — pool cạn và whole service ngã. Đi vụ đó.**
+  A: `@Transactional` mặc định wrap _toàn bộ_ method, gồm cả HTTP call, nên connection bị pin cho latency của partner. Sửa: giữ transaction chặt — load data, commit, _rồi_ gọi API (hoặc làm ở một method riêng không transactional). Size pool bằng `rps × hold_time` và cô lập call chậm trên pool riêng có deadline.
+
+- **Q: Auto-configuration "ma thuật" bật một thứ bạn không muốn. Tìm và tắt thế nào?**
+  A: `spring-autoconfigure-metadata` + `Condition`s quyết định gì bật; `spring.autoconfigure.exclude` tắt một cái cụ thể, và `@ConditionalOnMissingBean` là lý do bean của bạn override default. Cách của senior là đọc class auto-config của starter, không đoán — và ưu tiên config tường minh cho thứ nhạy cảm bảo mật.
+
+- **Q: Bạn có 200 `@Bean` method và startup mất 40 s. Cắt thế nào?**
+  A: Lazy initialization (`spring.main.lazy-initialization=true`) trì hoãn tạo bean đến lần dùng đầu; giữ component-scan scope chặt; và tìm những bean làm I/O lúc construct (một connection test trong `@PostConstruct` là một startup tax). Trung thực: 40 s có thể chấp nhận cho monolith — đo trước khi optimize.
+
+- **Q: `@Async` method không chạy async. Tại sao, và sửa?**
+  A: `@Async` cần một proxy _và_ config `@EnableAsync` với một task executor; self-invocation bypass proxy (cùng bẫy `@Transactional`), và default executor là `SimpleAsyncTaskExecutor` single-thread (không pooled — nó spawn một thread mỗi call). Sửa: enable nó, inject một `ThreadPoolTaskExecutor` thật, và gọi từ bean khác.
+
+- **Q: Thiết kế một `@RestController` cho money transfer — cross-cutting concern nào bạn KHÔNG bỏ qua?**
+  A: Idempotency key (duplicate POST = một transfer), input validation (`@Valid`), authorization (user này có quyền?), một transaction boundary không gồm call notification, structured logging với trace id, và một error contract rõ. Dấu hiệu senior: endpoint phần lớn là guardrail quanh một core business nhỏ xíu.
+
+#### Tự kiểm tra
+
+- [ ] Junior: IoC/DI bằng lời đơn giản, stereotype annotations, `@Autowired` vs constructor injection, `@SpringBootApplication` làm gì, `@RequestParam` vs `@PathVariable`.
+- [ ] Mid: vì sao self-invocation phá `@Transactional`, hai phase post-processor, propagation settings cắn, tại sao field injection tệ, `@Controller` vs `@RestController`.
+- [ ] Senior: kể vụ transaction-giữ-connection + sửa, tắt unwanted auto-config bằng cách đọc nó, cắt startup time có đo, sửa `@Async` không chạy, liệt kê guardrail một money-transfer endpoint cần.
+
 ## 1. IoC và DI — container là một hợp đồng, không phải cái ngăn kéo
 
 Inversion of Control là _ai sở hữu `new`_. Dependency Injection là _wiring được chuyển tới bằng cách nào_. Cùng nhau chúng trả lời "ai tạo object này và khi nào" — container sở hữu đồ thị, bạn khai báo dependency, nó thỏa mãn. Chiều sâu nằm ở hai quyết định phát sinh: bạn nhận dependency theo cách nào, và bạn trao gì cho một bean sống lâu hơn scope của nó.
