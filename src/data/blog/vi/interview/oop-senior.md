@@ -1,6 +1,6 @@
 ---
 title: "Ôn thi Java #2: OOP & Nguyên lý Thiết kế — Junior đến Senior"
-description: "OOP ở mức senior là áp dụng SOLID, composition over inheritance, và thiết kế interface quy mô lớn — không phải đọc thuộc định nghĩa. 50 câu hỏi phỏng vấn từ bốn trụ cột đến 'đây là refactor cứu chúng tôi change 12 class'."
+description: "OOP ở cấp độ senior là biết áp dụng SOLID, ưu tiên composition thay vì inheritance và thiết kế interface ở quy mô lớn — không phải học thuộc các định nghĩa. 50 câu hỏi phỏng vấn, từ bốn trụ cột đến 'đây là refactor đã giúp chúng tôi tránh phải thay đổi 12 class'."
 pubDatetime: 2026-08-10T10:05:00+07:00
 featured: false
 draft: false
@@ -11,17 +11,17 @@ tags:
   - design-principles
 ---
 
-OOP là phần phỏng vấn nơi interviewer ngừng hỏi "cái gì" và bắt đầu hỏi "tại sao". Ai cũng gọi được bốn trụ cột; một senior show được code nơi kế thừa làm họ đau và refactor sửa nó. Bài này leo từ sách giáo khoa lên bảng trade-off — 50 câu hỏi, với example compilable.
+OOP là phần phỏng vấn mà interviewer ngừng hỏi "cái gì" và bắt đầu hỏi "tại sao". Ai cũng có thể gọi tên bốn trụ cột; một senior có thể chỉ ra đoạn code nơi inheritance gây rắc rối và bản refactor đã sửa nó. Bài viết này đi từ kiến thức trong sách giáo khoa đến bảng trade-off — 50 câu hỏi kèm các ví dụ có thể biên dịch.
 
-> Mindset: junior implement interface; senior quyết định interface đó có nên tồn tại không, và nó tốn gì cho 5 năm tiếp theo của codebase.
+> Tư duy: junior triển khai interface; senior quyết định liệu interface đó có nên tồn tại hay không và nó sẽ khiến codebase phải trả giá thế nào trong năm năm tiếp theo.
 
 ## Junior — nền tảng
 
 **Q1. Bốn trụ cột của OOP?**
-Encapsulation (che giấu state sau behavior), Abstraction (bộc lộ ý định, không phải cơ chế), Inheritance (tái dùng bằng chuyên biệt hóa), Polymorphism (một interface, nhiều implement). Gọi tên chúng chẳng tốn gì; áp dụng không tạo hierarchy giòn mới là kỹ năng.
+Encapsulation (che giấu state phía sau behavior), Abstraction (bộc lộ ý định thay vì cơ chế), Inheritance (tái sử dụng thông qua chuyên biệt hóa), Polymorphism (một interface, nhiều implementation). Gọi tên chúng chẳng tốn gì; kỹ năng nằm ở việc áp dụng chúng mà không tạo ra một hierarchy mong manh.
 
 **Q2. Abstract class vs interface?**
-Abstract class giữ được state và implement method; một class chỉ extend một class. Interface là hợp đồng — trước Java 8 chỉ signature, nay có `default`/`static` nhưng không có instance field. Ưu tiên interface cho _type_, abstract class chỉ cho shared state/behavior.
+Abstract class có thể giữ state và triển khai method; một class chỉ có thể kế thừa một class khác. Interface là một hợp đồng — trước Java 8 chỉ chứa các signature, còn nay có thể có method `default`/`static` nhưng không có instance field. Ưu tiên interface để biểu diễn _type_, và chỉ dùng abstract class cho state hoặc behavior dùng chung.
 
 ```java
 // WRONG: ép một trục inheritance cho thứ thực là một role
@@ -35,7 +35,7 @@ class Programmer implements Worker, Reviewer { /* cả hai */ }
 ```
 
 **Q3. Polymorphism là gì và hoạt động ra sao?**
-Subtype polymorphism: biến supertype trỏ đến mọi subtype, JVM dispatch method bị override tại runtime. Overloading _không_ phải polymorphism (giải quyết tại compile bởi signature).
+Subtype polymorphism nghĩa là một biến supertype có thể tham chiếu đến bất kỳ subtype nào, còn JVM sẽ dispatch method bị override tại runtime. Overloading _không_ phải là polymorphism; nó được quyết định tại compile time dựa trên signature.
 
 ```java
 Animal a = new Dog();   // compile type Animal, runtime Dog
@@ -43,7 +43,7 @@ a.speak();              // gọi Dog.speak() — virtual dispatch
 ```
 
 **Q4. Overriding vs overloading?**
-Overriding: cùng signature ở subclass, runtime-dispatched. Overloading: cùng tên, tham số khác kiểu, compile-time. Một overload ambiguous fail compile:
+Overriding là dùng cùng signature ở subclass và được dispatch tại runtime. Overloading là dùng cùng tên với các kiểu tham số khác nhau và được quyết định tại compile time. Overload mơ hồ sẽ khiến code không biên dịch được:
 
 ```java
 void log(Object o) { }
@@ -52,7 +52,7 @@ log(null);   // compile ERROR: ambiguous giữa Object và String
 ```
 
 **Q5. Hợp đồng `equals`/`hashCode` đòi gì?**
-Nếu `a.equals(b)` thì `a.hashCode() == b.hashCode()`. Override cả hai nếu không map hỏng:
+Nếu `a.equals(b)` thì `a.hashCode() == b.hashCode()`. Phải override cả hai, nếu không map sẽ hoạt động sai:
 
 ```java
 class User { String id; public boolean equals(Object o){...} }  // không hashCode
@@ -63,43 +63,43 @@ m.get(new User("42"));   // trả null — bucket khác!
 ```
 
 **Q6. `abstract` vs `default` method của interface?**
-Abstract class method có thân subclass có thể override. Interface `default` cung cấp behavior class kế thừa không cần implement — dùng cho tiến hóa API tương thích ngược. Override `default` để đổi nó.
+Method của abstract class có phần thân mà subclass có thể override. Method `default` của interface cung cấp behavior để class kế thừa mà không cần triển khai — được dùng để tiến hóa API mà vẫn tương thích ngược. Override method `default` nếu muốn thay đổi behavior đó.
 
 **Q7. Constructor có thể override hay overload?**
-Overload được (nhiều constructor tham số khác nhau); override không (constructor không thừa kế, nó per-class). Subclass constructor phải gọi parent constructor (`super(...)`) là câu lệnh đầu.
+Constructor có thể overload (nhiều constructor với các tham số khác nhau), nhưng không thể override (constructor không được kế thừa mà thuộc riêng về từng class). Constructor của subclass phải gọi constructor của parent (`super(...)`) bằng câu lệnh đầu tiên.
 
 **Q8. `super` dùng gì trong constructor?**
-Để gọi parent's constructor hoặc method. Quên `super()` khi parent không có no-arg constructor là compile error — thường gặp với parent kiểu `SQLException(String)`.
+Để gọi constructor hoặc method của parent. Quên `super()` khi parent không có no-argument constructor sẽ khiến code không biên dịch được — đây là lỗi thường gặp với các parent kiểu `SQLException(String)`.
 
 **Q9. Method hiding vs overriding?**
-`static` method ở subclass cùng signature với parent `static` method _hide_ nó (giải quyết bởi reference type tại compile), không như instance method overriding (runtime dispatch bởi object type). Trap phỏng vấn thường gặp:
+Method `static` ở subclass có cùng signature với method `static` của parent sẽ _hide_ method đó (được quyết định bởi reference type tại compile time), khác với instance method overriding (được dispatch tại runtime theo object type). Đây là một bẫy phỏng vấn thường gặp:
 
 ```java
 Parent p = new Child(); p.staticMethod(); // gọi Parent.staticMethod (hiding)
 ```
 
 **Q10. Khác nhau object reference và primitive?**
-Reference là pointer đến heap object (~4–8 bytes); primitive giữ value trực tiếp (4 bytes cho `int`). Pass primitive copy value; pass object reference copy pointer (cùng trỏ object). Mutate qua reference mutate shared object.
+Reference trỏ đến một heap object (~4–8 bytes); primitive giữ trực tiếp giá trị (4 bytes với `int`). Truyền primitive sẽ sao chép giá trị; truyền object reference sẽ sao chép pointer, nên cả hai cùng trỏ đến một object. Mutate object thông qua reference sẽ làm thay đổi object dùng chung.
 
 **Q11. `record` (Java 16+) là gì và khi dùng?**
-Immutable data carrier với auto `equals`/`hashCode`/`toString`/accessor. Dùng cho DTO và value object. Đừng dùng cho mutable state hoặc inheritance. `record Point(int x, int y)` hơn hẳn class viết tay 40 dòng.
+Record là một immutable data carrier với `equals`/`hashCode`/`toString` và accessor được tự động sinh ra. Dùng record cho DTO và value object. Đừng dùng cho mutable state hoặc inheritance. `record Point(int x, int y)` gọn hơn nhiều so với một class 40 dòng viết thủ công.
 
 **Q12. Khác nhau `null` và empty object?**
-`null` nghĩa "không object" — dereference throw `NullPointerException`. Empty object (vd `List.of()`, `""`) là object hợp lệ không có content. Ưu tiên trả empty collection hơn `null` để tránh NPE (Null Object / empty-collection idiom).
+`null` nghĩa là "không có object" — dereference nó sẽ ném `NullPointerException`. Empty object (ví dụ `List.of()`, `""`) là một object hợp lệ nhưng không có nội dung. Ưu tiên trả về empty collection thay vì `null` để tránh NPE (idiom Null Object / empty collection).
 
 **Q13. `static` method — có access instance field không?**
-`static` method thuộc class, không instance; không thể access instance (non-static) field hoặc gọi instance method trực tiếp — không có `this`. Chỉ dùng `static` member khác hoặc parameter.
+Method `static` thuộc về class, không thuộc về instance; nó không thể truy cập instance field (non-static) hoặc gọi trực tiếp instance method vì không có `this`. Nó chỉ có thể dùng các `static` member khác hoặc các parameter của mình.
 
 **Q14. Khác nhau `String.length()` và array `.length`?**
-`String.length()` là method (trả char count, char là UTF-16 code unit — string có supplementary char báo nhiều hơn grapheme count). `array.length` là `final` field. Off-by-one kinh điển: `str.length()` là call, `arr.length` không.
+`String.length()` là method (trả về số lượng `char`, trong đó một `char` là một UTF-16 code unit — vì vậy string có supplementary character có thể cho số lượng lớn hơn grapheme count). `array.length` là một `final` field. Một nhầm lẫn kinh điển: `str.length()` là một lời gọi, còn `arr.length` thì không.
 
 **Q15. Upcasting và downcasting?**
-Upcasting (`Animal a = new Dog()`) implicit và luôn safe. Downcasting (`Dog d = (Dog) a`) explicit và throw `ClassCastException` tại runtime nếu `a` thực không phải `Dog`. Dùng `instanceof` trước downcast.
+Upcasting (`Animal a = new Dog()`) là implicit và luôn an toàn. Downcasting (`Dog d = (Dog) a`) là explicit và sẽ ném `ClassCastException` tại runtime nếu `a` thực sự không phải là `Dog`. Hãy dùng `instanceof` trước khi downcast.
 
-## Mid — tradeoff & điểm mù
+## Mid — trade-off và cạm bẫy
 
 **Q1. Khi nào inheritance là công cụ sai?**
-Khi quan hệ không phải "is-a" với behavior chia sẻ ổn định. Inheritance ghép subclass vào implementation của parent mãi mãi — "fragile base class". Hãy với tới **composition**:
+Khi quan hệ không thực sự là "is-a" với behavior dùng chung ổn định. Inheritance gắn chặt subclass với implementation của parent mãi mãi — đây là vấn đề "fragile base class". Hãy ưu tiên **composition**:
 
 ```java
 // WRONG: ReportGenerator không thực sự là ExcelWriter; coupling + untestable
@@ -112,23 +112,23 @@ class ReportGenerator {
 }
 ```
 
-**Q2. Giải thích SOLID ngắn gọn, với misuse thật của mỗi cái.**
+**Q2. Giải thích ngắn gọn SOLID, kèm một ví dụ misuse thực tế cho từng nguyên tắc.**
 
-- **S**: `UserService` vừa send email vừa ghi audit log đổi vì 3 lý do. Tách chúng ra.
+- **S**: `UserService` vừa gửi email vừa ghi audit log nên thay đổi vì 3 lý do. Hãy tách chúng ra.
 - **O**: `switch(type)` bạn sửa mỗi khi có type mới — thay bằng polymorphism.
 - **L**: `Square extends Rectangle` nơi `setWidth` phá invariant của rectangle.
 - **I**: interface `Worker` ép `cleanToilet()` lên `Programmer` — tách nó.
-- **D**: `new MySQLRepository()` hardcode — phụ thuộc `Repository` (interface) thay vì.
+- **D**: hardcode `new MySQLRepository()` — thay vào đó, hãy phụ thuộc vào `Repository` (interface).
 
 **Q3. `Comparator` vs `Comparable`?**
-`Comparable` là thứ tự tự nhiên (`compareTo`); `Comparator` là strategy bên ngoài (nhiều cái tồn tại). Dùng `Comparable` cho mặc định, `Comparator` cho sort tùy ngữ cảnh:
+`Comparable` định nghĩa thứ tự tự nhiên (`compareTo`); `Comparator` là strategy bên ngoài và có thể có nhiều strategy. Dùng `Comparable` cho thứ tự mặc định, còn `Comparator` cho việc sort tùy theo ngữ cảnh:
 
 ```java
 List<User> byName = users.stream().sorted(Comparator.comparing(User::name)).toList();
 ```
 
 **Q4. Tại sao getter/setter không phải encapsulation thật?**
-Cặp getter/setter public không invariant chỉ là public field với thêm bước. Encapsulation thật bộc lộ hành vi:
+Cặp getter/setter public không bảo vệ invariant thực chất chỉ là public field với thêm một bước. Encapsulation đúng nghĩa phải bộc lộ behavior:
 
 ```java
 class Account { public BigDecimal balance; }          // WRONG: không guard invariant
@@ -143,19 +143,19 @@ class Account {                                          // RIGHT
 ```
 
 **Q5. `==` trên boxed type — bug tiềm ẩn?**
-`Integer.valueOf(42) == Integer.valueOf(42)` là `true` (cache -128..127) nhưng `Integer.valueOf(200) == Integer.valueOf(200)` là `false`. Luôn `equals` cho wrapper.
+`Integer.valueOf(42) == Integer.valueOf(42)` là `true` (được cache từ -128 đến 127), nhưng `Integer.valueOf(200) == Integer.valueOf(200)` là `false`. Với wrapper, luôn dùng `equals`.
 
 **Q6. Khi nào dùng `record` — và giới hạn?**
-Cho immutable data carrier — auto `equals`/`hashCode`/`toString`. Giới hạn: không inheritance (không extend record), mọi field final, chỉ canonical constructor (bạn thêm static/non-canonical constructor). Đừng dùng nơi cần mutable state hoặc mutable collection field (reference final nhưng collection không).
+Dùng cho immutable data carrier, với `equals`/`hashCode`/`toString` được tự động sinh ra. Giới hạn: không có inheritance (record không thể extend một class khác), mọi field đều final và chỉ có canonical constructor (bạn vẫn có thể thêm static constructor hoặc non-canonical constructor). Đừng dùng khi cần mutable state hoặc mutable collection field; reference là final nhưng collection thì không.
 
 **Q7. Khác nhau `equals` và `==` cho `record`?**
-Record sinh `equals` bởi mọi component, nên hai record component bằng nhau là `equals`-equal; `==` vẫn so identity. `var r1 = new Point(1,2); var r2 = new Point(1,2); r1.equals(r2)` là `true`, `r1 == r2` là `false`.
+Record sinh `equals` dựa trên mọi component, nên hai record có các component bằng nhau sẽ bằng nhau theo `equals`; `==` vẫn so sánh identity. `var r1 = new Point(1,2); var r2 = new Point(1,2); r1.equals(r2)` là `true`, còn `r1 == r2` là `false`.
 
 **Q8. Khác nhau `final` class và `final` method — và tại sao JVM quan tâm?**
-`final` class không thể subclass; `final` method không thể override. JIT dùng điều này cho devirtualization — nó inline call trực tiếp vì biết chỉ có một implement, remove vtable lookup (~nanosecond save mỗi call, compound trong hot loop).
+`final` class không thể được subclass; `final` method không thể được override. JIT dùng điều này cho devirtualization — nó có thể inline call trực tiếp vì biết chỉ có một implementation, loại bỏ vtable lookup (tiết kiệm khoảng vài nanosecond mỗi call và hiệu quả cộng dồn trong hot loop).
 
 **Q9. Template Method pattern và pitfall?**
-Base class định `final` skeleton gọi các abstract step subclass fill:
+Base class định nghĩa một `final` skeleton gọi các abstract step do subclass cung cấp:
 
 ```java
 abstract class Report {
@@ -164,10 +164,10 @@ abstract class Report {
 }
 ```
 
-Pitfall: flow `produce()` của base bị lock; subclass không reorder được step, và đổi skeleton dội khắp subclass (fragile base class lần nữa).
+Pitfall: flow `produce()` của base bị khóa; subclass không thể sắp xếp lại các step, và thay đổi skeleton sẽ lan sang tất cả subclass (lại là vấn đề fragile base class).
 
 **Q10. Strategy pattern và khi nào hơn if/else?**
-Encapsulate algorithm biến thiên sau interface; swap implement tại runtime. Dùng thay `switch` trên type bạn liên tục sửa:
+Đóng gói algorithm biến thiên phía sau một interface và thay đổi implementation tại runtime. Dùng nó thay cho `switch` trên type mà bạn phải liên tục chỉnh sửa:
 
 ```java
 interface Discount { BigDecimal apply(Order o); }
@@ -177,88 +177,88 @@ class SeasonalDiscount implements Discount { /* 10% off */ }
 ```
 
 **Q11. Khác nhau interface và abstract class cho shared behavior?**
-Interface: không state, nhiều implement, `default` method cho optional behavior. Abstract class: shared state + partial implementation, single inheritance. Cần shared _field_ (vd `id`, `auditStamp`) → abstract class; chỉ _contract_ → interface.
+Interface: không có state, có thể có nhiều implementation, và có `default` method cho behavior tùy chọn. Abstract class: có shared state và partial implementation, nhưng chỉ được single inheritance. Nếu cần shared _field_ (ví dụ `id`, `auditStamp`) thì dùng abstract class; nếu chỉ cần _contract_ thì dùng interface.
 
 **Q12. `Optional` và misuse?**
-`Optional<T>` báo "có thể vắng" ở return type, thay `null`. Misuse: dùng làm field/parameter type (dùng `null` hoặc object thật), hoặc gọi `get()` không `isPresent()` (throw `NoSuchElementException` — dùng `orElse`/`orElseThrow`).
+`Optional<T>` báo hiệu rằng giá trị trả về "có thể không tồn tại", thay cho `null`. Misuse gồm dùng nó làm field hoặc parameter type (hãy dùng `null` hoặc một object thực sự) hay gọi `get()` mà không kiểm tra `isPresent()` (sẽ ném `NoSuchElementException` — hãy dùng `orElse`/`orElseThrow`).
 
 **Q13. Khác nhau `Integer.parseInt` và `Integer.valueOf`?**
-`parseInt` trả primitive `int`; `valueOf` trả `Integer` (cache -128..127). Dùng `parseInt` khi muốn primitive; `valueOf` khi cần object. Trộn lẫn dẫn vào boxing/== trap trên.
+`parseInt` trả về primitive `int`; `valueOf` trả về `Integer` (được cache từ -128 đến 127). Dùng `parseInt` khi cần primitive, còn `valueOf` khi cần object. Trộn lẫn hai cách này có thể dẫn đến các bẫy boxing/`==` nói trên.
 
 **Q14. `static` initializer block vs instance initializer?**
-`static {}` chạy một lần tại class load; `{}` (instance initializer) chạy mỗi `new`, trước constructor body. Hữu ích cho shared init logic xuyên nhiều constructor, nhưng hiếm cần — constructor hoặc factory rõ hơn.
+`static {}` chạy một lần khi class được load; `{}` (instance initializer) chạy mỗi lần `new`, trước phần thân constructor. Nó hữu ích cho logic khởi tạo dùng chung giữa nhiều constructor, nhưng hiếm khi cần — constructor hoặc factory thường rõ ràng hơn.
 
 **Q15. Covariance/contravariance của return/param type trong overriding?**
-Java cho phép covariant return type (overriding method có thể trả subtype của parent's return). Parameter _không_ covariant — method với subclass parameter là overload, không phải override, và không dispatch virtually. Bug thường "tại sao override tôi không được gọi?".
+Java cho phép covariant return type: overriding method có thể trả về subtype của kiểu trả về từ parent. Parameter _không_ covariant — method có parameter là subclass sẽ là overload, không phải override, và không được dispatch theo cơ chế virtual. Đây là nguyên nhân của bug quen thuộc: "tại sao override của tôi không được gọi?".
 
 **Q16. Khác nhau `clone()` và copy constructor?**
-`Object.clone()` là shallow copy (và `Cloneable` là broken, checked-exception-throwing marker). Copy constructor (`new User(other)`) explicit, deep khi bạn làm, và type-safe. Ưu tiên copy constructor hoặc static factory hơn `clone()`.
+`Object.clone()` là shallow copy (còn `Cloneable` là một marker interface thiết kế không tốt và có thể dẫn đến checked exception). Copy constructor (`new User(other)`) rõ ràng, có thể tạo deep copy nếu được thiết kế như vậy và type-safe. Ưu tiên copy constructor hoặc static factory hơn `clone()`.
 
-**Q17. Cost của excessive layering (anemic class)?**
-Mỗi wrapper class thêm vtable hop và indirection; architecture `XController → XService → XManager → XRepository → XEntity` không logic ở middle layer là pure overhead (nhiều file hơn, test surface lớn hơn, diff lớn hơn cho cùng change). Collapse layer chỉ delegate.
+**Q17. Chi phí của việc phân tầng quá mức (anemic class) là gì?**
+Mỗi wrapper class thêm một vtable hop và indirection; architecture `XController → XService → XManager → XRepository → XEntity` không có logic ở các middle layer chỉ là overhead (nhiều file hơn, test surface lớn hơn và diff lớn hơn cho cùng một thay đổi). Hãy gộp các layer chỉ làm nhiệm vụ delegate.
 
-## Senior — thiết kế & phòng thủ
+## Senior — thiết kế và bảo vệ quyết định
 
 **Q1. Phòng thủ composition over inheritance bằng refactor cụ thể.**
-"Tôi lấy `ReportGenerator extends ExcelWriter` và lật: `ReportGenerator` giữ interface `Writer` để delegate. Lý do: coupling Excel nghĩa mọi đổi formatting rủi ro logic report, và không test được report không có spreadsheet thật. Composition cho phép inject `FakeWriter` và thêm `PdfWriter` không sửa gì `ReportGenerator`. Cái giá: một interface + một constructor arg — bảo hiểm rẻ trước fragile base class. Thắng đo được: test setup từ 'spin up workbook' thành 'pass một stub'."
+"Tôi sẽ chuyển `ReportGenerator extends ExcelWriter` thành thiết kế ngược lại: `ReportGenerator` giữ một interface `Writer` và delegate cho nó. Lý do là coupling với Excel khiến mọi thay đổi về formatting đều có thể ảnh hưởng đến logic report, đồng thời chúng ta không thể unit-test report nếu không có spreadsheet thật. Composition cho phép inject `FakeWriter` và thêm `PdfWriter` mà không cần sửa `ReportGenerator`. Cái giá: một interface và một constructor argument — khoản bảo hiểm rẻ để tránh fragile base class. Kết quả đo được: test setup chuyển từ 'spin up workbook' thành 'pass một stub'."
 
 **Q2. Team muốn `BaseEntity` 30 field, mọi JPA entity extend. Bạn nói sao?**
-"Tôi tách. `BaseEntity` thật (id, version, createdAt, updatedAt, auditing) là 'is-a' với state chia sẻ ổn định. 26 field còn lại là grab-bag — subtype thừa kế column không dùng, query rộng hơn, đổi một chỗ dội khắp nơi. Tôi đẩy 26 field đó xuống entity sở hữu chúng. Thắng đo được: table hẹp hơn (~30% ít bytes/row trên hot table), ownership rõ hơn."
+"Tôi sẽ tách nó ra. Một `BaseEntity` đúng nghĩa (id, version, createdAt, updatedAt, auditing) có quan hệ 'is-a' và state dùng chung ổn định. 26 field còn lại chỉ là một mớ hỗn tạp — subtype kế thừa các column không dùng, query rộng hơn và thay đổi lan ra khắp nơi. Tôi sẽ đưa 26 field đó xuống các entity thực sự sở hữu chúng. Kết quả đo được: table hẹp hơn (~30% ít bytes/row hơn trên hot table), ownership rõ ràng hơn."
 
 **Q3. Thiết kế interface sống sót 5 năm yêu cầu mới.**
-"Tôi giữ nó nhỏ và behavioral. Cho tập subtype đóng tôi dùng `sealed` (Java 17+) để compiler ép xử lý mọi case — thêm subtype là compile error đến khi bạn lo xong:"
+"Tôi giữ nó nhỏ và tập trung vào behavior. Với một tập subtype đóng, tôi dùng `sealed` (Java 17+) để compiler buộc phải xử lý mọi case — thêm một subtype sẽ gây compile error cho đến khi bạn xử lý nó ở mọi nơi cần thiết:"
 
 ```java
 sealed interface PaymentMethod permits Card, BankTransfer, Wallet { }
 // thêm 'Crypto' break mọi switch(PaymentMethod) đến khi handled — evolution an toàn
 ```
 
-"Tôi bộc lộ capability hẹp (`Readable`, `Flushable`) thay vì một `MegaService`, và dùng `default` chỉ cho behavior thực sự tùy chọn."
+"Tôi bộc lộ các capability hẹp (`Readable`, `Flushable`) thay vì một `MegaService`, và chỉ dùng `default` cho behavior thực sự tùy chọn."
 
-**Q4. Liskov Substitution — violation thật và fix.**
-"`Square extends Rectangle`: set width phải cũng set height để giữ hình vuông, nhưng phá hợp đồng `Rectangle` rằng width/height độc lập. Code `r.setWidth(5); r.setHeight(10); assert r.area()==50` nói dối. Fix: đừng model square là subtype của rectangle — trích `Shape` với `area()` và implement cả hai độc lập. Subtyping là lời hứa; giữ không được thì đừng hứa."
+**Q4. Liskov Substitution — một violation thực tế và cách sửa.**
+"`Square extends Rectangle`: set width cũng phải set height để giữ hình vuông, nhưng điều đó phá vỡ hợp đồng của `Rectangle` rằng width và height độc lập. Code `r.setWidth(5); r.setHeight(10); assert r.area()==50` sẽ không còn đúng. Cách sửa: đừng model square là subtype của rectangle — hãy trích xuất `Shape` với `area()` và triển khai cả hai một cách độc lập. Subtyping là một lời hứa; nếu không giữ được thì đừng đưa ra lời hứa đó."
 
 **Q5. Interface 12 method nhưng caller dùng 2. Thiết kế lại?**
-"Vi phạm Interface Segregation. Tách thành `Reader`, `Writer`, `Lifecycle`; class cụ thể implement cả ba nếu cần, nhưng consumer read-only chỉ phụ thuộc `Reader` — nên đổi `Writer` không bao giờ recompile nó. Class implement không đổi behavior; chỉ các _type_ nó bộc lộ ra mới hẹp. Bonus: mock trong test thành `when(reader.read()).thenReturn(...)` thay vì stub 12 method."
+"Đây là vi phạm Interface Segregation. Tách thành `Reader`, `Writer` và `Lifecycle`; class cụ thể có thể implement cả ba nếu cần, nhưng read-only consumer chỉ phụ thuộc vào `Reader`, nên thay đổi ở `Writer` sẽ không buộc nó recompile. Behavior của class implement không đổi; chỉ các _type_ mà nó được expose qua trở nên hẹp hơn. Bonus: mock trong test sẽ là `when(reader.read()).thenReturn(...)` thay vì phải stub 12 method."
 
 **Q6. Làm sao chứng minh OOD tốt, không chỉ 'sạch'?**
-"Tôi chỉ vào change vừa làm và cái giá của alternative: đếm lý do mỗi class đổi, call site vỡ khi requirement shift, test surface. OOD tốt nghĩa feature mới chạm một class, không phải mười hai. Tôi phác dependency graph — DAG với abstraction ổn định ở trên, detail volatile ở dưới (dependency inversion) — và nói 'đây là diff khi requirement đổi, và nó nhỏ.' Không phải 'tôi dùng SOLID'; một số: 1 class đổi vs 12."
+"Tôi chỉ ra thay đổi vừa thực hiện và cái giá của phương án thay thế: đếm số lý do khiến mỗi class phải thay đổi, số call site bị hỏng khi requirement thay đổi và test surface. OOD tốt nghĩa là một feature mới chỉ chạm vào một class, không phải mười hai. Tôi phác thảo dependency graph — một DAG với abstraction ổn định ở trên và detail dễ thay đổi ở dưới (dependency inversion) — rồi nói: 'Đây là diff khi requirement thay đổi, và nó nhỏ.' Không nói 'tôi đã dùng SOLID'; tôi đưa ra một con số: 1 class thay đổi so với 12."
 
 **Q7. `record` trong public API — versioning concern?**
-"Record coupling component list với hợp đồng `equals`/`hashCode`, nên thêm component là breaking change cho equality và serialization. Cho API ổn định tôi giữ record internal (DTO mapped tại boundary) hoặc chấp nhận component list là contract. Tôi version API explicit thay vì dựa vào field addition an toàn."
+"Record gắn component list với hợp đồng `equals`/`hashCode`, nên thêm một component là breaking change đối với equality và serialization. Với API ổn định, tôi giữ record ở internal (map DTO tại boundary) hoặc chấp nhận rằng component list chính là contract. Tôi version API một cách rõ ràng thay vì giả định rằng việc thêm field luôn an toàn."
 
 **Q8. Khi nào dùng `sealed` hierarchy vs `enum`?**
-"Enum khi tập cố định và không có per-instance state ngoài vài constant; `sealed` khi mỗi subtype cần data và behavior riêng nhưng tập đóng (compiler-enforced exhaustiveness). Cho payment pipeline nơi mỗi method mang field khác, `sealed` hơn enum-with-fields khổng lồ. Nếu chỉ 'status = A|B|C', enum đơn giản hơn."
+"Dùng enum khi tập giá trị cố định và không có per-instance state ngoài một vài constant; dùng `sealed` khi mỗi subtype cần data và behavior riêng nhưng tập đó vẫn đóng (compiler-enforced exhaustiveness). Với payment pipeline nơi mỗi method mang các field khác nhau, `sealed` phù hợp hơn một enum-with-fields khổng lồ. Nếu chỉ là 'status = A|B|C', enum đơn giản hơn."
 
 **Q9. Thiết kế plugin system không `instanceof` chain.**
-"Định nghĩa `Plugin` interface với `handle(Event)` và capability marker; register plugin trong `List` và dispatch by predicate thay vì `if (p instanceof X)`. `Visitor` pattern là typed alternative — acceptor callback vào visitor, giữ dispatch ở một chỗ và compiler check coverage cho `sealed` hierarchy."
+"Định nghĩa interface `Plugin` với `handle(Event)` và một capability marker; register các plugin trong `List` rồi dispatch bằng predicate thay vì `if (p instanceof X)`. Pattern `Visitor` là một typed alternative — acceptor callback vào visitor, giữ dispatch ở một chỗ và để compiler kiểm tra coverage cho sealed hierarchy."
 
 **Q10. Giữ domain model free of framework annotation thế nào?**
-"Đặt JPA/Jackson/`@Valid` annotation trên _persistence_ hoặc _API_ DTO, không trên domain `Order`/`Account` type. Map giữa chúng tại boundary. Lợi ích: domain compile và unit-test với zero Spring/Jakarta import (~30% nhanh test startup, không cần container), và framework version đổi không chạm business logic. Rule: `com.finpay.order.domain` không có `jakarta.*` import."
+"Đặt annotation JPA/Jackson/`@Valid` trên các DTO _persistence_ hoặc _API_, không đặt trên domain type `Order`/`Account`. Map giữa chúng tại boundary. Lợi ích: domain compile và unit-test mà không cần import Spring/Jakarta nào (~30% nhanh hơn khi test startup, không cần container), đồng thời thay đổi version của framework không ảnh hưởng business logic. Quy tắc: `com.finpay.order.domain` không có import `jakarta.*`."
 
 **Q11. Base class method làm quá nhiều (400 dòng). Refactor an toàn.**
-"Tôi extract method-object per cohesive step, rồi push invariant skeleton vào `final` template method và step vào `abstract`/`default` method, hoặc thay hierarchy bằng composition của strategy object. Tôi làm sau test: đầu tiên characterize current behavior với golden-output test, rồi extract, rồi verify output byte-identical. Method 400 dòng là bug magnet; refactor justify bằng test surface nó remove."
+"Tôi extract method-object cho từng bước có tính kết dính, rồi đưa invariant skeleton vào một `final` template method và các step vào các method `abstract`/`default`, hoặc thay hierarchy bằng composition của các strategy object. Tôi thực hiện phía sau test: đầu tiên ghi nhận current behavior bằng golden-output test, sau đó extract và xác minh output giống hệt ở cấp byte. Method 400 dòng là bug magnet; refactor này đáng làm vì nó thu hẹp test surface cần duy trì."
 
 **Q12. Phòng thủ dependency inversion với seam cụ thể.**
-"High-level `Checkout` không nên import `StripeClient` (detail). Nó phụ thuộc `PaymentGateway` (abstraction); Stripe impl nằm ở edge và inject. Giờ `Checkout` testable với `FakeGateway` (không network, ~0 ms) và swappable sang `PaypalGateway` không chạm `Checkout`. Đo được: unit test `Checkout` chạy ~50 ms thay vì cần payment sandbox. Seam là win."
+"High-level `Checkout` không nên import `StripeClient` (detail). Nó phụ thuộc vào `PaymentGateway` (abstraction); implementation của Stripe nằm ở edge và được inject vào. Khi đó `Checkout` có thể test với `FakeGateway` (không network, ~0 ms) và chuyển sang `PaypalGateway` mà không cần chạm vào `Checkout`. Kết quả đo được: unit test cho `Checkout` chạy trong ~50 ms thay vì cần payment sandbox. Seam chính là lợi ích."
 
 **Q13. Khi nào immutability đáng allocation cost?**
-"Cho value pass xuyên thread hoặc store trong cache, immutability remove toàn bộ class của shared-mutation bug và cho phép skip defensive copy (save ~16 bytes + GC mỗi copy). Allocation cost (~10 ns) negligible bên cạnh bug cost. Cho hot inner-loop temporary mutate in place, mutable object ổn. Tôi default immutable cho thứ rời method boundary."
+"Với value được truyền qua các thread hoặc lưu trong cache, immutability loại bỏ cả một nhóm bug do shared mutation và cho phép bỏ qua defensive copy (tiết kiệm khoảng 16 bytes cùng chi phí GC cho mỗi copy). Allocation cost (~10 ns) không đáng kể so với bug cost. Với temporary trong hot inner loop được mutate tại chỗ, mutable object vẫn phù hợp. Mặc định, tôi dùng immutable cho mọi thứ rời khỏi method boundary."
 
 **Q14. Chọn giữa inheritance và delegation cho cross-cutting behavior (logging, metrics)?**
-"Không bao giờ inherit cho cross-cutting concern — đó là chỗ aspect hoặc decorator. `MetricsDecorator` wrap `Repository` thêm timing không repository biết, và bạn compose nhiều cái (logging → metrics → cache) không deep hierarchy. Inheritance ép mọi class extend `LoggedThing`, không compose. Decorator = O(n) wrapper cho n concern; inheritance = O(2^n) combinatorially."
+"Không bao giờ dùng inheritance cho cross-cutting concern — đó là việc của aspect hoặc decorator. Một `MetricsDecorator` bọc `Repository` có thể thêm timing mà repository không cần biết, và bạn có thể compose nhiều decorator (logging → metrics → cache) mà không tạo deep hierarchy. Inheritance sẽ buộc mọi class extend `LoggedThing`, vốn không compose được. Decorator = O(n) wrapper cho n concern; inheritance = O(2^n) theo cấp số nhân."
 
 **Q15. Cost của over-abstracting (speculative generality)?**
-"Abstraction với một implement là dead weight: nó đặt tên concept không ai dùng, thêm indirection, và làm reader hunt cho single concrete class. Rule of thumb: đừng extract interface đến khi có hai implement hoặc real seam (testing). YAGNI: plain class hôm nay hơn interface-impl pair bạn 'có thể' cần. Tôi xóa speculative abstraction trong review."
+"Một abstraction chỉ có một implementation là dead weight: nó đặt tên cho một concept không ai dùng, thêm indirection và khiến người đọc phải tìm class cụ thể duy nhất. Rule of thumb: đừng extract interface cho đến khi có hai implementation hoặc một seam thực sự (chẳng hạn để testing). YAGNI: một plain class hôm nay tốt hơn một cặp interface-implementation mà bạn 'có thể' sẽ cần. Tôi xóa các speculative abstraction trong review."
 
-**Q16. Evolve public interface không break caller thế nào?**
-"Thêm `default` method (binary-compatible) thay vì đổi signature; mark deprecated method `@Deprecated` và giữ nó một release. Không bao giờ remove method trong minor version. Cho breaking change, release `v2` interface và giữ `v1` delegate đến nó cho migration window. Tôi treat interface surface như contract với deprecation policy, không phải playground."
+**Q16. Làm thế nào để evolve public interface mà không break caller?**
+"Thêm method `default` (binary-compatible) thay vì thay đổi signature; đánh dấu method cũ bằng `@Deprecated` và giữ nó trong một release. Không bao giờ remove method trong minor version. Với breaking change, phát hành interface `v2` và giữ `v1` delegate đến nó trong migration window. Tôi xem interface surface là một contract có deprecation policy, không phải playground."
 
 **Q17. Subclass override method nhưng gọi `super` sai (hoặc không gọi). Guard thế nào?**
-"Nếu parent's behavior phải chạy, make parent method `final` và expose extension point (`protected` hook) subclass fill, nên subclass không thể skip invariant. Nếu subclass phải fully replace behavior, document nó và thêm test assert contract. Template Method + `final` skeleton là guard chống 'quên gọi super' bug."
+"Nếu behavior của parent bắt buộc phải chạy, hãy đặt method của parent là `final` và expose một extension point (`protected` hook) để subclass triển khai; như vậy subclass không thể bỏ qua invariant. Nếu subclass phải thay thế hoàn toàn behavior, hãy document điều đó và thêm test để assert contract. Template Method cùng `final` skeleton là cách ngăn bug 'quên gọi super'."
 
 **Q18. Represent state machine không tangle boolean thế nào?**
-"Model state như `enum`/`sealed` type với explicit legal transition, không `boolean active, boolean paused, boolean locked` (cho phép combo invalid như cả ba true). Transition method reject illegal move:"
+"Model state bằng kiểu `enum`/`sealed` với các legal transition rõ ràng, thay vì `boolean active, boolean paused, boolean locked` (cho phép các tổ hợp không hợp lệ như cả ba cùng là true). Transition method sẽ từ chối những chuyển trạng thái không hợp lệ:"
 
 ```java
 enum State { DRAFT, ACTIVE, LOCKED;
@@ -266,10 +266,10 @@ enum State { DRAFT, ACTIVE, LOCKED;
 }
 ```
 
-"Illegal state trở nên impossible by construction, không phải runtime `if` bạn quên."
+"Illegal state trở nên impossible by construction, thay vì phụ thuộc vào một `if` tại runtime mà bạn có thể quên."
 
 #### Self-check
 
-- [ ] Junior: Tôi gọi được bốn trụ cột, abstract class vs interface, override vs overload (với `null` ambiguity và static hiding), hợp đồng `equals`/`hashCode`, và khi nào `record` hợp — bằng code.
-- [ ] Mid: Tôi bắt được fragile-base-class, misuse mỗi chữ SOLID, anemic model, wrapper `==` bug, Template/Strategy pattern, và `Optional` misuse — bằng code.
-- [ ] Senior: Tôi refactor inheritance→composition có cost/benefit, áp dụng LSP vào violation thật, thiết kế interface 5 năm với `sealed`, tách fat interface, phòng thủ OOD bằng độ lớn của change (1 class vs 12), và model state machine làm illegal state unrepresentable.
+- [ ] Junior: Tôi có thể gọi tên bốn trụ cột, phân biệt abstract class và interface, override và overload (kèm `null` ambiguity và static hiding), nêu hợp đồng `equals`/`hashCode` và biết khi nào `record` phù hợp — bằng code.
+- [ ] Mid: Tôi có thể nhận ra fragile-base-class, misuse của từng chữ SOLID, anemic model, bug `==` trên wrapper, Template/Strategy pattern và misuse của `Optional` — bằng code.
+- [ ] Senior: Tôi có thể refactor inheritance → composition với cost/benefit, áp dụng LSP vào một violation thực tế, thiết kế interface cho 5 năm với `sealed`, tách fat interface, bảo vệ OOD bằng độ lớn của thay đổi (1 class so với 12) và model state machine để illegal state trở nên unrepresentable.

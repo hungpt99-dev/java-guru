@@ -1,6 +1,6 @@
 ---
 title: "Java Interview Prep #1: Java Core (JVM, GC, Concurrency) — Junior to Senior"
-description: "The spine of every Java interview — JVM memory, garbage collection, the JMM, and concurrency. 50 interview-grade questions from 'what is the heap' to 'here is how I halved GC pause on a 40 GB service'."
+description: "The backbone of every Java interview: JVM memory, garbage collection, the JMM, and concurrency. Fifty interview-grade questions, from 'what is the heap?' to 'here is how I halved GC pauses on a 40 GB service.'"
 pubDatetime: 2026-08-10T10:00:00+07:00
 featured: true
 draft: false
@@ -11,17 +11,17 @@ tags:
   - concurrency
 ---
 
-Java core is the filter that ends more interviews than system design ever does. A junior can memorize keywords; a senior can prove they have stared at a heap dump at 3 a.m. This post walks the same topic from "what is the heap" to "here is how I halved GC pause on a 40 GB service" — 50 questions, pick the level you are interviewing at, and read one above it.
+Java core is the filter that ends more interviews than system design ever does. A junior can memorize keywords; a senior can prove they have stared at a heap dump at 3 a.m. This post covers the same topic from "what is the heap?" to "here is how I halved GC pauses on a 40 GB service": 50 questions. Pick the level you are interviewing for, then read one level above it.
 
-> Mindset: junior names the garbage collectors; senior can tell you which one paused their service last quarter, by how much, and what they changed.
+> Mindset: a junior can name the garbage collectors; a senior can tell you which one paused their service last quarter, for how long, and what they changed.
 
 ## Junior — foundations
 
 **Q1. What are the main memory areas of the JVM?**
-The JVM divides memory into: the **heap** (all object instances, shared, GC-managed), **metaspace** (class metadata, formerly permgen), the **stack** per thread (frames, locals, operands), the **PC register** per thread, and **native method stacks**. Everything you `new` lives in the heap; every method call pushes a frame onto the thread stack. Heap is typically 70–90% of a Java process's RAM; metaspace starts at ~20 MB and grows.
+The JVM divides memory into the **heap** (all object instances; shared and GC-managed), **metaspace** (class metadata, formerly PermGen), a **stack** for each thread (frames, local variables, and operands), a **PC register** for each thread, and **native method stacks**. Everything you create with `new` lives in the heap; every method call pushes a frame onto the thread's stack. The heap typically accounts for 70–90% of a Java process's RAM; metaspace starts at roughly 20 MB and grows.
 
 **Q2. What is the difference between `==` and `equals()`?**
-`==` compares references (same object in memory). `equals()` compares _logical_ equality; you must override it (with `hashCode()`) or inherit the reference comparison from `Object`. Two `String`s with the same characters are `==` only because the string pool interns literals:
+`==` compares references (whether two references point to the same object). `equals()` compares _logical_ equality; you must override it (together with `hashCode()`) or inherit `Object`'s reference-based comparison. Two `String`s with the same characters are `==` only when they refer to the same interned literal in the string pool:
 
 ```java
 String a = "java";
@@ -31,19 +31,19 @@ System.out.println(a.equals(b));   // true  — same characters
 ```
 
 **Q3. What are the primitive types and are they objects?**
-`byte, short, int, long, float, double, char, boolean` — eight primitives, stored by value, not objects. Everything else is a reference to a heap object. Autoboxing (`int` ↔ `Integer`) hides allocations; `IntegerCache` interns -128..127, so `Integer.valueOf(42) == Integer.valueOf(42)` is `true` but `Integer.valueOf(200) == Integer.valueOf(200)` is `false`.
+`byte, short, int, long, float, double, char, boolean` are the eight primitive types. They are stored by value, not as objects. Everything else is a reference to a heap object. Autoboxing (`int` ↔ `Integer`) hides allocations; `IntegerCache` interns values from -128 to 127, so `Integer.valueOf(42) == Integer.valueOf(42)` is `true`, but `Integer.valueOf(200) == Integer.valueOf(200)` is `false`.
 
 **Q4. `String`, `StringBuilder`, `StringBuffer` — what's the difference?**
-`String` is immutable — every concatenation allocates a new object. `StringBuilder` is mutable, not thread-safe (fast). `StringBuffer` is the same but `synchronized` (slow, rarely needed). In a loop, `+=` on a `String` is O(n²) allocations; use `StringBuilder`.
+`String` is immutable: every concatenation allocates a new object. `StringBuilder` is mutable and not thread-safe, which makes it fast. `StringBuffer` is similar but synchronized, so it is slower and rarely needed. In a loop, `+=` on a `String` causes O(n²) allocations; use `StringBuilder` instead.
 
 **Q5. `final`, `finally`, `finalize` — what do they mean?**
-`final` forbids subclassing (class), override (method), or reassignment (variable). `finally` runs after `try`/`catch` regardless of exception (cleanup). `finalize()` is a deprecated hook the GC calls before reclaiming an object — never rely on it; use `try-with-resources` or `Cleaner`.
+`final` forbids subclassing a class, overriding a method, or reassigning a variable. `finally` runs after `try`/`catch`, regardless of whether an exception was thrown, and is commonly used for cleanup. `finalize()` is a deprecated hook that the GC may call before reclaiming an object. Never rely on it; use `try-with-resources` or `Cleaner` instead.
 
 **Q6. Checked vs unchecked exceptions?**
-Checked exceptions (`Exception` minus `RuntimeException`) must be caught or declared; they model recoverable conditions. Unchecked (`RuntimeException`, `Error`) need not be declared. Modern code prefers unchecked for programming errors and reserves checked for genuinely external failures.
+Checked exceptions (`Exception` minus `RuntimeException`) must be caught or declared; they model recoverable conditions. Unchecked exceptions (`RuntimeException` and `Error`) need not be declared. Modern code generally prefers unchecked exceptions for programming errors and reserves checked exceptions for genuinely external failures.
 
 **Q7. What is autoboxing and a trap it causes?**
-Autoboxing converts a primitive to its wrapper (`int`→`Integer`) automatically. Trap: `Integer` is an object, so `Map<Integer,String>` lookups with a primitive key auto-box, and `null` unboxing throws `NullPointerException`:
+Autoboxing automatically converts a primitive to its wrapper type (`int`→`Integer`). The trap is that `Integer` is an object: `Map<Integer,String>` lookups with a primitive key auto-box it, while unboxing `null` throws `NullPointerException`:
 
 ```java
 Integer i = null;
@@ -51,58 +51,58 @@ int x = i;   // NullPointerException at runtime — autounbox of null
 ```
 
 **Q8. What is the difference between `int` and `Integer` in a collection?**
-Collections store only objects, so `List<Integer>` boxes each `int`, adding ~16 bytes of object overhead per value plus GC pressure. For 1M ints that's ~16 MB of wrapper objects. Use `int[]` or `IntStream`/arrays when size and speed matter.
+Collections store only objects, so `List<Integer>` boxes each `int`, adding roughly 16 bytes of object overhead per value along with extra GC pressure. For 1M ints, that is roughly 16 MB of wrapper objects. Use `int[]` or primitive-oriented streams and arrays when size and speed matter.
 
 **Q9. How does `switch` work on `String` (Java 7+)?**
-The compiler hashes the string and compares via `equals` in a synthetic lookup — O(1) amortized but with a hidden `hashCode` + `equals` cost, not the jump-table of `int`/`enum` switches. For hot paths prefer `enum` switches (~1 ns) over `String` switches (~10–20 ns).
+The compiler hashes the string and compares it with `equals` in a synthetic lookup: O(1) amortized, but with hidden `hashCode` and `equals` costs. It is not the jump table used by `int` and `enum` switches. For hot paths, prefer `enum` switches (~1 ns) over `String` switches (~10–20 ns).
 
 **Q10. What is a `static` block and when does it run?**
-A `static {}` block runs once, when the class is first loaded (lazily, on first use). It initializes static state. A common bug: a `static` initializer that throws leaves the class in a permanently unloadable state (`ExceptionInInitializerError`).
+A `static {}` block runs once, when the class is first loaded (lazily, on first use). It initializes static state. A common bug is a `static` initializer that throws, leaving the class in a permanently unusable state (`ExceptionInInitializerError`).
 
 **Q11. What is the difference between `this` and `super`?**
-`this` refers to the current instance; `super` refers to the superclass's implementation. `super()` (first statement in a constructor) calls the parent constructor; omitting it implicitly calls the no-arg parent constructor.
+`this` refers to the current instance; `super` refers to the superclass's implementation. `super()` (the first statement in a constructor) calls the parent constructor; omitting it implicitly calls the parent's no-argument constructor.
 
 **Q12. What is method overloading resolution order?**
-The compiler picks the most specific applicable overload at compile time (it does NOT pick based on runtime type). Ambiguity (e.g. `log(Object)` vs `log(String)` with `null`) is a compile error, not a runtime choice.
+The compiler picks the most specific applicable overload at compile time; it does not choose based on the runtime type. Ambiguity (for example, `log(Object)` versus `log(String)` with `null`) is a compile-time error, not a runtime choice.
 
 **Q13. What is the default value of an uninitialized field vs local?**
-Object fields get type defaults (`0`, `false`, `null`); local variables are uninitialized and the compiler forbids use before assignment. This is why `int x; System.out.println(x);` does not compile.
+Object fields get type-specific defaults (`0`, `false`, `null`); local variables are uninitialized, and the compiler forbids using them before assignment. This is why `int x; System.out.println(x);` does not compile.
 
 **Q14. What is the difference between `>>` and `>>>`?**
-`>>` is signed right shift (sign bit replicated); `>>>` is unsigned (zero-filled). For negative numbers they differ: `-8 >> 1` is `-4`, `-8 >>> 1` is a huge positive number. Use `>>>` when treating bits as unsigned data.
+`>>` is a signed right shift (the sign bit is replicated); `>>>` is unsigned (zero-filled). They differ for negative numbers: `-8 >> 1` is `-4`, while `-8 >>> 1` is a very large positive number. Use `>>>` when treating bits as unsigned data.
 
 **Q15. What is the difference between `Math.round`, `ceil`, `floor`?**
-`round` returns the nearest `long`/`int` (0.5 rounds up); `ceil` rounds up to the next `double`; `floor` rounds down. `Math.round(-2.5)` is `-2` (toward +∞, not "away from zero") — a frequent trap.
+`round` returns the nearest `long` or `int` (0.5 rounds up); `ceil` rounds up to the next `double`; `floor` rounds down. `Math.round(-2.5)` is `-2` (toward +∞, not "away from zero"), which is a frequent trap.
 
-## Mid — tradeoffs & pitfalls
+## Mid — trade-offs and pitfalls
 
 **Q1. How does the generational garbage collector work, and what breaks in production?**
-The heap splits into **young** (Eden + two Survivor spaces) and **old** generations. Most objects die young: a minor GC copies survivors Eden→Survivor, then Survivor→old once they age out. A **major/full GC** collects the old generation and can pause every application thread for seconds on a large heap. The classic production failure: an unbounded cache fills the old gen → frequent full GCs → **stop-the-world pauses of 1–5 s** → p99 latency blows up. Fix: bound the cache, tune `-Xmx`, or move to a low-pause collector.
+The heap is split into **young** (Eden plus two Survivor spaces) and **old** generations. Most objects die young: a minor GC copies survivors from Eden to a Survivor space, then promotes them to old once they age out. A **major/full GC** collects the old generation and can pause every application thread for seconds on a large heap. The classic production failure is an unbounded cache filling the old generation, causing frequent full GCs and **stop-the-world pauses of 1–5 s**, which send p99 latency soaring. Fix it by bounding the cache, tuning `-Xmx`, or moving to a low-pause collector.
 
-**Q2. G1 vs ZGC vs Shenandoah — when do you pick which?**
+**Q2. G1 vs ZGC vs Shenandoah: when do you choose each one?**
 
 - **G1** (default since Java 9): region-based, targets a pause-time goal (`-XX:MaxGCPauseMillis=200`). Good default up to ~tens of GB heaps.
 - **ZGC** (production since Java 15): concurrent, sub-millisecond pauses even at **multi-terabyte** heaps, but higher CPU/throughput overhead.
 - **Shenandoah**: similar concurrent goal, also sub-ms pauses.
-  One number to remember: G1 pause ~tens-to-hundreds of ms on big heaps; ZGC ~<1 ms regardless of heap size.
+  One number to remember: G1 pauses last tens to hundreds of milliseconds on large heaps; ZGC pauses are typically under 1 ms regardless of heap size.
 
 **Q3. What is the Java Memory Model and why does `volatile` matter?**
-The JMM defines _happens-before_: a write to a `volatile` field happens-before any later read of it, giving visibility across threads. Without `volatile`, a thread may read a stale cached value and never see another thread's update. But `volatile` is **not atomic for compound actions** — `volatile int n; n++` is still a race (read-modify-write). Use `AtomicInteger`.
+The JMM defines _happens-before_: a write to a `volatile` field happens-before any later read of it, providing visibility across threads. Without `volatile`, a thread may read a stale cached value and never see another thread's update. But `volatile` is **not atomic for compound actions**: `volatile int n; n++` is still a race (read-modify-write). Use `AtomicInteger`.
 
-**Q4. `synchronized` vs `ReentrantLock` — what would you reach for?**
-`synchronized` is simple, JVM-optimized, and automatically released. `ReentrantLock` adds: try-lock with timeout (`tryLock(100, ms)` avoids deadlock hangs), fairness option, and multiple condition variables. Reach for `ReentrantLock` only when you need a timeout or interruptible acquisition; otherwise `synchronized` is cleaner.
+**Q4. `synchronized` vs `ReentrantLock`: which would you choose?**
+`synchronized` is simple, JVM-optimized, and released automatically. `ReentrantLock` adds a timed try-lock (`tryLock(100, ms)` avoids hanging during a deadlock), an optional fairness policy, and multiple condition variables. Choose `ReentrantLock` only when you need a timeout or interruptible acquisition; otherwise, `synchronized` is cleaner.
 
-**Q5. Dangers of creating threads manually?**
-`new Thread(() -> ...).start()` per task exhausts OS threads and offers no queueing, monitoring, or backpressure. The fix is a **thread pool** via `Executors` or, better, `new ThreadPoolExecutor(core, max, keepAlive, queue, factory, rejectionPolicy)`. A common bug: `Executors.newFixedThreadPool` uses an **unbounded `LinkedBlockingQueue`** — if tasks outpace consumers, the queue grows until **OutOfMemoryError**. Bound it.
+**Q5. What are the dangers of creating threads manually?**
+Creating a `new Thread(() -> ...).start()` for every task can exhaust OS threads and provides no queueing, monitoring, or backpressure. The fix is a **thread pool** via `Executors` or, better, `new ThreadPoolExecutor(core, max, keepAlive, queue, factory, rejectionPolicy)`. A common bug is that `Executors.newFixedThreadPool` uses an **unbounded `LinkedBlockingQueue`**: if tasks arrive faster than consumers can process them, the queue grows until **OutOfMemoryError**. Bound it.
 
-**Q6. `ConcurrentModificationException` — what and how to avoid?**
-It fires when a collection is structurally modified while iterated (except via the iterator's own `remove`). Fixes: iterate with `Iterator.remove()`, use a concurrent collection (`CopyOnWriteArrayList`, `ConcurrentHashMap`), or collect-to-remove then `removeAll`. `CopyOnWriteArrayList` is great for read-heavy, rarely-written lists (snapshot-on-write, ~O(n) per write).
+**Q6. What is `ConcurrentModificationException`, and how do you avoid it?**
+It is thrown when a collection is structurally modified during iteration, except through the iterator's own `remove`. Fixes include iterating with `Iterator.remove()`, using a concurrent collection (`CopyOnWriteArrayList`, `ConcurrentHashMap`), or collecting items to remove and then calling `removeAll`. `CopyOnWriteArrayList` is excellent for read-heavy, rarely written lists because each write takes ~O(n) and readers use a snapshot.
 
-**Q7. What is `hashCode` contract and why does `HashMap` need it?**
-Equal objects must have equal hash codes; unequal objects _should_ have different ones to avoid collisions. A bad `hashCode` (e.g. constant) collapses every key into one bucket → `HashMap` degrades from O(1) to O(n) — a 1M-entry map becomes a linked list scanned linearly (~microseconds per op instead of ~50 ns).
+**Q7. What is the `hashCode` contract, and why does `HashMap` need it?**
+Equal objects must have equal hash codes; unequal objects _should_ have different ones to avoid collisions. A poor `hashCode` (for example, a constant) puts every key in one bucket, causing `HashMap` to degrade from O(1) to O(n). A 1M-entry map becomes a linked list scanned linearly, taking microseconds per operation instead of roughly 50 ns.
 
-**Q8. How does `HashMap` resize, and why is it expensive?**
-When entries exceed `capacity × loadFactor` (default 0.75), it doubles capacity and rehashes all entries into the new buckets. A map growing from 1M to 2M entries rehashes 1M entries in one stop-the-world step (~tens of ms). Pre-size with `new HashMap<>(expectedSize)` to avoid mid-run resizes.
+**Q8. How does `HashMap` resize, and why is resizing expensive?**
+When the number of entries exceeds `capacity × loadFactor` (0.75 by default), it doubles the capacity and rehashes all entries into the new buckets. A map growing from 1M to 2M entries rehashes 1M entries in one stop-the-world step, taking tens of milliseconds. Pre-size it with `new HashMap<>(expectedSize)` to avoid resizes during a run.
 
 **Q9. What is false sharing and how to prove it?**
 Two frequently-written `long` fields on the same 64-byte cache line get invalidated across cores even when logically independent. Symptom: scaling gets _worse_ with more threads. Proof: add `@Contended` padding — if throughput jumps, you had false sharing. `LongAdder` bakes this in. In one service, `@Contended` on a hot counter took a loop from 40M to 220M ops/s.

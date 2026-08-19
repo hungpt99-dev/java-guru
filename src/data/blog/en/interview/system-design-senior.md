@@ -1,6 +1,6 @@
 ---
 title: "Java Interview Prep #7: System Design — Junior to Senior"
-description: "System design is the senior capstone — a 45-minute judgment test. Process, capacity estimation, caching, CAP, scalability, and observability."
+description: "System design is the senior capstone: a 45-minute test of judgment. Process, capacity estimation, caching, CAP, scalability, and observability."
 pubDatetime: 2026-08-10T10:25:00+07:00
 featured: false
 draft: false
@@ -11,14 +11,14 @@ tags:
   - scalability
 ---
 
-System design is the interview that has no right answer — only defensible trade-offs. Junior candidates name components; seniors walk a problem from vague requirements to a number-backed design and say where it breaks. This post climbs from "draw a diagram" to "here is the latency budget and the failure I'm watching" — 50 questions, pick the level you are interviewing at, and read one above it.
+System design is the interview with no single right answer — only defensible trade-offs. Junior candidates name components; seniors take a problem from vague requirements to a design backed by numbers and explain where it breaks. This post moves from "draw a diagram" to "here is the latency budget and the failure I'm watching" — 50 questions: pick the level you are interviewing for, then read one level above it.
 
-> Mindset: junior produces a diagram; senior produces a diagram _and_ a latency budget, a capacity estimate, and the single failure mode most likely to page them at 2 a.m.
+> Mindset: a junior produces a diagram; a senior produces a diagram _and_ a latency budget, a capacity estimate, and the single failure mode most likely to page them at 2 a.m.
 
-## Junior — foundations
+## Junior — Foundations
 
 **Q1. What are the main building blocks of a web system?**
-A typical stack is a pipeline where each layer adds one capability: the LB spreads load, the cache absorbs reads, the queue decouples slow work, the DB owns truth. Know the role of each block before you can debate any of them:
+A typical stack is a pipeline in which each layer adds a capability: the LB spreads load, the cache absorbs reads, the queue decouples slow work, and the DB owns the truth. Know the role of each block before you debate any of them:
 
 ```
 Client ──> DNS ──> Load Balancer ──> App Servers ──> Cache (Redis)
@@ -29,7 +29,7 @@ Client ──> DNS ──> Load Balancer ──> App Servers ──> Cache (Redi
 ```
 
 **Q2. What happens when you type a URL and press Enter?**
-DNS lookup → TCP handshake → TLS handshake → HTTP request → app logic → response. Each step costs measurable time — DNS ~10–50 ms (cached ~0 ms), RTT ~1–50 ms, TLS ~10–100 ms. This is your first latency budget: a "fast" request is mostly waiting on the network, not your code:
+DNS lookup → TCP handshake → TLS handshake → HTTP request → app logic → response. Each step takes a measurable amount of time — DNS ~10–50 ms (cached ~0 ms), RTT ~1–50 ms, TLS ~10–100 ms. This is your first latency budget: a "fast" request mostly waits on the network, not your code:
 
 ```text
 browser → DNS (10–50 ms) → TCP handshake (1 RTT) → TLS (1–2 RTT, ~10–100 ms)
@@ -38,7 +38,7 @@ a 200 ms budget: network eats ~60–80% of it before your code runs
 ```
 
 **Q3. What is the difference between L4 and L7 load balancing?**
-L4 routes on TCP/UDP ports — fast (~µs), no packet inspection, can't route by URL. L7 routes on HTTP — slower (parses headers, ~tens of µs), but can path-route, retry, and do sticky sessions:
+L4 routes by TCP/UDP port — fast (~µs), with no packet inspection, but unable to route by URL. L7 routes by HTTP — slower (it parses headers, ~tens of µs), but it can route by path, retry, and use sticky sessions:
 
 ```
 L4:  Client ── TCP:443 ──> LB ──> any healthy node
@@ -47,7 +47,7 @@ L7:  Client ──> LB ── /api/*    ──> api nodes
 ```
 
 **Q4. What is the difference between horizontal and vertical scaling?**
-Vertical = bigger machine (more CPU/RAM) — simple but capped at the largest cloud instance and a SPOF. Horizontal = more nodes behind an LB — no hard cap, but requires statelessness. If one node does ~500 RPS and you need 10k QPS, vertical needs a 20× machine that doesn't exist; horizontal needs ~20–25 nodes (with headroom):
+Vertical = a bigger machine (more CPU/RAM) — simple but capped at the largest cloud instance and a SPOF. Horizontal = more nodes behind an LB — no hard cap, but requires statelessness. If one node handles ~500 RPS and you need 10k QPS, vertical scaling needs a 20× machine that does not exist; horizontal scaling needs ~20–25 nodes (with headroom):
 
 ```text
 needed_nodes = target_rps / per_node_rps × (1 + headroom)
@@ -55,7 +55,7 @@ needed_nodes = target_rps / per_node_rps × (1 + headroom)
 ```
 
 **Q5. What does stateless mean, and why does it matter for scaling?**
-A stateless server keeps no per-request memory — every request carries what it needs, so any node can serve any request. Sessions in memory are the classic violation; moving them to a shared store (Redis) or a client token is the fix:
+A stateless server keeps no per-request state — every request carries what it needs, so any node can serve any request. In-memory sessions are the classic violation; moving them to a shared store (Redis) or a client token fixes it:
 
 ```java
 // WRONG — state in the instance, sticky sessions required
@@ -66,7 +66,7 @@ String cartId = redis.set(cartJson);   // TTL 24h
 ```
 
 **Q6. What is cache-aside, and when does it break?**
-The app checks the cache first; on a miss it reads the DB, populates the cache, and returns. Simple and resilient (cache failure falls back to DB) but you pay a stale window and risk a stampede on a hot-key miss:
+The app checks the cache first; on a miss, it reads the DB, populates the cache, and returns the result. This is simple and resilient (a cache failure falls back to the DB), but you pay for a stale window and risk a stampede when a hot key misses:
 
 ```java
 String v = redis.get(key);
@@ -78,7 +78,7 @@ return v;                           // hit rate ~95% on hot keys
 ```
 
 **Q7. What is a CDN and when do you use it?**
-A CDN caches static assets at edge locations near users, cutting both latency and origin load. Use it for anything static and read-heavy. Dynamic user-specific responses don't cache — that's the boundary:
+A CDN caches static assets at edge locations near users, reducing both latency and origin load. Use it for anything static and read-heavy. Dynamic, user-specific responses are not cached — that is the boundary:
 
 ```
 user in Hanoi ──> edge node SG (5 ms) ──> cache hit, done
@@ -86,7 +86,7 @@ origin in Frankfurt (200 ms) only touched on cache miss
 ```
 
 **Q8. What is the difference between SQL and NoSQL, in one minute?**
-SQL gives ACID, joins, and strong schema — best for transactional relational data (money, orders). NoSQL trades guarantees for scale and flexible schema — best for high-volume or loose data (sessions, time-series, graphs). Pick by data shape and consistency needs, not fashion:
+SQL provides ACID, joins, and a strong schema — best for transactional relational data (money, orders). NoSQL trades guarantees for scale and a flexible schema — best for high-volume or loosely structured data (sessions, time series, graphs). Choose based on data shape and consistency needs, not fashion:
 
 ```text
 order + money + joins → SQL (ACID across rows)
@@ -95,7 +95,7 @@ the hybrid that wins: Redis cache + Postgres truth + column store for analytics
 ```
 
 **Q9. What is a database index, and why does a query slow down without one?**
-An index is a sorted structure (B-tree) mapping key → row location, turning a full table scan into a log-time lookup. Without an index, a 10M-row table scan is ~1–5 s and reads every row; with one, a lookup is ~1–10 ms and reads a few pages. The index has a cost — every write must update it:
+An index is a sorted structure (B-tree) mapping a key to a row location, turning a full table scan into a logarithmic-time lookup. Without an index, scanning a 10M-row table takes ~1–5 s and reads every row; with one, a lookup takes ~1–10 ms and reads a few pages. Indexes have a cost — every write must update them:
 
 ```text
 no index:  SELECT * FROM orders WHERE user_id = 42 → full scan of 10M rows ~1–5 s
@@ -104,7 +104,7 @@ cost: each INSERT/UPDATE now also writes the index B-tree
 ```
 
 **Q10. What is a message queue, and what problem does it solve?**
-A queue buffers work between a producer and a consumer that can't keep pace, decoupling them so a slow consumer or a crash doesn't block the producer — and it smooths spikes: the queue absorbs the burst, consumers drain at their own rate:
+A queue buffers work between a producer and a consumer that cannot keep pace, decoupling them so a slow consumer or a crash does not block the producer — and it smooths spikes: the queue absorbs the burst, and consumers drain it at their own rate:
 
 ```
 Producers (10k req/s burst) ──> Queue ──> Consumers (drain 2k req/s)
@@ -112,7 +112,7 @@ Producers (10k req/s burst) ──> Queue ──> Consumers (drain 2k req/s)
 ```
 
 **Q11. What is CAP in plain terms?**
-You can't have all three of Consistency, Availability, and Partition tolerance — and partitions (network splits) are inevitable, so you really choose between **CP** (pause writes to stay consistent) and **AP** (stay up, risk stale reads). A payments ledger is CP; a social feed is AP. The interview trap is claiming "we have all three":
+You cannot have all three of Consistency, Availability, and Partition tolerance — and partitions (network splits) are inevitable, so in practice you choose between **CP** (pause writes to remain consistent) and **AP** (stay available while risking stale reads). A payments ledger is CP; a social feed is AP. The interview trap is claiming, "We have all three":
 
 ```text
          Consistency
@@ -129,7 +129,7 @@ Consistency─CP───AP─Availability
 ```
 
 **Q12. Monolith vs microservices — which is better?**
-A monolith is one deployable; microservices are many small ones with network calls between them. Monoliths win on simplicity and transactionality; microservices win on independent scaling and deployment. A 3-person team with a monolith at 10k QPS beats a 20-person team with 12 services at 2k QPS. The honest senior says: start monolithic, split when the team and the load justify it:
+A monolith is a single deployable; microservices are many smaller deployables with network calls between them. Monoliths win on simplicity and transactionality; microservices win on independent scaling and deployment. A 3-person team with a monolith at 10k QPS beats a 20-person team with 12 services at 2k QPS. The honest senior says: start with a monolith and split it when the team and the load justify it:
 
 ```text
 monolith:       one deployable, one DB → local transactions, simple deploys

@@ -1,6 +1,6 @@
 ---
 title: "AI Ops: Turning Alerts and Traces into Root-Cause Hypotheses"
-description: "How FinPay's observability stack uses an LLM to summarize Prometheus alerts and OpenTelemetry traces into a root-cause hypothesis with a runbook link."
+description: "How FinPay's observability stack uses an LLM to summarize Prometheus alerts and OpenTelemetry traces into a root-cause hypothesis, complete with a runbook link."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -11,11 +11,11 @@ featured: false
 
 ## The 3 a.m. pager problem
 
-FinPay runs payments. When a settlement batch slips, hundreds of alerts fire in minutes: latency spikes, error-rate cliffs, dead-letter queues filling up. By the time an on-call engineer wades through the noise, the *real* incident — the one that only a fraction of those alerts was actually about — has already burned the SLO budget.
+FinPay runs payments. When a settlement batch is delayed, hundreds of alerts fire within minutes: latency spikes, error rates plunge, and dead-letter queues fill up. By the time an on-call engineer wades through the noise, the *real* incident — the one that only a fraction of those alerts were actually about — has already burned through the SLO budget.
 
-We built **ai-ops-incident-triage**, the fourth feature in our observability platform, to answer one question as early as possible: *"Is this one incident, or many? What broke, and does it touch money?"* The AI does the reading, the correlation, and the first-pass classification. It never makes the money decision.
+We built **ai-ops-incident-triage**, the fourth feature in our observability platform, to answer one question as early as possible: *"Is this one incident or many? What broke, and does it touch money?"* The AI handles the reading, correlation, and first-pass classification. It never makes the money decision.
 
-This post is the full design: the architecture, the Spring Boot + Kafka + OpenSearch wiring, and the WRONG → RIGHT code we wrote along the way, including the five guardrails that make an LLM safe inside a fintech control plane.
+This post covers the complete design: the architecture, the Spring Boot + Kafka + OpenSearch wiring, and the WRONG → RIGHT code we wrote along the way, including the five guardrails that make an LLM safe inside a fintech control plane.
 
 > Repo: https://github.com/finpay-lab/observability
 
@@ -26,12 +26,12 @@ This post is the full design: the architecture, the Spring Boot + Kafka + OpenSe
 1. Consumes alert events and correlated distributed traces from Kafka.
 2. Enriches each alert with its trace context (queried from OpenSearch).
 3. Sends a redacted, schema-forced prompt to a BYOK LLM to get severity, root cause, and a recommendation.
-4. Applies the guardrails (idempotency, timeouts/retries/circuit breaking, human approval for money, full audit).
-5. Publishes the triage decision and the audit entry back to Kafka → OpenSearch.
+4. Applies the guardrails (idempotency, timeouts, retries, circuit breaking, human approval for money-related actions, and full auditing).
+5. Publishes the triage decision and audit entry to Kafka → OpenSearch.
 
 ## Architecture map
 
-The service follows a hexagonal architecture. The domain core doesn't know about Kafka, Spring AI, or OpenSearch — it only knows ports. Adapters live in `infrastructure/`:
+The service follows a hexagonal architecture. The domain core knows nothing about Kafka, Spring AI, or OpenSearch; it only knows about ports. Adapters live in `infrastructure/`:
 
 ```
 com.finpay.observability
@@ -60,23 +60,23 @@ com.finpay.observability
                         └───────────────────────────────────────────┘
 ```
 
-The domain model is boring, immutable records — exactly what you want when an LLM's output has to flow through an audit trail.
+The domain model consists of deliberately boring, immutable records — exactly what you want when an LLM's output has to flow through an audit trail.
 
 ## The five guardrails
 
-These are not optional decorations. They are the contract that lets us run an LLM inside a payments company.
+These are not optional decorations. They are the contract that allows us to run an LLM inside a payments company.
 
 1. **AI is not a money decider.** The model may *suggest* a refund or compensation; only a human (or a fully deterministic rule) may execute it. The ledger, not the prompt, moves money.
-2. **Idempotent by `eventId`.** Any retry, redelivery, or replay must produce the same single outcome. We claim the `eventId` atomically in OpenSearch; duplicate processing is skipped.
+2. **Idempotent by `eventId`.** Any retry, redelivery, or replay must produce the same outcome. We claim the `eventId` atomically in OpenSearch; duplicate processing is skipped.
 3. **Timeout, retry, circuit breaker.** The LLM call is time-boxed, retried with backoff, and protected by a circuit breaker. When the breaker opens, we degrade to a deterministic rule engine instead of failing the triage or, worse, blocking the alert pipeline.
 4. **BYOK key, never hardcoded, never logged.** The customer's key is injected at runtime via Kubernetes Secret/Vault, and the only key-shaped string that may ever reach a log is the masked preview.
-5. **Audit every decision.** Every triage, fallback, retry, and human approval is an append-only audit entry keyed by `eventId` with the exact model, version, trace ID, and outcome.
+5. **Audit every decision.** Every triage, fallback, retry, and human approval produces an append-only audit entry keyed by `eventId`, with the exact model, version, trace ID, and outcome.
 
 ## WRONG then RIGHT
 
 ### 1. Secrets & BYOK
 
-**WRONG.** The key lives in a constant, so it lives in git history, IDEs, and log dumps. It can never be rotated without a deploy.
+**WRONG.** The key lives in a constant, so it ends up in git history, IDEs, and log dumps. It cannot be rotated without a deployment.
 
 ```java
 // WRONG — the key is in code, therefore in git history and everyone's IDE.
@@ -139,14 +139,14 @@ We also have a CI check that greps the module for `sk-`-shaped literals, plus a 
 
 ### 2. Timeout, retry, circuit breaker
 
-**WRONG.** A blocking call with no timeout means one slow provider hangs the consumer, drains the Kafka poll, and stalls every alert behind it. No retry, no breaker, no fallback.
+**WRONG.** A blocking call without a timeout means that one slow provider can hang the consumer, drain the Kafka poll, and stall every alert behind it. There is no retry, breaker, or fallback.
 
 ```java
 // WRONG — blocks forever, single point of failure, no degradation path.
 HttpResponse<String> r = client.send(request, HttpResponse.BodyHandlers.ofString());
 ```
 
-**RIGHT.** Time-boxed, retried with backoff, protected by a circuit breaker, and backed by a deterministic fallback.
+**RIGHT.** The call is time-boxed, retried with backoff, protected by a circuit breaker, and backed by a deterministic fallback.
 
 ```java
 // infrastructure/config/Resilience4jConfig.java
@@ -255,7 +255,7 @@ Degradation beats failure. Alert triage in the middle of a provider outage is ex
 
 ### 3. Idempotent by `eventId`
 
-**WRONG.** The consumer has no memory. Kafka is at-least-once: any retry, rebalance, or manual offset reset replays the alert, producing duplicate incidents, duplicate pager pages, and duplicate decisions.
+**WRONG.** The consumer has no memory. Kafka provides at-least-once delivery: any retry, rebalance, or manual offset reset can replay the alert, producing duplicate incidents, pager pages, and decisions.
 
 ```java
 // WRONG — a single redelivery duplicates the incident and the pager page.
@@ -266,7 +266,7 @@ public void onAlert(AlertEvent event) {
 }
 ```
 
-**RIGHT.** Every event is claimed atomically by `eventId` in OpenSearch before any work. A replayed event is skipped.
+**RIGHT.** Every event is claimed atomically by `eventId` in OpenSearch before any work begins. A replayed event is skipped.
 
 ```java
 // domain/port/IdempotencyPort.java
@@ -331,7 +331,7 @@ public class IncidentConsumer {
 }
 ```
 
-`_id = eventId` is the trick: OpenSearch gives us an atomic, distributed, replay-safe claim for free. Even if the consumer dies mid-processing, the in-flight claim blocks a duplicate until the lease expires, and the completed document blocks it forever.
+`_id = eventId` is the key: OpenSearch gives us an atomic, distributed, replay-safe claim without additional coordination. Even if the consumer dies mid-processing, the in-flight claim blocks a duplicate until the lease expires, and the completed document blocks it permanently.
 
 ### 4. AI is not a money decider
 
@@ -345,7 +345,7 @@ if ("REFUND".equalsIgnoreCase(decision)) {
 }
 ```
 
-**RIGHT.** The recommendation is a first-class, typed, auditable value, and the orchestrator treats anything that touches money as "needs a human."
+**RIGHT.** The recommendation is a first-class, typed, auditable value, and the orchestrator treats anything that touches money as "requiring human approval."
 
 ```java
 // domain/model/Recommendation.java
@@ -369,11 +369,11 @@ public TriageOutcome triage(IncidentContext ctx) {
 }
 ```
 
-The LLM's job is to be a fast, observant analyst. The human's job is to be the decider, and the ledger is the source of truth. We never build a path where model output reaches a payment write without an approval event on the audit trail.
+The LLM's job is to be a fast, observant analyst. The human's job is to make the decision, and the ledger is the source of truth. We never create a path in which model output reaches a payment write without an approval event on the audit trail.
 
 ### 5. Audit every decision
 
-**WRONG.** The decision happens in a void. When regulators or customers ask "why did this happen?", there is no answer, no trace, no model version.
+**WRONG.** The decision happens in a void. When regulators or customers ask, "Why did this happen?", there is no answer, trace, or model version.
 
 ```java
 // WRONG — the decision is invisible. No trace, no model version, no audit.
@@ -383,7 +383,7 @@ public void triage(AlertEvent event) {
 }
 ```
 
-**RIGHT.** Every decision is an append-only audit entry keyed by `eventId`, published to Kafka and sunk into OpenSearch.
+**RIGHT.** Every decision is an append-only audit entry keyed by `eventId`, published to Kafka, and written to OpenSearch.
 
 ```java
 // domain/port/AuditPort.java
@@ -418,11 +418,11 @@ public record AuditEntry(
         boolean humanApproved) {}
 ```
 
-If you cannot reconstruct, for a given `eventId`, *what the model was asked, what it answered, which version, and who approved it* — you do not have an audit trail; you have a hope.
+If, for a given `eventId`, you cannot reconstruct *what the model was asked, what it answered, which version it used, and who approved it*, you do not have an audit trail; you have a hope.
 
 ## The trace enrichment step
 
-`IncidentContext` is built by joining the alert with its correlated traces. Traces (via OpenTelemetry → OpenSearch) tell the model *where* the failure happened; the alert tells it *what* is observable from outside.
+`IncidentContext` is built by joining the alert with its correlated traces. Traces (via OpenTelemetry → OpenSearch) tell the model *where* the failure occurred; the alert tells it *what* is observable from outside.
 
 ```java
 // infrastructure/opensearch/OpenSearchTraceEnricher.java
@@ -445,7 +445,7 @@ public class OpenSearchTraceEnricher {
 }
 ```
 
-One senior-level warning: **redact before you prompt.** Card numbers, credentials, and customer payloads must never reach the model. We strip PII and payment data before serializing `IncidentContext`, and we log the redaction mask, not the payload.
+One senior-level warning: **redact before you prompt.** Card numbers, credentials, and customer payloads must never reach the model. We strip PII and payment data before serializing `IncidentContext`, and log the redaction mask rather than the payload.
 
 ```java
 String redact(String raw) {
@@ -456,13 +456,13 @@ String redact(String raw) {
 
 ## Operational notes
 
-- **`temperature = 0` + JSON schema.** Triage output is parsed strictly; a parse failure counts as a breaker failure and falls back to rules. We never let the model improvise a field name.
+- **`temperature = 0` + JSON schema.** Triage output is parsed strictly; a parse failure counts as a breaker failure and triggers a fallback to rules. We never let the model improvise a field name.
 - **Manual ack on the consumer.** At-least-once delivery + the `eventId` claim store gives exactly-once *effect* without Kafka transactions.
 - **Every fallback is also audited.** A rule-engine triage has `actor = "rules"` and the same `eventId`; the audit trail must tell the whole story.
 - **Cost is a feature.** BYOK means each customer meters their own spend and capacity; we meter latency, not tokens, for SLOs.
 
 ## Wrap-up
 
-An LLM is a great first responder and a terrible final authority. **ai-ops-incident-triage** treats it that way: fast reading, typed recommendations, hard guardrails, and a full audit trail. When you put a model inside a fintech control plane, the code around the model matters more than the model.
+An LLM is a great first responder and a terrible final authority. **ai-ops-incident-triage** treats it accordingly: fast analysis, typed recommendations, hard guardrails, and a complete audit trail. When you put a model inside a fintech control plane, the code around the model matters more than the model itself.
 
 > Repo: https://github.com/finpay-lab/observability

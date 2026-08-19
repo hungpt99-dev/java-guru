@@ -1,6 +1,6 @@
 ---
 title: "Catching Ledger Anomalies in Real Time with ML and Prometheus"
-description: "How FinPay's ledger-service streams Kafka events through an anomaly model and exposes a Prometheus metric for Grafana alerting."
+description: "How FinPay's ledger-service streams Kafka events through an anomaly model and exposes Prometheus metrics for Grafana alerting."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -9,19 +9,19 @@ featured: false
 
 > **Repository:** https://github.com/finpay-lab/ledger-service
 
-# AI-3: Ledger and Kafka Anomaly Detection to Prometheus
+# AI-3: Ledger and Kafka Anomaly Detection with Prometheus
 
-A ledger is the last place you want an LLM to make decisions. This post is about how FinPay's `ledger-service` integrates AI without giving it the keys to the money room: we feed Kafka ledger events to an anomaly scorer, export the verdicts to Prometheus, and keep every AI touchpoint behind guardrails, ports, and a paper trail.
+A ledger is the last place you want an LLM making decisions. This post explains how FinPay's `ledger-service` integrates AI without giving it the keys to the money room: we feed Kafka ledger events to an anomaly scorer, export the verdicts to Prometheus, and keep every AI touchpoint behind guardrails, ports, and a paper trail.
 
 ## 1. The problem
 
-`ledger-service` is a Spring Boot service that double-posts every payment (`debit`/`credit`) in a single database transaction, streams those events to Kafka (`ledger.events`), and exposes them for search in OpenSearch. The business asked for an early-warning system: *"flag suspicious ledger patterns the moment they land, before reconciliation, before the batch job at 2 AM."*
+`ledger-service` is a Spring Boot service that double-posts every payment (`debit`/`credit`) in a single database transaction, streams those events to Kafka (`ledger.events`), and makes them searchable in OpenSearch. The business asked for an early-warning system: *"Flag suspicious ledger patterns the moment they land, before reconciliation and before the batch job at 2 AM."*
 
-We evaluated a few signal sources — deterministic rules first, then a statistical baseline, and finally an LLM scorer on top of that. The product decision was:
+We evaluated several signal sources: deterministic rules first, then a statistical baseline, and finally an LLM scorer on top of those. The product decision was:
 
 > AI should never decide a money outcome. It produces a *signal*; humans and deterministic policy make the *decision*.
 
-Everything below is the architecture that makes that sentence true in production.
+Everything below describes the architecture that makes that sentence true in production.
 
 ## 2. The money path is sacred
 
@@ -36,7 +36,7 @@ public void post(LedgerCommand cmd) {
 }
 ```
 
-Any work we add on top of this path competes for the same DB transaction, the same connection, the same row locks. The first (naive) AI integration we wrote — shown below, and only to illustrate what *not* to do — violated every one of those constraints.
+Any work we add to this path competes for the same DB transaction, connection, and row locks. The first (naive) AI integration we wrote — shown below only to illustrate what *not* to do — violated every one of those constraints.
 
 ## 3. WRONG: the naive synchronous integration
 
@@ -71,7 +71,7 @@ public class PaymentProcessor {
 }
 ```
 
-What's wrong here, in order of severity:
+Here's what's wrong, in order of severity:
 
 - **The LLM is on the money path.** The DB transaction stays open while we wait on a third-party API. A 2-second LLM p95 becomes 2 seconds of held row locks, connection-pool exhaustion, and a slower ledger for everyone.
 - **No timeout, no circuit breaker, no degradation.** When OpenAI is down, the ledger is down with it. A monitoring AI must never become a second point of failure.
@@ -87,13 +87,13 @@ Before writing any "RIGHT" code, we wrote down the rules that shape it. These ar
 1. **AI is not a money decider.** It emits a signal; a separate deterministic policy and a human approval flow own the money outcome.
 2. **Idempotent by `eventId`.** Every consumer, every store, every external side effect must be safe to replay.
 3. **Timeout -> retry -> circuit breaker**, in that order, and a deterministic fallback so an AI outage degrades, never blocks.
-4. **BYOK, key never hardcoded or logged.** The key is injected at runtime from a secret store; any accidental log output is redacted.
+4. **BYOK; the key is never hardcoded or logged.** The key is injected at runtime from a secret store; any accidental log output is redacted.
 5. **Audit every decision.** Each score is a versioned, append-only record with the input evidence, model, verdict, and timestamp.
 6. **The AI path is fully instrumented.** Latency, failures, and anomaly rate go to Prometheus so we can alert on the monitor itself.
 
 ## 5. RIGHT: hexagonal ports, adapters live in infrastructure
 
-We split the codebase along hexagonal boundaries. The `domain/` owns models and **ports** (interfaces). `infrastructure/` owns **adapters** (Kafka, OpenAI, OpenSearch, Micrometer). The domain core knows nothing about HTTP, JSON, Kafka, or AI SDKs — which is what makes the fallback, the tests, and the replacement story trivial.
+We split the codebase along hexagonal boundaries. `domain/` owns the models and **ports** (interfaces). `infrastructure/` owns the **adapters** (Kafka, OpenAI, OpenSearch, and Micrometer). The domain core knows nothing about HTTP, JSON, Kafka, or AI SDKs, which makes the fallback, testing, and replacement straightforward.
 
 ```
 com.finpay.ledger
@@ -142,7 +142,7 @@ public interface AuditTrail {
 }
 ```
 
-And the models the domain returns — notice that `UNKNOWN` is a first-class verdict:
+Here are the models returned by the domain; notice that `UNKNOWN` is a first-class verdict:
 
 ```java
 // domain/model/AnomalyScore.java
@@ -172,7 +172,7 @@ public record AnomalyRecord(String eventId, LedgerEvent event, AnomalyScore scor
 
 ## 6. RIGHT: consume Kafka, stay off the money path
 
-The AI feature never sits on the `PostingService` transaction. A dedicated consumer group reads `ledger.events`, scores asynchronously, and only touches *metric and audit* sinks. The money path stays 3-15 ms and knows nothing about AI.
+The AI feature never runs inside the `PostingService` transaction. A dedicated consumer group reads `ledger.events`, scores events asynchronously, and touches only the *metrics and audit* sinks. The money path stays at 3-15 ms and knows nothing about AI.
 
 ```java
 // infrastructure/kafka/LedgerEventListener.java
@@ -245,11 +245,11 @@ public class LedgerEventListener {
 }
 ```
 
-The consumer is in a consumer group, so we scale horizontally. Because Kafka provides at-least-once delivery, the `eventId` check is not optional.
+The consumer belongs to a consumer group, so we can scale it horizontally. Because Kafka provides at-least-once delivery, the `eventId` check is not optional.
 
 ## 7. Idempotency by eventId
 
-Idempotency is enforced in three places: the dedup check, a deterministic document id in the store, and a Kafka dead-letter topic for poison events.
+Idempotency is enforced in three places: the deduplication check, a deterministic document ID in the store, and a Kafka dead-letter topic for poison events.
 
 ```java
 // infrastructure/opensearch/OpenSearchAnomalyStore.java
@@ -290,7 +290,7 @@ public class OpenSearchAnomalyStore implements AnomalyStore {
 }
 ```
 
-On repeated processing failure, the record goes to a dead-letter topic instead of blocking the group:
+After repeated processing failures, the record goes to a dead-letter topic instead of blocking the group:
 
 ```java
 // infrastructure/kafka/LedgerEventListener.java (extension)
@@ -303,7 +303,7 @@ public void onDlt(LedgerEvent event, @Header(KafkaHeaders.RECEIVED_TOPIC) String
 
 ## 8. Timeout, retry, circuit breaker
 
-Resilience4j gives us the timeout -> retry -> circuit-breaker chain, configured declaratively and kept out of domain code.
+Resilience4j provides the timeout -> retry -> circuit-breaker chain, configured declaratively and kept out of the domain code.
 
 ```yaml
 # application.yml
@@ -326,7 +326,7 @@ resilience4j:
         wait-duration-in-open-state: 10s
 ```
 
-The adapter composes them and, on failure, degrades to a deterministic rule scorer — never throwing onto the consumer thread, never blocking the pipeline:
+The adapter composes them and, on failure, falls back to a deterministic rule scorer — it never throws on the consumer thread or blocks the pipeline:
 
 ```java
 // infrastructure/ai/OpenAiAnomalyScorer.java
@@ -414,11 +414,11 @@ public class OpenAiAnomalyScorer implements AnomalyScorer {
 }
 ```
 
-The timeout guard is the most important: without the `TimeLimiter`, a hung OpenAI socket would pin consumer threads indefinitely and inflate Kafka consumer lag.
+The timeout guard is the most important one: without the `TimeLimiter`, a hung OpenAI socket would pin consumer threads indefinitely and inflate Kafka consumer lag.
 
 ## 9. BYOK — key never hardcoded, never logged
 
-The key is *brought by the operator*, not shipped by us:
+The key is *provided by the operator*, not shipped by us:
 
 - Set at runtime via `AI_PROVIDER_API_KEY` (from Vault / AWS Secrets Manager / K8s Secret), never in `application.yml`, never in git.
 - Read on demand in the adapter (see `apiKey()` above); never stored on a field where a stack trace could print it.
@@ -458,7 +458,7 @@ void apiKeyIsNeverLogged() {
 
 ## 10. Audit every decision
 
-Every score — including every degradation and every duplicate skip — is an append-only, evidence-bearing record in OpenSearch (`ledger-ai-audit`). The audit is **not** optional and **not** coupled to the money transaction:
+Every score — including every degradation and duplicate skip — is an append-only, evidence-bearing record in OpenSearch (`ledger-ai-audit`). The audit is **not** optional and is **not** coupled to the money transaction:
 
 ```java
 // infrastructure/audit/AuditTrailImpl.java
@@ -497,7 +497,7 @@ public class AuditTrailImpl implements AuditTrail {
 }
 ```
 
-The audit entry carries the input, the model, and the verdict so a human can answer "why did the system flag this?" weeks later:
+The audit entry carries the input, model, and verdict so a human can answer "Why did the system flag this?" weeks later:
 
 ```java
 public record AuditEntry(
@@ -510,7 +510,7 @@ public record AuditEntry(
 
 ## 11. AI is not a money decider
 
-The detection pipeline only *signals*. The money outcome (hold, block, reject) is owned by a separate, deterministic policy service with a human-approval step. We state it explicitly in code so nobody "helps later":
+The detection pipeline only *signals*. A separate, deterministic policy service with a human-approval step owns the money outcome (hold, block, or reject). We state this explicitly in code so nobody "helps later":
 
 ```java
 // application/DetectAnomalyService.java — outcome of AI is a signal, never an action.
@@ -527,7 +527,7 @@ public AnomalySignal analyze(LedgerEvent event) {
 
 ## 12. Prometheus and alerting
 
-Micrometer + Spring Boot Actuator expose everything to Prometheus:
+Micrometer and Spring Boot Actuator expose everything to Prometheus:
 
 ```yaml
 # application.yml
@@ -542,7 +542,7 @@ management:
         enabled: true
 ```
 
-What we monitor, and why:
+What we monitor and why:
 
 | Metric | Type | Tells us |
 |---|---|---|
@@ -551,7 +551,7 @@ What we monitor, and why:
 | `ledger_anomaly_score_duration_seconds` | Timer | LLM latency p50/p95/p99 |
 | `kafka_consumer_lag` (Kafka exporter) | Gauge | Consumer group health |
 
-Alert rules that fire when the *monitor* itself is unhealthy:
+These alert rules fire when the *monitor* itself is unhealthy:
 
 ```yaml
 # prometheus/alerts/ledger-anomaly.yml
@@ -571,7 +571,7 @@ If `AIScorerDegraded` fires, the fallback rule scorer is carrying the load — e
 
 ## 13. Tests that keep us honest
 
-With the port abstraction, the "AI" is just a pluggable implementation, so tests never touch a real model:
+With the port abstraction, the "AI" is just a pluggable implementation, so the tests never touch a real model:
 
 ```java
 // application/DetectAnomalyServiceTest.java
@@ -603,8 +603,8 @@ void openAiOutageDegradesToRuleScorer() {
 
 ## 14. What we shipped
 
-The production shape is: Kafka events -> async consumer (hexagonal, guarded) -> OpenAI scorer with timeout/retry/circuit breaker -> deterministic fallback -> OpenSearch signal + append-only audit -> Prometheus counters/timers -> alerts on the monitor itself. The money path never waits on AI, a decision is never made by AI, and every decision can be replayed and audited.
+The production shape is: Kafka events -> asynchronous consumer (hexagonal and guarded) -> OpenAI scorer with timeout/retry/circuit breaker -> deterministic fallback -> OpenSearch signal + append-only audit -> Prometheus counters/timers -> alerts on the monitor itself. The money path never waits for AI, AI never makes a decision, and every decision can be replayed and audited.
 
-If you are wiring an LLM into a ledger, start from the guardrails, not the prompt.
+If you are wiring an LLM into a ledger, start with the guardrails, not the prompt.
 
 > **Repository:** https://github.com/finpay-lab/ledger-service

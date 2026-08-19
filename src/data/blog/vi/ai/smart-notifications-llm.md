@@ -1,6 +1,6 @@
 ---
 title: "LLM-Generated Notifications That Do Not Sound Like Robots"
-description: "notification-service của FinPay dùng LLM để tạo nội dung SMS, email và push cá nhân hóa, tự nhiên về giọng điệu, kèm cơ chế dự phòng an toàn bằng template."
+description: "notification-service của FinPay sử dụng LLM để tạo nội dung SMS, email và thông báo push được cá nhân hóa, tự nhiên về giọng điệu, kèm cơ chế dự phòng an toàn bằng template."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags:
   - java
@@ -13,19 +13,19 @@ featured: false
 
 > Repository: <https://github.com/finpay-lab/notification-service>
 
-## Lời mở đầu: bug thông báo ngớ ngẩn nhất chúng tôi từng phát hành
+## Lời mở đầu: lỗi thông báo ngớ ngẩn nhất chúng tôi từng đưa lên hệ thống
 
-Một khách hàng trả nợ trước hạn. Hệ thống cũ bắn ra một thông báo:
+Một khách hàng thanh toán khoản trả góp trước hạn. Hệ thống cũ gửi đi một thông báo:
 
 > "Khoản thanh toán 2.400.000 VND của quý khách đã được ghi nhận. Số dư nợ hiện tại: 0 VND."
 
-Chính xác về mặt kỹ thuật. Vô dụng trong thực tế. Đoạn lời văn là một template cứng do một pipeline sinh ra, vốn chưa bao giờ hiểu sự kiện đó *có nghĩa là gì*. Chúng tôi cứ mãi đánh nhau trên cùng một mặt trận: template cứ thế nhân bản ra, bộ phận product và pháp lý tranh nhau từng dấu câu, và không ai chịu trách nhiệm về lời văn. Vậy nên chúng tôi bỏ templating và bắt đầu *sinh* nội dung.
+Về mặt kỹ thuật thì chính xác, nhưng trong thực tế lại vô dụng. Lời văn này là một template cứng do một pipeline tạo ra, vốn chưa bao giờ hiểu sự kiện đó *có ý nghĩa gì*. Chúng tôi cứ mãi đối mặt với cùng một vấn đề: template ngày càng nhiều, bộ phận sản phẩm và pháp lý tranh luận từng dấu câu, còn không ai chịu trách nhiệm về câu chữ. Vì vậy, chúng tôi bỏ cách dùng template và bắt đầu *tạo* nội dung.
 
-Đây là câu chuyện về `smart-notifications-llm`, tích hợp AI bên trong notification-service của FinPay: chúng tôi đã để LLM viết lời văn như thế nào — và quan trọng hơn — làm sao để việc để một LLM viết lời văn bên trong một hệ thống thanh toán là *an toàn*.
+Đây là câu chuyện về `smart-notifications-llm`, tích hợp AI bên trong notification-service của FinPay: chúng tôi đã để LLM viết lời văn như thế nào và, quan trọng hơn, làm sao để việc để một LLM viết lời văn trong một hệ thống thanh toán trở nên *an toàn*.
 
-## Tại sao không dùng template? Cách SAI trước
+## Tại sao không dùng template? Trước hết, hãy xem cách làm SAI
 
-Cách ngây thơ: ném payload sự kiện vào model và cầu nguyện.
+Cách tiếp cận ngây thơ: ném payload sự kiện vào model rồi cầu mong điều tốt đẹp nhất.
 
 ```java
 // SAI — đừng bao giờ phát hành thứ này
@@ -43,7 +43,7 @@ public class CopyService {
 }
 ```
 
-Đoạn code này thất bại theo năm cách riêng biệt, và tôi muốn bạn nhớ từng cách một:
+Đoạn code này thất bại theo năm cách riêng biệt, và tôi muốn bạn ghi nhớ từng cách:
 
 1. **Model có thể thay đổi sự thật.** Không có gì ràng buộc lời văn phải khớp với các con số trong payload. Một LLM "tử tế" làm tròn 2.431.876 VND thành "2,4 triệu" là một sự cố tuân thủ đang chực chờ xảy ra.
 2. **Không có schema.** Bên tiêu thụ (bộ phận gửi push) mong đợi `{ title, body, tone }`. Thứ được trả về chỉ là một chuỗi ký tự không rõ cấu trúc.
@@ -51,7 +51,7 @@ public class CopyService {
 4. **AI là người quyết định tiền.** Không có gì trong code này ngăn model bịa ra một "số dư nợ mới" hoặc một "hoàn tiền" mà không ai cho phép.
 5. **Không idempotent.** Hai bản sao của cùng một sự kiện sinh ra hai thông báo khác nhau, khiến khách hàng nhận cùng một sự thật nhưng được diễn đạt khác nhau — may thì khó hiểu, rủi thì tự mâu thuẫn.
 
-Từng điều một trong năm điều trên đều là vi phạm guardrail. Để tôi cho bạn xem kiến trúc chúng tôi xây dựng để khiến chúng *không thể xảy ra về mặt cấu trúc*.
+Mỗi điều trong số này đều vi phạm một guardrail. Hãy xem kiến trúc chúng tôi xây dựng để khiến những lỗi đó *không thể xảy ra ngay từ cấp độ cấu trúc*.
 
 ## Kiến trúc
 
@@ -70,7 +70,7 @@ Kafka topic ───────►│          notification-service           
                     └───────────────────────────────────────────┘
 ```
 
-Spring Boot tiêu thụ một topic Kafka. Code tuân theo kiến trúc hexagonal: các quy tắc nghiệp vụ nằm trong `domain/` dưới dạng ports (interface), và mọi thứ bên ngoài — Kafka, LLM provider, OpenSearch, lớp lưu trữ — nằm trong `infrastructure/` dưới dạng adapters. Domain không bao giờ import một SDK nào. Bạn có thể suy luận về logic tiền bạc mà không cần truy cập mạng tới bất kỳ thứ gì.
+Spring Boot tiêu thụ một topic Kafka. Code tuân theo kiến trúc hexagonal: các quy tắc nghiệp vụ nằm trong `domain/` dưới dạng port (interface), còn mọi thành phần bên ngoài — Kafka, LLM provider, OpenSearch và lớp lưu trữ — nằm trong `infrastructure/` dưới dạng adapter. Domain không bao giờ import SDK. Bạn có thể suy luận về logic tiền bạc mà không cần truy cập mạng.
 
 ```
 src/main/java/dev/finpay/notifications/
@@ -92,7 +92,7 @@ src/main/java/dev/finpay/notifications/
     └── store/
 ```
 
-Pipeline là trái tim của hệ thống. Nó *tất định* về sự thật, và chỉ *bất định* về lời văn.
+Pipeline là trái tim của hệ thống. Nó mang tính *tất định* về *dữ kiện* và chỉ *bất định* về *lời văn*.
 
 ## Bước 1 — Chuẩn hóa sự kiện thành các dữ kiện
 
@@ -116,11 +116,11 @@ public record PaymentSettled(
 }
 ```
 
-Chi tiết hexagonal: adapter Kafka ánh xạ JSON dạng wire sang record này trong `infrastructure/kafka/`, còn pipeline trong domain chỉ nhìn thấy `PaymentSettled`. Nếu schema topic thay đổi, adapter thay đổi — domain thì không.
+Một chi tiết của kiến trúc hexagonal: adapter Kafka ánh xạ JSON trên wire sang record này trong `infrastructure/kafka/`, còn pipeline trong domain chỉ nhìn thấy `PaymentSettled`. Nếu schema của topic thay đổi, adapter thay đổi — domain thì không.
 
 ## Bước 2 — Khử trùng lặp theo eventId (idempotency)
 
-Ngữ nghĩa at-least-once của Kafka nghĩa là cùng một sự kiện *chắc chắn* sẽ đến hai lần. Nếu chúng tôi sinh và gửi hai lần, khách hàng sẽ nhận một thông báo trùng, hoặc tệ hơn, audit trail sẽ có hai quyết định tự mâu thuẫn. Vì vậy điều đầu tiên pipeline làm là *claim* sự kiện.
+Ngữ nghĩa at-least-once của Kafka có nghĩa là cùng một sự kiện *chắc chắn* sẽ đến hai lần. Nếu sinh và gửi hai lần, khách hàng sẽ nhận thông báo trùng, hoặc tệ hơn, audit trail sẽ có hai quyết định mâu thuẫn nhau. Vì vậy, việc đầu tiên pipeline làm là *claim* sự kiện.
 
 ```java
 @Transactional
@@ -141,7 +141,7 @@ public Decision decide(PaymentSettled event) {
 }
 ```
 
-Các quy tắc đúc kết từ sự cố:
+Các quy tắc rút ra từ những sự cố:
 
 - Claim chỉ được khóa bởi `eventId`. Replay được phát hiện trước khi *bất kỳ* lời gọi ra ngoài nào xảy ra.
 - Khi thất bại, chúng tôi giải phóng claim và để Kafka gửi lại — ngân sách retry nằm ở consumer, không nằm trong pipeline.
@@ -149,7 +149,7 @@ Các quy tắc đúc kết từ sự cố:
 
 ## Bước 3 — Request ID idempotent cho LLM
 
-Ngay cả khi đã dedup ở mức sự kiện, lần thử đầu tiên vẫn có thể timeout ở tầng mạng dù provider *đã* trả lời. Khi đó redelivery sẽ sinh ra bản copy thứ hai. Cách xử lý là truyền cho provider một khóa idempotency theo từng sự kiện.
+Ngay cả khi đã khử trùng lặp ở cấp độ sự kiện, lần thử đầu tiên vẫn có thể timeout ở tầng mạng dù provider *đã* trả lời. Khi đó, redelivery sẽ tạo ra bản copy thứ hai. Cách xử lý là truyền cho provider một khóa idempotency riêng cho từng sự kiện.
 
 ```java
 // ĐÚNG — idempotency ở tầng HTTP request
@@ -170,7 +170,7 @@ Cùng sự kiện → cùng khóa → cùng bản copy (hoặc một bản đã 
 
 ## Bước 4 — Hợp đồng: dữ kiện vào, JSON ra, tiền bị khóa
 
-System prompt được viết như một *hợp đồng*, chứ không phải một lời gợi ý. Nó liệt kê chính xác các dữ kiện, cấm bịa ra giá trị, và bảo model rằng nó không được phép quyết định các khoản tiền.
+System prompt được viết như một *hợp đồng*, chứ không phải một lời gợi ý. Nó liệt kê chính xác các dữ kiện, cấm bịa giá trị và nói rõ với model rằng nó không được phép quyết định các khoản tiền.
 
 ```java
 String systemPrompt = """
@@ -188,7 +188,7 @@ String systemPrompt = """
     """;
 ```
 
-Và response được khóa vào một schema, để code downstream có thể tin tưởng vào cấu trúc:
+Response cũng được ràng buộc bởi một schema, để code downstream có thể tin tưởng vào cấu trúc của nó:
 
 ```java
 public record GeneratedCopy(
@@ -202,7 +202,7 @@ public record GeneratedCopy(
 }
 ```
 
-Hợp đồng JSON cộng với enum có nghĩa là `infrastructure/` sẽ deserialize bằng Jackson, và mọi vi phạm cấu trúc sẽ fail nhanh ngay tại ranh giới adapter — trước khi bất cứ thứ gì đến tay khách hàng.
+Hợp đồng JSON cùng với enum cho phép `infrastructure/` deserialize response bằng Jackson, và mọi vi phạm cấu trúc sẽ fail nhanh tại ranh giới adapter — trước khi bất cứ thứ gì đến tay khách hàng.
 
 ## Bước 5 — Timeout, retry, circuit breaker
 
@@ -227,7 +227,7 @@ public CircuitBreaker llmBreaker(CircuitBreakerConfigProps props) {
 }
 ```
 
-Lời gọi được bọc lại để khi một provider hỏng, nó chỉ làm suy giảm *tính năng*, chứ không phải cả nền tảng:
+Lời gọi được bọc lại để khi một provider gặp sự cố, nó chỉ làm suy giảm *tính năng*, chứ không ảnh hưởng đến cả nền tảng:
 
 ```java
 public Optional<GeneratedCopy> generate(PaymentSettled event) {
@@ -257,11 +257,11 @@ Ba hành vi cần chú ý:
 - **Retry**: diễn ra ở tầng Kafka consumer với số lần giới hạn và backoff. Bản thân pipeline copy không tự lặp lại.
 - **Circuit breaker**: khi LLM suy giảm, chúng tôi fallback về template do con người duyệt, điền *cùng một dữ kiện*. Khách hàng vẫn nhận thông báo đúng; chỉ là kém phần cá nhân hóa thôi.
 
-Fallback tồn tại vì guardrail **"AI không phải là người quyết định tiền."** Một template không thể phủ hết mọi trường hợp, nhưng fallback luôn chính xác về dữ kiện — vốn chính là đặc tính thực sự quan trọng.
+Fallback tồn tại vì guardrail **"AI không phải là người quyết định tiền."** Một template không thể bao quát mọi trường hợp, nhưng fallback luôn chính xác về dữ kiện — đó mới là đặc tính thực sự quan trọng.
 
 ## Bước 6 — BYOK: mang khóa của bạn, không phải trách nhiệm của chúng tôi
 
-Khóa provider do khách thuê cung cấp. Nó đến dưới dạng đã mã hóa, chỉ được giải mã tại ranh giới adapter, và **không bao giờ bị hardcode, không bao giờ bị log, không bao giờ xuất hiện trong stack trace**.
+Khóa provider do tenant cung cấp. Khóa đến dưới dạng đã mã hóa, chỉ được giải mã tại ranh giới adapter, và **không bao giờ bị hardcode, ghi log hoặc xuất hiện trong stack trace**.
 
 ```java
 // ĐÚNG — vật liệu khóa không nằm trong code và log
@@ -279,11 +279,11 @@ private void maskKey(String key) {
 }
 ```
 
-Client adapter gắn khóa vào header `Authorization: *** cho từng request rồi vứt đi. Nếu một khóa lọt vào prompt, vào dòng log, hay vào exception, đó là một test thất bại, chứ không phải cú sốc sáng thứ Hai. Khi body request được log, khóa sẽ bị loại bỏ nhờ một Jackson filter đăng ký cho các DTO LLM.
+Client adapter gắn khóa vào header `Authorization: ***` trong mỗi request rồi loại bỏ khóa. Nếu một khóa lọt vào prompt, dòng log hoặc exception, đó là một test thất bại, chứ không phải cú sốc sáng thứ Hai. Khi body của request được log, khóa sẽ bị loại bỏ nhờ một Jackson filter đăng ký cho các DTO LLM.
 
 ## Bước 7 — OpenSearch: audit trail là một sản phẩm
 
-Mọi quyết định — accepted, failed, replay — đều được ghi vào OpenSearch bởi một adapter đứng sau port `AuditLog`.
+Mọi quyết định — accepted, failed hoặc replay — đều được ghi vào OpenSearch bởi một adapter đứng sau port `AuditLog`.
 
 ```java
 public record AuditRecord(
@@ -298,9 +298,9 @@ public record AuditRecord(
 ) {}
 ```
 
-Vì sao là OpenSearch chứ không phải một bảng? Vì câu hỏi mang tính *pháp y*: "cho tôi xem mọi bản copy model sinh ra hôm thứ Ba tuần trước cho các khoản trên 10 triệu VND, kèm output nguyên văn." Đó là một bài toán tìm kiếm, và OpenSearch xử lý nó ở quy mô lớn bằng phân trang `search_after` và xoay vòng index theo ngày. Đó cũng là cách nhanh nhất để product và compliance kiểm tra xem model có đang đi chệch hướng hay không.
+Vì sao là OpenSearch chứ không phải một bảng? Vì câu hỏi mang tính *điều tra*: "cho tôi xem mọi bản copy mà model đã sinh ra vào thứ Ba tuần trước cho các khoản trên 10 triệu VND, kèm output nguyên văn." Đó là một bài toán tìm kiếm, và OpenSearch xử lý tốt ở quy mô lớn bằng phân trang `search_after` và xoay vòng index theo ngày. Đây cũng là cách nhanh nhất để bộ phận sản phẩm và compliance kiểm tra xem model có đang đi chệch hướng hay không.
 
-Quy tắc lưu giữ: 90 ngày nóng trong OpenSearch, sau đó chuyển sang cold storage. Nếu compliance hỏi, câu trả lời là "truy vấn đi" — không bao giờ là "chúng tôi không lưu."
+Quy tắc lưu giữ là 90 ngày ở lớp lưu trữ nóng trong OpenSearch, sau đó chuyển sang cold storage. Nếu compliance hỏi, câu trả lời là "truy vấn đi" — không bao giờ là "chúng tôi không lưu."
 
 ## Guardrails trên một trang
 
@@ -314,10 +314,10 @@ Quy tắc lưu giữ: 90 ngày nóng trong OpenSearch, sau đó chuyển sang co
 
 ## Điều chúng tôi học được
 
-1. **Prompt là code, hãy review nó như code.** Chúng tôi version hóa các prompt trong repo, cùng với các test khẳng định đường "unsatisfiable" và quy tắc "không bịa con số". Một prompt của model cũng là một bề mặt bảo trì, y hệt một chữ ký phương thức.
-2. **Tính tất định là sản phẩm.** Lời văn hiển thị cho khách hàng có thể thay đổi, nhưng *dữ kiện* thì không bao giờ. Mọi byte của một con số tiền là do domain viết ra, không bao giờ do model.
-3. **Fallback không phải là giải pháp chắp vá.** Template fallback là quyết định chống chịu quan trọng nhất mà chúng tôi từng đưa ra. Khi LLM ngừng hoạt động, thông báo vẫn được gửi đi, đúng và đúng giờ.
-4. **Audit thắng tiên đoán.** Chúng tôi không thể dự đoán model sẽ nói gì, nhưng chúng tôi có thể ghi lại mọi thứ nó đã nói và tìm kiếm lại sau này. Sự bất đối xứng đó chính là toàn bộ lý do khiến OpenSearch góp mặt trong kiến trúc.
+1. **Prompt là code; hãy review nó như code.** Chúng tôi version hóa các prompt trong repo cùng với các test khẳng định đường "unsatisfiable" và quy tắc "không bịa con số". Prompt của model cũng là một bề mặt cần bảo trì, giống hệt một chữ ký phương thức.
+2. **Tính tất định là sản phẩm.** Lời văn hiển thị cho khách hàng có thể thay đổi, nhưng *dữ kiện* thì không bao giờ. Từng chữ số trong một khoản tiền đều do domain ghi ra, không bao giờ do model.
+3. **Fallback không phải là giải pháp chắp vá.** Template fallback là quyết định về khả năng chống chịu quan trọng nhất mà chúng tôi từng đưa ra. Khi LLM ngừng hoạt động, thông báo vẫn được gửi đi chính xác và đúng giờ.
+4. **Audit quan trọng hơn dự đoán.** Chúng tôi không thể dự đoán model sẽ nói gì, nhưng có thể ghi lại mọi thứ nó đã nói và tìm kiếm lại sau này. Sự bất đối xứng đó chính là lý do OpenSearch có mặt trong kiến trúc.
 5. **`eventId` là bạn của bạn.** Cùng một kỷ luật khiến thanh toán idempotent cũng khiến copy của LLM idempotent. Không có dedup store thì không gì trong số này vận hành được, và đó là đoạn code rẻ nhất chúng tôi từng viết.
 
-Repository nằm tại <https://github.com/finpay-lab/notification-service>. Code trong bài này là code thật, được lược bớt phần rườm rà để dễ đọc. Nếu bạn sắp thêm một LLM vào một hệ thống mà tiền chuyển động qua, hãy sao chép guardrails trước — tính năng sau.
+Repository nằm tại <https://github.com/finpay-lab/notification-service>. Code trong bài này là code thật, được lược bớt phần rườm rà để dễ đọc. Nếu bạn sắp thêm một LLM vào hệ thống có luân chuyển tiền, hãy sao chép các guardrail trước — rồi mới đến tính năng.

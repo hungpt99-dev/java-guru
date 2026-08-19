@@ -1,6 +1,6 @@
 ---
 title: "Ôn thi Java #5: Apache Kafka — Junior đến Senior"
-description: "Hệ thống event-driven trên Kafka — delivery semantics, replication, partitioning cho thứ tự, consumer lag, và dead-letter queue mọi consumer production đều cần. Với producer/consumer code và số thật."
+description: "Hệ thống hướng sự kiện với Kafka: semantics giao nhận, replication, partitioning để đảm bảo thứ tự, consumer lag và dead-letter queue mà mọi consumer production đều cần. Bao gồm code producer/consumer và các số liệu thực tế."
 pubDatetime: 2026-08-10T10:20:00+07:00
 featured: false
 draft: false
@@ -11,34 +11,34 @@ tags:
   - event-driven
 ---
 
-Kafka là chủ đề phân tách câu "tôi đã gửi một message" khỏi "tôi hiểu một distributed log". Junior produce và consume; senior lập luận về thứ tự, exactly-once, và chuyện gì xảy ra khi consumer tụt hậu — với config và code để chứng minh. Bài này leo từ topic đến delivery guarantee đến lag ở scale: 50 câu hỏi, chọn đúng level bạn đang phỏng vấn và đọc thêm một level trên nó.
+Kafka là chủ đề phân biệt câu "tôi đã gửi một message" với câu "tôi hiểu distributed log". Junior biết produce và consume; senior biết phân tích thứ tự, exactly-once và điều gì xảy ra khi consumer tụt hậu, với config và code để chứng minh. Bài viết đi từ topic đến delivery guarantee rồi đến lag ở quy mô lớn: 50 câu hỏi, hãy chọn đúng level bạn đang phỏng vấn và đọc thêm một level cao hơn.
 
-> Mindset: junior gửi một record và cầu nó tới; senior kể được chính xác semantics của "tới" nghĩa là gì — và đã xây gì để một poison message không bao giờ quật ngã được pipeline.
+> Mindset: junior gửi một record và hy vọng nó đến nơi; senior giải thích chính xác "đến nơi" có nghĩa gì và đã xây dựng gì để một poison message không bao giờ quật ngã pipeline.
 
 ## Junior — nền tảng
 
 **Q1. Topic, partition, và offset là gì?**
-Topic là một log có tên chia thành **partition** — những append-only log có thứ tự. Mỗi record nhận một **offset** tuần tự trong partition của nó. Nhiều partition hơn = nhiều parallelism hơn, nhưng cũng nhiều open file hơn (mỗi partition là một directory chứa segment file ~1 GB) và rebalance hơi lâu hơn một chút. Một topic 50 partition trên cluster 3 broker là điểm khởi đầu bình thường:
+Topic là một log có tên, được chia thành các **partition** — những log có thứ tự và chỉ ghi nối tiếp. Mỗi record nhận một **offset** tuần tự trong partition của nó. Nhiều partition hơn đồng nghĩa với nhiều parallelism hơn, nhưng cũng có nhiều file đang mở hơn (mỗi partition là một directory chứa các segment file khoảng 1 GB) và thời gian rebalance dài hơn một chút. Một topic có 50 partition trên cluster 3 broker là điểm khởi đầu hợp lý:
 
 ```bash
 kafka-topics --create --topic orders --partitions 50 --replication-factor 3 \
   --bootstrap-server broker-1:9092
 ```
 
-Mỗi partition có một leader và (RF−1) follower; 50 partition × RF 3 = 150 replica assignment để rải khắp các broker.
+Mỗi partition có một leader và (RF−1) follower; 50 partition × RF 3 = 150 replica assignment được phân bổ trên các broker.
 
 **Q2. Producer vs consumer, và consumer group?**
-Producer append vào topic; consumer trong **consumer group** có quyền độc quyền với một tập con partition. Với 12 partition và 4 consumer, mỗi consumer xử lý 3 partition. Thêm consumer thứ 5 thì có một con ngồi chơi (bạn không thể có nhiều active consumer hơn số partition). `group.id` chính là thứ khiến Kafka scale ngang — mọi instance cùng id san sẻ tải:
+Producer append vào topic; consumer trong **consumer group** được độc quyền xử lý một tập con partition. Với 12 partition và 4 consumer, mỗi consumer xử lý 3 partition. Thêm consumer thứ 5 thì một consumer sẽ không có việc, vì không thể có nhiều active consumer hơn số partition. `group.id` là thứ giúp Kafka scale ngang: mọi instance cùng ID sẽ chia sẻ tải:
 
 ```java
 props.put(ConsumerConfig.GROUP_ID_CONFIG, "orders-service"); // mọi instance cùng chia các partition
 props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 ```
 
-Hai group khác nhau đọc cùng một topic hoàn toàn độc lập — mỗi group giữ offset riêng và đọc theo nhịp riêng của mình.
+Hai group khác nhau đọc cùng một topic hoàn toàn độc lập: mỗi group giữ offset riêng và đọc theo tốc độ riêng.
 
 **Q3. `acks` là gì và tại sao quan trọng?**
-`acks=0` (fire-and-forget, ~0 guarantee), `acks=1` (leader ack; mất dữ liệu nếu leader chết trước khi replica kịp), `acks=all` (mọi in-sync replica cùng ack — mạnh nhất, nhưng latency cao hơn ~2–5×, ~20–50 ms so với ~2–5 ms). Durability vs latency, thẳng thừng:
+`acks=0` (fire-and-forget, gần như không có đảm bảo), `acks=1` (leader acknowledge; có thể mất dữ liệu nếu leader chết trước khi kịp replicate), và `acks=all` (mọi in-sync replica cùng acknowledge; mạnh nhất nhưng latency cao hơn khoảng 2–5 lần: ~20–50 ms so với ~2–5 ms). Đây là đánh đổi giữa durability và latency, thể hiện bằng số liệu:
 
 ```java
 props.put(ProducerConfig.ACKS_CONFIG, "all");
@@ -46,30 +46,30 @@ props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true"); // không duplicate
 props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000"); // thử trong bao lâu thì bỏ cuộc
 ```
 
-Leader chỉ có thể bảo follower "commit" khi record đã nằm trong log của mọi member ISR; `acks=all` nghĩa là bạn chờ quyết định đó thay vì đoán.
+Leader chỉ có thể báo cho follower "commit" sau khi record đã nằm trong log của mọi member ISR; `acks=all` nghĩa là bạn chờ quyết định đó thay vì phỏng đoán.
 
 **Q4. Keyed message là gì và tại sao dùng?**
-Một key route mọi record cùng key về **cùng partition** (murmur2 hash), cho **per-key ordering**. Record không key bị round-robin (từ Kafka 2.4, sticky partitioner gom vào một batch trước khi đổi chỗ) — không có guarantee thứ tự:
+Một key định tuyến mọi record có cùng key về **cùng partition** (bằng murmur2 hash), nhờ đó đảm bảo **per-key ordering**. Record không có key được phân phối theo round-robin (từ Kafka 2.4, sticky partitioner gom record vào một batch trước khi chuyển sang partition khác), nên không có đảm bảo về thứ tự:
 
 ```java
 // cùng key -> cùng partition -> đúng thứ tự. Tối quan trọng cho "mọi event của user 42 theo thứ tự"
 producer.send(new ProducerRecord<>("orders", user.getId(), orderEvent));
 ```
 
-Hệ quả mà interviewer hay đào sâu: một hot key (user nổi tiếng) làm một partition nóng — keying mua được thứ tự bằng cái giá skew.
+Hệ quả mà interviewer thường đào sâu là vấn đề hot key: một hot key (chẳng hạn user nổi tiếng) làm một partition bị quá tải. Keying mang lại thứ tự, nhưng phải đánh đổi bằng skew.
 
 **Q5. Queue vs Kafka log?**
-Queue xóa message khi được consume; Kafka là append-only log — mọi consumer đọc toàn bộ lịch sử ở offset riêng, và message hết hạn theo **retention** (vd 7 ngày), không phải khi được đọc. Retention 7 ngày với lượng ghi 10 GB/ngày nghĩa là ~70 GB disk cho mỗi topic bạn phải dự trù:
+Queue xóa message sau khi được consume; Kafka là append-only log. Mỗi consumer đọc lịch sử từ offset riêng, còn message hết hạn theo **retention** (ví dụ 7 ngày), chứ không phải khi được đọc. Retention 7 ngày với lượng ghi 10 GB/ngày nghĩa là bạn phải dự trù khoảng 70 GB disk cho mỗi topic:
 
 ```bash
 kafka-configs --alter --entity-type topics --entity-name orders \
   --add-config retention.ms=604800000   # 7 ngày, tính bằng mili giây
 ```
 
-Đó cũng là lý do "ai đã đọc nó?" là câu hỏi sai cho Kafka — log giữ record đến khi retention xóa nó, bất kể consumption.
+Đó cũng là lý do "ai đã đọc nó?" là câu hỏi sai đối với Kafka: log giữ record cho đến khi retention xóa nó, bất kể record đã được consume hay chưa.
 
 **Q6. Consumer group làm gì khi crash?**
-Khi một member chết, partition của nó được **reassigned** (một rebalance) cho các survivor. Trong rebalance, mọi member của group dừng consume trong chốc lát. Rebalance thường xuyên (từ heartbeat quá chậm) gây throughput cliff. Ba núm chỉnh quyết định bạn có bị đá khỏi group hay không:
+Khi một member chết, partition của nó được **reassigned** cho các member còn lại trong một đợt rebalance. Trong thời gian đó, mọi member của group tạm dừng consume. Rebalance thường xuyên, thường do poll hoặc heartbeat bị chậm, khiến throughput sụt mạnh. Ba thiết lập quyết định bạn có bị loại khỏi group hay không:
 
 ```java
 props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "45000");    // mặc định 45 s từ Kafka 2.3
@@ -78,13 +78,13 @@ props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "300000"); // 5 phút đ�
 ```
 
 **Q7. Offset đã commit được lưu ở đâu?**
-Offset đã commit sống trong một internal compacted topic tên `__consumer_offsets` (mặc định 50 partition), không phải trên consumer. Mỗi `commitSync()` ghi vào đó; khi restart, group tiếp tục từ đó. Một lệnh cho thấy group state, offset từng partition, và lag:
+Offset đã commit được lưu trong một internal compacted topic tên `__consumer_offsets` (mặc định 50 partition), không phải trên consumer. Mỗi `commitSync()` ghi vào topic này; khi restart, group tiếp tục từ đó. Một lệnh cho thấy trạng thái group, offset của từng partition và lag:
 
 ```bash
 kafka-consumer-groups --bootstrap-server broker-1:9092 --describe --group orders-service
 ```
 
-Cạm bẫy: offset hết hạn sau `offsets.retention.minutes` (mặc định 7 ngày) khi group rỗng quá lâu — một group im lặng lâu ngày quay về `auto.offset.reset` thay vì vị trí cũ của nó.
+Cạm bẫy: offset hết hạn sau `offsets.retention.minutes` (mặc định 7 ngày) nếu group bị bỏ trống quá lâu. Khi đó, một group im lặng lâu ngày sẽ quay về `auto.offset.reset` thay vì tiếp tục từ vị trí cũ.
 
 **Q8. Serializer là gì và chúng hỏng ở đâu?**
 Broker chỉ lưu bytes; serializer là hợp đồng phía client. String cho key, JSON/`String` cho value, Avro + Schema Registry cho schema tiến hóa. Crash 3 giờ sáng kinh điển: một JSON consumer không có `trusted.packages` từ chối mọi record do service khác produce:
@@ -122,7 +122,7 @@ props.put(ProducerConfig.PARTITIONER_CLASS_CONFIG, TenantPartitioner.class.getNa
 Cảnh báo: đổi partitioner giữa chừng là re-route key giữa stream — guarantee thứ tự của bạn đổi theo nó.
 
 **Q11. `consumer.poll()` thực sự làm gì?**
-`poll()` là heartbeat, fetch, và rebalance engine gộp trong một lần gọi; nó trả về tối đa `max.poll.records` (mặc định 500) và phải được gọi liên tục kể cả khi rảnh. Vòng lặp chuẩn:
+`poll()` gộp heartbeat, fetch và rebalance engine vào một lần gọi. Nó trả về tối đa `max.poll.records` (mặc định 500) và phải tiếp tục được gọi ngay cả khi consumer đang rảnh. Vòng lặp chuẩn là:
 
 ```java
 while (running) {
@@ -135,7 +135,7 @@ while (running) {
 Spring Kafka bọc vòng lặp này trong `KafkaMessageListenerContainer` — method `@KafkaListener` của bạn chạy bên trong nó, chính là lý do một method chậm làm vấp `max.poll.interval.ms`.
 
 **Q12. Producer batching hoạt động thế nào, và các núm chỉnh?**
-`send()` không chạm network — record rơi vào `RecordAccumulator` (`buffer.memory`, mặc định 32 MB) và rời đi theo batch `batch.size` (mặc định **16 KB**) sau `linger.ms` (mặc định 0). Tăng `linger.ms` lên 5–10 ms đổi vài mili giây latency lấy throughput cao hơn 3–5× nhờ batch đầy hơn:
+`send()` không chạm tới network ngay lập tức. Record được đưa vào `RecordAccumulator` (`buffer.memory`, mặc định 32 MB) và được gửi theo batch `batch.size` (mặc định **16 KB**) sau `linger.ms` (mặc định 0). Tăng `linger.ms` lên 5–10 ms là cách đổi vài mili giây latency lấy throughput cao hơn 3–5× nhờ các batch đầy hơn:
 
 ```java
 props.put(ProducerConfig.BATCH_SIZE_CONFIG, "16384");       // 16 KB mặc định
@@ -143,7 +143,7 @@ props.put(ProducerConfig.LINGER_MS_CONFIG, "10");           // chờ tối đa 1
 props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, "67108864"); // accumulator 64 MB
 ```
 
-Ở 1M msg/s × 500 B tức 500 MB/s record; với batch 16 KB tức ~31k batch/s — trần giờ là tốc độ append của broker, không phải CPU của bạn.
+Ở 1M msg/s × 500 B, lưu lượng là 500 MB/s record. Với batch 16 KB, đó là khoảng 31k batch/s — lúc này giới hạn nằm ở tốc độ append của broker, không phải CPU của bạn.
 
 **Q13. `auto.offset.reset` là gì và khi nào nó quan trọng?**
 Một group mới toanh chưa có offset đã commit, nên broker chọn điểm bắt đầu: `earliest` (toàn bộ lịch sử trong retention), `latest` (mặc định — chỉ record mới), hoặc `none` (fail nếu không có offset). Đó là quyết định một lần cho mỗi group, thầm lặng quyết định deployment mới ngốn bao nhiêu backlog:

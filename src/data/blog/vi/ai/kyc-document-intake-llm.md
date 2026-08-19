@@ -1,6 +1,6 @@
 ---
 title: "KYC Document Intake with Vision LLMs"
-description: "identity-service của FinPay trích xuất trường KYC từ giấy tờ tải lên bằng vision LLM và chuyển sang duyệt thủ công thay vì tự động phê duyệt."
+description: "Cách identity-service của FinPay trích xuất các trường KYC từ giấy tờ định danh được tải lên bằng vision LLM và chuyển chúng sang duyệt thủ công thay vì tự động phê duyệt."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -11,9 +11,9 @@ Repo: <https://github.com/finpay-lab/identity-service>
 
 # AI-6: Tiếp nhận tài liệu KYC bằng Vision và LLM
 
-KYC (Know Your Customer) là pipeline có khối lượng xử lý lớn nhất và rủi ro nhất trong bất kỳ fintech nào. Mỗi thẻ căn cước bị đọc sai, mỗi ảnh chân dung nộp sai chỗ, mỗi hộ chiếu hợp lệ bị từ chối oan — tất cả đều dẫn đến hoặc một khoản phạt tuân thủ, hoặc mất một khách hàng. Feature `kyc-document-intake-llm` của `identity-service` là cổng AI biến bytes tài liệu thô thành một yêu cầu xác minh có cấu trúc, kiểm toán được, sẵn sàng ra quyết định.
+KYC (Know Your Customer) là pipeline có khối lượng xử lý lớn nhất và rủi ro cao nhất trong bất kỳ fintech nào. Mỗi thẻ căn cước bị đọc sai, mỗi ảnh chân dung bị xếp nhầm, hay mỗi hộ chiếu hợp lệ bị từ chối oan đều có thể dẫn đến một khoản phạt tuân thủ hoặc làm mất một khách hàng. Feature `kyc-document-intake-llm` của `identity-service` là cổng AI biến dữ liệu byte thô của tài liệu thành một yêu cầu xác minh có cấu trúc, có thể kiểm toán và sẵn sàng cho việc ra quyết định.
 
-Đây là một bài viết đi sâu **cấp kỹ sư senior**: kiến trúc thật, các chế độ hỏng thật, và code đã thực sự lên production (rồi được sửa). Tôi sẽ cho bạn thấy cách WRONG trước, vì cách sai ấy chính là thứ mà mọi tích hợp AI đầu tiên đều làm — một lần gọi HTTP nằm trong transaction, một blob JSON thô trong DB, và coi mô hình như lời phán quyết cuối cùng. Sau đó là cách RIGHT: hexagonal, hướng sự kiện, idempotent, và được canh gác.
+Đây là bài viết đi sâu ở **cấp kỹ sư senior**, với kiến trúc thực tế, các chế độ hỏng thực tế và code đã thực sự được đưa lên production (rồi được sửa). Tôi sẽ trình bày cách WRONG trước, vì đó là cách mọi tích hợp AI đầu tiên thường được xây dựng: một lần gọi HTTP nằm trong transaction, một blob JSON thô trong DB và coi mô hình là phán quyết cuối cùng. Sau đó là cách RIGHT: hexagonal, hướng sự kiện, idempotent và có các cơ chế bảo vệ.
 
 ## Pipeline cốt lõi
 
@@ -31,16 +31,16 @@ DocumentUploaded (Kafka) ─▶ IntakeCommand ─▶ VisionExtractionPort (VLM)
 
 Luồng xử lý:
 
-1. **Kafka** chuyển `DocumentUploaded` (không phụ thuộc nhà cung cấp, chứa S3 key + `eventId`).
-2. Một **domain command** chuẩn hóa nó — không có `MultipartFile` nào lọt qua khỏi lớp adapter.
+1. **Kafka** chuyển `DocumentUploaded` (không phụ thuộc nhà cung cấp, chứa S3 key và `eventId`).
+2. Một **domain command** chuẩn hóa sự kiện này; không có `MultipartFile` nào lọt qua lớp adapter.
 3. Một **Vision port** gửi ảnh tới mô hình đa phương thức và trả về các trường có cấu trúc **kèm điểm tin cậy**, không phải văn xuôi.
-4. Một **rule engine** (Java thuần, zero AI) kiểm tra các luật cứng: loại tài liệu được phép, checksum khớp, hạn hiệu lực chưa qua.
-5. Một **LLM judge** chấm điểm các phần mở: "tên trên ảnh chân dung và trên căn cước có cùng một người không?" — luôn **không có thẩm quyền quyết định**, luôn được ghi log.
-6. Một **Decision** được tạo ra, lưu vào OpenSearch để truy vấn, và được phát hành qua outbox pattern.
+4. Một **rule engine** (Java thuần, zero AI) kiểm tra các luật cứng: loại tài liệu có được phép hay không, checksum có khớp hay không và tài liệu đã hết hạn hay chưa.
+5. Một **LLM judge** chấm điểm các câu hỏi mở: "người có tên trên ảnh chân dung và trên giấy tờ tùy thân có phải là cùng một người không?" Nó luôn **không có thẩm quyền quyết định** và luôn được ghi log.
+6. Một **Decision** được tạo ra, lưu vào OpenSearch để truy vấn và tìm kiếm, rồi được phát hành qua outbox pattern.
 
 ## Kiến trúc: hexagonal, ngay từ commit đầu tiên
 
-Feature này nằm bên trong monolith dạng mô-đun của `identity-service`. Package KYC tuân thủ nghiêm ngặt mô hình ports & adapters:
+Feature này nằm trong monolith dạng mô-đun của `identity-service`. Package KYC tuân thủ nghiêm ngặt mô hình ports-and-adapters:
 
 ```
 src/main/java/com/finpay/identity/kyc/
@@ -82,7 +82,7 @@ src/main/java/com/finpay/identity/kyc/
 
 ## WRONG: nỗ lực ngây thơ đầu tiên
 
-Đây là thứ được đưa lên production bởi những đội có thiện chí. Lớp web gọi thẳng mô hình, nằm trong transaction, và tin tuyệt đối vào output. Mỗi sai lầm dưới đây là một sự cố có thật mà chúng tôi (và mọi fintech AI khác) từng gặp.
+Đây là thứ các đội ngũ có thiện chí thường đưa lên production. Lớp web gọi thẳng mô hình bên trong transaction và tin tuyệt đối vào output. Mỗi sai lầm dưới đây đều là một sự cố có thật mà chúng tôi (và các fintech sử dụng AI khác) từng gặp.
 
 ```java
 @RestController
@@ -130,11 +130,11 @@ public class KycIntakeController {
 
 ### Sai ở đâu, chi tiết
 
-1. **SDK của nhà cung cấp chi phối lớp web.** `OpenAiClient` trong controller nghĩa là transport, serialization, retry policy, và tên mô hình đều bị dán chặt vào HTTP. Bạn không thể unit test `intake()` mà không mock SDK bên thứ ba, và không thể đổi nhà cung cấp.
-2. **HTTP timeout giờ là độ trễ của mô hình.** Mô hình có thể mất 10–60s khi quá tải. Thread pool của servlet và connection DB trong transaction bị giữ làm con tin. Một lần outage của nhà cung cấp = cạn kiệt toàn bộ connection pool = cả `identity-service` sập.
-3. **Không có idempotency.** Client retry upload, bạn insert hai lần. Dẫn đến decision trùng, rủi ro trùng, dòng audit trùng.
-4. **JSON thô trong DB.** `SELECT ... WHERE data->>'docNumber'` là full scan. Không có index, không có OpenSearch, không có kế hoạch lưu trữ. Không ai trả lời được câu hỏi "tháng trước chúng ta đã duyệt bao nhiêu hộ chiếu hết hạn?" mà không chạy script.
-5. **Không guardrails.** Không ngưỡng tin cậy, không rule chồng lên mô hình, không retry, không circuit breaker, không audit. Mô hình vừa là bồi thẩm đoàn vừa là thẩm phán, và nó là thứ duy nhất giữa bạn và một khoản phạt.
+1. **SDK của nhà cung cấp chi phối lớp web.** Đặt `OpenAiClient` trong controller nghĩa là transport, serialization, retry policy và tên mô hình đều bị gắn chặt với HTTP. Bạn không thể unit test `intake()` mà không mock SDK bên thứ ba, cũng không thể đổi nhà cung cấp.
+2. **HTTP timeout giờ chính là độ trễ của mô hình.** Mô hình có thể mất 10–60 giây khi quá tải. Thread pool của servlet và kết nối DB trong transaction bị giữ lại. Một lần nhà cung cấp gặp sự cố có thể làm cạn kiệt toàn bộ connection pool và khiến cả `identity-service` sập.
+3. **Không có idempotency.** Client retry thao tác upload, còn bạn insert hai lần. Kết quả là decision, rủi ro và các dòng audit đều bị nhân đôi.
+4. **JSON thô trong DB.** `SELECT ... WHERE data->>'docNumber'` yêu cầu full scan. Không có index, không có OpenSearch và không có chiến lược lưu trữ. Không ai trả lời được câu hỏi "tháng trước chúng ta đã duyệt bao nhiêu hộ chiếu hết hạn?" nếu không chạy script.
+5. **Không có guardrail.** Không có ngưỡng tin cậy, rule bổ sung cho mô hình, retry, circuit breaker hay audit. Mô hình vừa là bồi thẩm đoàn vừa là thẩm phán, và là thứ duy nhất đứng giữa bạn và một khoản phạt.
 
 ## RIGHT: thiết kế đã lên production
 
@@ -178,7 +178,7 @@ public record Decision(
 ) {}
 ```
 
-Chú ý thứ **không có** trong domain: không `OpenAiClient`, không `Map<String,Object>`, không `String json`. Domain chỉ giao tiếp bằng record và enum. Output của AI là *một* tín hiệu nuôi một engine quyết định thuần xác định.
+Hãy chú ý những thứ **không có** trong domain: không `OpenAiClient`, không `Map<String,Object>` và không `String json`. Domain chỉ làm việc với record và enum. Output của AI chỉ là *một* tín hiệu đầu vào cho một decision engine xác định.
 
 ### Ports: AI nằm sau một interface
 
@@ -203,7 +203,7 @@ public interface LlmJudgePort {
 }
 ```
 
-Adapter nhà cung cấp nằm trong `infrastructure/openai/`. Nó sở hữu tên mô hình, phiên bản prompt, retry, và token budget:
+Adapter của nhà cung cấp nằm trong `infrastructure/openai/`. Nó quản lý tên mô hình, phiên bản prompt, chính sách retry và token budget:
 
 ```java
 // infrastructure/openai/OpenAiVisionAdapter.java
@@ -231,7 +231,7 @@ public class OpenAiVisionAdapter implements VisionExtractionPort {
 }
 ```
 
-### Driving service: xác định, idempotent, được canh gác
+### Driving service: xác định, idempotent và có cơ chế bảo vệ
 
 ```java
 // domain/service/DocumentIntakeService.java
@@ -295,7 +295,7 @@ public class DocumentIntakeService implements IntakeUseCase {
 }
 ```
 
-### Engine xác định — đây mới là người quyết định tiền
+### Engine xác định — đây mới là thành phần quyết định tiền
 
 ```java
 // domain/service/DecisionEngine.java
@@ -326,7 +326,7 @@ public class DecisionEngine {
 
 ### Infrastructure: Kafka + outbox + OpenSearch
 
-Consumer trong `infrastructure/kafka/` rất mỏng. Nó ánh xạ event trên wire thành domain command và gọi use case. Không có logic nghiệp vụ nào nằm ở đây.
+Consumer trong `infrastructure/kafka/` rất mỏng. Nó ánh xạ event trên wire thành domain command rồi gọi use case. Không có logic nghiệp vụ nào nằm ở đây.
 
 ```java
 // infrastructure/kafka/DocumentUploadedConsumer.java
@@ -343,7 +343,7 @@ public class DocumentUploadedConsumer {
 }
 ```
 
-Các decision event đi ra qua **outbox pattern** để việc ghi DB và publish Kafka là nguyên tử, và OpenSearch được cấp dữ liệu từ chính event stream đó để phục vụ tìm kiếm và báo cáo:
+Các decision event được phát hành qua **outbox pattern**, để việc ghi DB và publish lên Kafka là nguyên tử. OpenSearch được nạp dữ liệu từ chính event stream đó để phục vụ tìm kiếm và báo cáo:
 
 ```java
 // infrastructure/opensearch/OpenSearchDecisionStore.java
@@ -367,15 +367,15 @@ public class OpenSearchDecisionStore implements DecisionStorePort {
 }
 ```
 
-`DecisionDocument` là projection có thể tìm kiếm: verdict, reason codes, timestamps, PII đã được che — được index để phục vụ dashboard nhanh và các truy vấn tuân thủ.
+`DecisionDocument` là projection có thể tìm kiếm, gồm verdict, reason codes, timestamps và PII đã được che. Projection này được index để phục vụ dashboard nhanh và các truy vấn tuân thủ.
 
 ## Guardrails: không thể thương lượng
 
-Mỗi điều trong số này là một yêu cầu cứng khi lên production, và từng điều đều hiện diện trong code RIGHT ở trên:
+Tất cả những điều này đều là yêu cầu bắt buộc trong production, và từng điều đều hiện diện trong code RIGHT ở trên:
 
-1. **AI không phải là người quyết định tiền.** Mô hình đóng góp *tín hiệu* (trường có cấu trúc, một điểm số). Verdict cuối cùng luôn đến từ `DecisionEngine` xác định áp dụng các rule cứng. Một LLM không thể bị bảo "không" khi dính sanction hit; một rule thì có thể. *AI giảm công việc; luật quyết định.*
-2. **Idempotent theo `eventId`.** `eventId` đi từ Kafka envelope, qua command, tới key của `DecisionStorePort`. `decisionStore.exists(eventId)` đảm bảo replay và retry cho kết quả đúng-một-lần. Upload trùng bị loại bỏ, không bị xử lý hai lần.
-3. **Timeout, retry, circuit breaker.** Các adapter nhà cung cấp dùng timeout có chặn (vision: 15s; judge: 5s), một lần retry có jitter, và một circuit breaker ngắt khi lỗi lặp lại — để khi outage nhà cung cấp xảy ra, intake chuyển sang `MANUAL_REVIEW` thay vì chặn cả service.
+1. **AI không phải là thành phần quyết định tiền.** Mô hình đóng góp các *tín hiệu* (trường có cấu trúc và một điểm số). Verdict cuối cùng luôn đến từ `DecisionEngine` xác định, nơi áp dụng các rule cứng. Một LLM không thể nói "không" khi phát hiện sanction hit; một rule thì có thể. *AI giảm công việc; luật quyết định.*
+2. **Idempotent theo `eventId`.** `eventId` đi từ Kafka envelope, qua command, tới key của `DecisionStorePort`. `decisionStore.exists(eventId)` đảm bảo replay và retry cho cùng một kết quả. Upload trùng bị loại bỏ thay vì bị ra quyết định hai lần.
+3. **Timeout, retry, circuit breaker.** Các adapter của nhà cung cấp dùng timeout có giới hạn (vision: 15 giây; judge: 5 giây), một lần retry có jitter và một circuit breaker ngắt khi lỗi lặp lại. Nhờ đó, khi nhà cung cấp gặp sự cố, intake chuyển sang `MANUAL_REVIEW` thay vì chặn toàn bộ service.
 
 ```java
 // infrastructure/openai/OpenAiProviderConfig.java
@@ -391,7 +391,7 @@ public class OpenAiProviderConfig {
 }
 ```
 
-4. **BYOK — không bao giờ hardcode, không bao giờ log key.** Key của nhà cung cấp đến từ KMS secret manager, được inject như một secret đọc từ biến môi trường lúc deploy. Bộ lọc log che bất kỳ header `Authorization` nào và bất kỳ chuỗi trông giống secret nào (`sk-`/`ai21`/`gpt-`). Nếu một secret lọt vào một dòng log, hook audit được kích hoạt và buộc phải xoay vòng key.
+4. **BYOK — không bao giờ hardcode, không bao giờ log key.** Key của nhà cung cấp đến từ KMS secret manager và được inject dưới dạng secret lấy từ biến môi trường lúc deploy. Bộ lọc log che mọi header `Authorization` và mọi chuỗi có vẻ là secret (`sk-`/`ai21`/`gpt-`). Nếu một secret lọt vào dòng log, audit hook sẽ được kích hoạt và buộc phải xoay vòng key.
 
 ```java
 // infrastructure/audit/SecretRedactingFilter.java
@@ -404,33 +404,33 @@ public class SecretRedactingFilter implements Filter {
 }
 ```
 
-5. **Audit mọi quyết định.** Mỗi intake ghi một dòng audit bất biến: `eventId`, verdict, mọi reason code, nhà cung cấp mô hình + phiên bản mô hình + phiên bản prompt, điểm tin cậy, và một correlation ID. `LlmJudgePort.score()` chỉ mang tính tư vấn, nên mọi output của nó đều được audit kèm đúng phiên bản prompt đã sinh ra nó — bạn phải tái hiện được *bất kỳ* quyết định nào mà cơ quan quản lý hỏi, kể cả output nguyên văn của mô hình.
+5. **Audit mọi quyết định.** Mỗi intake ghi một dòng audit bất biến gồm `eventId`, verdict, mọi reason code, nhà cung cấp mô hình, phiên bản mô hình, phiên bản prompt, điểm tin cậy và correlation ID. `LlmJudgePort.score()` chỉ mang tính tư vấn, nên mọi output của nó đều được audit kèm đúng phiên bản prompt đã tạo ra output đó. Bạn phải có khả năng tái hiện *bất kỳ* quyết định nào mà cơ quan quản lý yêu cầu, kể cả output nguyên văn của mô hình.
 
 ## Các chế độ hỏng chúng tôi thực sự gặp phải
 
-- **Outage của nhà cung cấp trong đợt onboarding tăng đột biến.** Không có circuit breaker, 1000 thread chờ một upstream timeout 60s và làm cạn kiệt pool. Có breaker, nó ngắt ở mức 50% lỗi trong cửa sổ 20 lần gọi và intake rơi về `MANUAL_REVIEW` với reason code `PROVIDER_UNAVAILABLE`.
-- **LLM "bịa" một số tài liệu.** Ảnh sạch mà prompt bẩn cho ra một giá trị sai nhưng tự tin. Cách sửa: cổng `LOW_CONFIDENCE_CRITICAL_FIELDS` giờ chuyển mọi kết quả dưới 0.90 trên ba trường quan trọng sang manual review, và độ tin cậy từng trường được audit.
-- **Upload trùng từ mobile retry.** Client mobile retry khi mạng chập chờn; không có idempotency, chúng tôi đã ghi hai decision. `exists(eventId)` loại bỏ cái thứ hai, và OpenSearch upsert theo id giữ đúng một dòng duy nhất.
-- **Secret lọt vào một dòng log.** Một dev debug-log DTO request thô, trong đó có header chứa key nhà cung cấp. Bộ lọc che + một unit test nạp secret giả qua logger giờ đã ngăn được việc này tái diễn.
+- **Nhà cung cấp gặp sự cố trong đợt onboarding tăng đột biến.** Không có circuit breaker, 1000 thread phải chờ upstream timeout 60 giây và làm cạn kiệt pool. Khi có breaker, nó ngắt ở mức tỷ lệ lỗi 50% trong cửa sổ 20 lần gọi, và intake chuyển về `MANUAL_REVIEW` với reason code `PROVIDER_UNAVAILABLE`.
+- **LLM "bịa" ra số tài liệu.** Một ảnh rõ kết hợp với prompt được thiết kế kém đã tạo ra một giá trị sai nhưng có độ tự tin cao. Cách sửa: cổng `LOW_CONFIDENCE_CRITICAL_FIELDS` hiện chuyển mọi kết quả dưới 0.90 ở ba trường quan trọng sang manual review, đồng thời audit độ tin cậy ở cấp trường.
+- **Upload trùng do mobile retry.** Client mobile retry sau khi mạng chập chờn; nếu không có idempotency, chúng tôi đã ghi hai decision. `exists(eventId)` loại bỏ decision thứ hai, còn OpenSearch upsert theo ID giữ lại một dòng chuẩn duy nhất.
+- **Secret lọt vào dòng log.** Một developer debug-log DTO request thô, trong đó có header chứa key của nhà cung cấp. Bộ lọc che secret cùng với unit test đưa secret giả qua logger hiện đã ngăn việc này tái diễn.
 
 ## Observability và tuân thủ
 
-- Mọi decision được index trong OpenSearch tại `decision-v1` với chính sách lưu trữ 7 năm để tuân thủ.
-- Dashboard: `intake_*_total`, `intake_*_p95_latency_ms`, `llm_provider_failures_total`, `llm_token_usage_total`, `manual_review_queue_depth`.
-- Metric Prometheus được xuất ra từ chính các lời gọi `DecisionEngine`, gắn tag theo verdict và reason code.
-- Trace ID lan truyền từ header Kafka tới document OpenSearch, để một lần onboarding có thể được tái dựng end-to-end.
+- Mọi decision được index trong OpenSearch tại `decision-v1` với chính sách lưu trữ 7 năm nhằm đáp ứng yêu cầu tuân thủ.
+- Dashboard theo dõi `intake_*_total`, `intake_*_p95_latency_ms`, `llm_provider_failures_total`, `llm_token_usage_total` và `manual_review_queue_depth`.
+- Metric Prometheus được xuất từ chính các lời gọi `DecisionEngine` và gắn tag theo verdict và reason code.
+- Trace ID được truyền từ header Kafka tới document OpenSearch, để một lần onboarding có thể được tái dựng end-to-end.
 
 ## Lần sau chúng tôi sẽ làm khác gì
 
-1. **Eval harness ngay từ ngày đầu.** Xây dựng một golden-set gồm 1.000 tài liệu được gán nhãn và chạy mọi thay đổi prompt/mô hình qua nó trước khi release. Chúng tôi làm việc này quá muộn; đó là công cụ chất lượng AI có đòn bẩy lớn nhất.
-2. **Version hóa catalog prompt** như code — `PromptCatalog.visionExtraction()` trả về prompt có phiên bản, và phiên bản đó được ghi vào dòng audit.
-3. **Cost gating.** Cảnh báo token budget theo từng loại tài liệu; với các tài liệu khối lượng lớn, giá trị thấp, nên cho đi qua đường OCR rẻ hơn trước khi dùng vision.
-4. **Hàng đợi human-in-the-loop.** `MANUAL_REVIEW` không phải ngõ cụt; nó là một work queue có SLA, được cấp dữ liệu từ chính OpenSearch store.
+1. **Eval harness ngay từ ngày đầu.** Xây dựng một golden set gồm 1.000 tài liệu được gán nhãn và chạy mọi thay đổi về prompt hoặc mô hình qua bộ này trước khi release. Chúng tôi đã làm việc này quá muộn; đây là công cụ cải thiện chất lượng AI có đòn bẩy lớn nhất.
+2. **Version hóa catalog prompt** như code: `PromptCatalog.visionExtraction()` trả về prompt có phiên bản, và phiên bản đó được ghi vào dòng audit.
+3. **Cost gating.** Thiết lập cảnh báo token budget theo từng loại tài liệu; các tài liệu có khối lượng lớn nhưng giá trị thấp nên đi qua đường OCR rẻ hơn trước.
+4. **Hàng đợi human-in-the-loop.** `MANUAL_REVIEW` không phải ngõ cụt; đó là một work queue có SLA, được cấp dữ liệu từ chính OpenSearch store.
 
 ## Bài học rút ra
 
-Một feature AI lên production trong fintech không phải là "gọi mô hình, lưu câu trả lời". Nó là một pipeline xác định, trong đó mô hình là một *cảm biến được canh gác kỹ* nuôi một rule engine sở hữu quyết định, một event stream sở hữu trạng thái, và một dấu vết audit sở hữu sự thật. Ports hexagonal giữ AI có thể thay thế được; idempotency giữ retry an toàn; circuit breaker khiến các outage nhà cung cấp trở nên nhàm chán; và rule engine cứng giữ luật có thẩm quyền.
+Một feature AI trong fintech khi lên production không chỉ là "gọi mô hình, lưu câu trả lời". Đó là một pipeline xác định, trong đó mô hình là một *cảm biến được bảo vệ chặt chẽ*, cung cấp tín hiệu cho rule engine chịu trách nhiệm về quyết định; event stream chịu trách nhiệm về trạng thái; còn audit trail chịu trách nhiệm lưu giữ sự thật. Các port hexagonal giúp AI có thể thay thế; idempotency giúp retry an toàn; circuit breaker khiến sự cố của nhà cung cấp trở nên vô hại; và rule engine cứng bảo đảm luật luôn có thẩm quyền.
 
-AI đã giảm ~70% công sức manual review trên các tài liệu sạch và khiến các review còn lại nhanh hơn, có căn cứ hơn. Nó chưa bao giờ — dù chỉ một lần — tự mình ra quyết định.
+AI đã giảm khoảng 70% công sức manual review đối với các tài liệu rõ ràng, đồng thời giúp những lượt review còn lại nhanh hơn và có căn cứ hơn. Nó chưa bao giờ — dù chỉ một lần — tự mình ra quyết định.
 
 Repo: <https://github.com/finpay-lab/identity-service>

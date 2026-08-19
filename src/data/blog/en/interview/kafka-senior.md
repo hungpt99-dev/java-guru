@@ -1,6 +1,6 @@
 ---
 title: "Java Interview Prep #5: Apache Kafka — Junior to Senior"
-description: "Event-driven systems on Kafka — delivery semantics, replication, partitioning for order, consumer lag, and the dead-letter queue every production consumer needs. With producer/consumer code and real numbers."
+description: "Event-driven systems with Kafka: delivery semantics, replication, partitioning for ordering, consumer lag, and the dead-letter queue every production consumer needs. Includes producer and consumer code, plus real numbers."
 pubDatetime: 2026-08-10T10:20:00+07:00
 featured: false
 draft: false
@@ -11,14 +11,14 @@ tags:
   - event-driven
 ---
 
-Kafka is the topic that separates "I've sent a message" from "I understand a distributed log". Junior developers produce and consume; seniors reason about ordering, exactly-once, and what happens when a consumer falls behind — with the config and code to prove it. This post climbs from topics to delivery guarantees to lag at scale: 50 questions, pick the level you are interviewing at, and read one above it.
+Kafka is the topic that separates "I've sent a message" from "I understand a distributed log." Junior developers produce and consume; senior developers reason about ordering, exactly-once processing, and what happens when a consumer falls behind, with the configuration and code to prove it. This post moves from topics to delivery guarantees to lag at scale: 50 questions. Choose the level you are interviewing for, then read one level above it.
 
-> Mindset: junior sends a record and hopes it arrives; senior can tell you the exact semantics of "arrives" and what they built so a poison message can never take down the pipeline.
+> Mindset: a junior sends a record and hopes it arrives; a senior can explain exactly what "arrives" means and what they built to ensure that a poison message can never take down the pipeline.
 
 ## Junior — foundations
 
 **Q1. What are topics, partitions, and offsets?**
-A topic is a named log split into **partitions** — ordered, append-only logs. Each record gets a sequential **offset** within its partition. More partitions = more parallelism, but also more open files (each partition is a directory of ~1 GB segment files) and slightly longer rebalances. A topic with 50 partitions on a 3-broker cluster is a normal starting point:
+A topic is a named log split into **partitions**, which are ordered, append-only logs. Each record gets a sequential **offset** within its partition. More partitions mean more parallelism, but also more open files (each partition is a directory of approximately 1 GB segment files) and slightly longer rebalances. A topic with 50 partitions on a 3-broker cluster is a reasonable starting point:
 
 ```bash
 kafka-topics --create --topic orders --partitions 50 --replication-factor 3 \
@@ -28,17 +28,17 @@ kafka-topics --create --topic orders --partitions 50 --replication-factor 3 \
 Each partition has one leader and (RF−1) followers; 50 partitions × RF 3 = 150 replica assignments to spread across the brokers.
 
 **Q2. Producer vs consumer, and consumer groups?**
-A producer appends to a topic; a consumer in a **consumer group** gets exclusive access to a subset of partitions. With 12 partitions and 4 consumers, each consumer handles 3 partitions. Adding a 5th consumer leaves one idle (you can't have more active consumers than partitions). The `group.id` is what makes Kafka scale horizontally — every instance with the same id shares the load:
+A producer appends to a topic; a consumer in a **consumer group** gets exclusive access to a subset of the partitions. With 12 partitions and 4 consumers, each consumer handles 3 partitions. Adding a fifth consumer leaves one idle because you cannot have more active consumers than partitions. The `group.id` is what lets Kafka scale horizontally: every instance with the same ID shares the load:
 
 ```java
 props.put(ConsumerConfig.GROUP_ID_CONFIG, "orders-service"); // all instances split the partitions
 props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 ```
 
-Two different groups reading the same topic are fully independent — each keeps its own offsets and reads at its own pace.
+Two different groups reading the same topic are fully independent: each keeps its own offsets and reads at its own pace.
 
 **Q3. What is `acks` and why does it matter?**
-`acks=0` (fire-and-forget, ~0 guarantee), `acks=1` (leader acks; lost if leader dies pre-replica), `acks=all` (all in-sync replicas ack — strongest, but ~2–5× higher latency, ~20–50 ms vs ~2–5 ms). Durability vs latency, directly:
+`acks=0` (fire-and-forget, approximately no guarantee), `acks=1` (the leader acknowledges; data can be lost if the leader dies before replication), and `acks=all` (all in-sync replicas acknowledge; the strongest option, but with approximately 2–5× higher latency: ~20–50 ms versus ~2–5 ms). This is the durability-versus-latency tradeoff in concrete terms:
 
 ```java
 props.put(ProducerConfig.ACKS_CONFIG, "all");
@@ -46,30 +46,30 @@ props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true"); // no duplicates on
 props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000"); // how long to keep trying
 ```
 
-The leader can only tell followers "commit" once the record is in all ISR members' logs; `acks=all` just means you wait for that decision instead of guessing.
+The leader can tell followers to "commit" only after the record is in every ISR member's log; `acks=all` simply means that you wait for this decision instead of guessing.
 
 **Q4. What is a keyed message and why use one?**
-A key routes all records with the same key to the **same partition** (murmur2 hash), giving **per-key ordering**. Records with no key are round-robined (since Kafka 2.4, a sticky partitioner fills one batch before moving on) — no ordering guarantee:
+A key routes all records with the same key to the **same partition** (using a murmur2 hash), providing **per-key ordering**. Records without a key are distributed in round-robin fashion (since Kafka 2.4, a sticky partitioner fills one batch before moving on), so there is no ordering guarantee:
 
 ```java
 // same key -> same partition -> in order. Critical for "all events for user 42 in order"
 producer.send(new ProducerRecord<>("orders", user.getId(), orderEvent));
 ```
 
-The corollary interviewers probe: one hot key (a celebrity user) makes one partition hot — keying buys order at the price of skew.
+The follow-up question interviewers often ask is about the hot-key problem: one hot key (for example, a celebrity user) makes one partition hot. Keying buys order at the cost of skew.
 
 **Q5. Queue vs Kafka log?**
-A queue removes a message once consumed; Kafka is an append-only log — every consumer reads the full history at its own offset, and messages expire by **retention** (e.g. 7 days), not on read. Retention 7 days at 10 GB/day of writes means ~70 GB of disk per topic you must provision:
+A queue removes a message once it is consumed; Kafka is an append-only log. Every consumer reads the history from its own offset, and messages expire through **retention** (for example, after 7 days), not when they are read. Seven days of retention at 10 GB of writes per day requires approximately 70 GB of disk per topic:
 
 ```bash
 kafka-configs --alter --entity-type topics --entity-name orders \
   --add-config retention.ms=604800000   # 7 days in milliseconds
 ```
 
-That is also why "who read it?" is the wrong question for Kafka — the log keeps the record until retention deletes it, regardless of consumption.
+That is also why "who read it?" is the wrong question for Kafka: the log keeps the record until retention deletes it, regardless of whether it has been consumed.
 
 **Q6. What does a consumer group do on a crash?**
-When a member dies, its partitions are **reassigned** (a rebalance) to survivors. During a rebalance all group members stop consuming briefly. Frequent rebalances (from slow poll heartbeats) cause throughput cliffs. Three dials decide whether you get kicked out of the group:
+When a member dies, its partitions are **reassigned** to surviving members in a rebalance. During a rebalance, all group members briefly stop consuming. Frequent rebalances, often caused by delayed polling or missed heartbeats, create severe throughput drops. Three settings determine whether you are removed from the group:
 
 ```java
 props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "45000");    // default 45 s since Kafka 2.3
@@ -78,13 +78,13 @@ props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "300000"); // 5 min to fin
 ```
 
 **Q7. Where are committed offsets stored?**
-Committed offsets live in an internal compacted topic called `__consumer_offsets` (50 partitions by default), not on the consumer. Every `commitSync()` writes there; on restart the group resumes from it. One command shows group state, per-partition offsets, and lag:
+Committed offsets live in an internal compacted topic called `__consumer_offsets` (50 partitions by default), not on the consumer. Every `commitSync()` writes to that topic; on restart, the group resumes from there. One command shows the group state, per-partition offsets, and lag:
 
 ```bash
 kafka-consumer-groups --bootstrap-server broker-1:9092 --describe --group orders-service
 ```
 
-Pitfall: offsets expire after `offsets.retention.minutes` (default 7 days) when a group stays empty — a long-silent group returns to `auto.offset.reset` instead of its old position.
+Pitfall: offsets expire after `offsets.retention.minutes` (7 days by default) when a group remains empty. A group that has been silent for a long time then falls back to `auto.offset.reset` instead of its previous position.
 
 **Q8. What are serializers and where do they break?**
 Brokers store bytes; serializers are a client-side contract. String for keys, JSON/`String` for values, Avro + Schema Registry for evolving schemas. The classic 3 a.m. crash: a JSON consumer without `trusted.packages` rejects every record produced by another service:
@@ -122,7 +122,7 @@ props.put(ProducerConfig.PARTITIONER_CLASS_CONFIG, TenantPartitioner.class.getNa
 Warning: any partitioner change re-routes keys mid-stream — your ordering guarantees shift with it.
 
 **Q11. What does `consumer.poll()` actually do?**
-`poll()` is the heartbeat, fetch, and rebalance engine in one call; it returns up to `max.poll.records` (default 500) and must keep being called even when idle. The canonical loop:
+`poll()` combines the heartbeat, fetch, and rebalance engines in a single call. It returns up to `max.poll.records` (500 by default) and must continue to be called even when the consumer is idle. The canonical loop is:
 
 ```java
 while (running) {
@@ -135,7 +135,7 @@ while (running) {
 Spring Kafka wraps this loop in `KafkaMessageListenerContainer` — your `@KafkaListener` method runs inside it, which is exactly why a slow method trips `max.poll.interval.ms`.
 
 **Q12. How does producer batching work, and what are the knobs?**
-`send()` doesn't touch the network — records land in the `RecordAccumulator` (`buffer.memory`, default 32 MB) and leave in batches of `batch.size` (default **16 KB**) after `linger.ms` (default 0). Raising `linger.ms` to 5–10 ms trades milliseconds of latency for 3–5× higher throughput via fuller batches:
+`send()` does not immediately touch the network. Records land in the `RecordAccumulator` (`buffer.memory`, 32 MB by default) and leave in batches of `batch.size` (default **16 KB**) after `linger.ms` (default 0). Raising `linger.ms` to 5–10 ms trades a few milliseconds of latency for 3–5× higher throughput by allowing fuller batches:
 
 ```java
 props.put(ProducerConfig.BATCH_SIZE_CONFIG, "16384");       // 16 KB default
@@ -143,10 +143,10 @@ props.put(ProducerConfig.LINGER_MS_CONFIG, "10");           // wait up to 10 ms 
 props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, "67108864"); // 64 MB accumulator
 ```
 
-At 1M msg/s × 500 B that's 500 MB/s of records; in 16 KB batches that's ~31k batches/s — the broker's appends become the ceiling, not your CPU.
+At 1M msg/s × 500 B, that is 500 MB/s of records. With 16 KB batches, that is approximately 31k batches/s, making broker append capacity the ceiling rather than your CPU.
 
 **Q13. What is `auto.offset.reset` and when does it matter?**
-A brand-new group has no committed offset, so the broker picks a start: `earliest` (the full history within retention), `latest` (default — only new records), or `none` (fail if no offset exists). It's a one-time decision per group that silently decides how much of the backlog a new deployment eats:
+A brand-new group has no committed offset, so the broker chooses a starting point: `earliest` (the full history within retention), `latest` (the default; only new records), or `none` (fail if no offset exists). This one-time decision per group silently determines how much backlog a new deployment consumes:
 
 ```java
 props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"); // reprocess up to 7 days of history
@@ -165,20 +165,20 @@ kafka-storage format -t "$(cat /tmp/cluster-id)" -c config/kraft/server.properti
 kafka-server-start config/kraft/server.properties
 ```
 
-Interview-wise, ZooKeeper is legacy vocabulary; KRaft (Raft, controller quorum) is the current answer.
+In an interview, ZooKeeper is legacy terminology; KRaft (Raft and the controller quorum) is the current answer.
 
 **Q15. How is a partition leader elected?**
-Each partition has one **leader** (all reads and writes) with followers replicating it. When the leader dies, the controller picks a new leader **from the ISR** — a follower behind the ISR cannot become leader, which protects against truncating uncommitted records. `unclean.leader.election.enable=false` (default) means you prefer durability over availability when every ISR member is gone:
+Each partition has one **leader** that handles all reads and writes, with followers replicating it. When the leader dies, the controller chooses a new leader **from the ISR**. A follower that has fallen behind the ISR cannot become leader, protecting against the truncation of uncommitted records. `unclean.leader.election.enable=false` (the default) means you prefer durability over availability when every ISR member is gone:
 
 ```bash
 kafka-leader-election --bootstrap-server broker-1:9092 --topic orders \
   --partition 12 --election-type preferred
 ```
 
-A **preferred** election returns leadership to the original assignment so load spreads evenly again after a broker comes back.
+A **preferred** election returns leadership to the original assignment, allowing the load to spread evenly again after a broker returns.
 
 **Q16. What's inside a `ProducerRecord` — key, value, headers, timestamp?**
-Every record is a key (routing), value (payload), timestamp (defaults to broker arrival), and headers (trace ids, schema versions, correlation ids). Headers travel with the record and are the cheap way to trace one order across five services:
+Every record contains a key (routing), a value (payload), a timestamp (which defaults to broker arrival time), and headers (trace IDs, schema versions, and correlation IDs). Headers travel with the record and provide an inexpensive way to trace one order across five services:
 
 ```java
 ProducerRecord<String, OrderEvent> record = new ProducerRecord<>(
@@ -188,10 +188,10 @@ ProducerRecord<String, OrderEvent> record = new ProducerRecord<>(
 producer.send(record);
 ```
 
-A `traceparent` header is how you follow a request through produce → consume → produce without parsing payloads.
+A `traceparent` header lets you follow a request through produce → consume → produce without parsing payloads.
 
 **Q17. Session timeout vs poll interval — which one kicks you?**
-Two independent timers eject you from the group. `session.timeout.ms` (default 45 s) fires when the **background heartbeat thread** misses heartbeats (sent every 3 s) — broker gone, or a GC pause longer than 45 s. `max.poll.interval.ms` (default 5 min) fires when processing a polled batch takes too long — you're alive but not making progress. Slow handlers trip the second; dead instances trip the first:
+Two independent timers can remove you from the group. `session.timeout.ms` (45 s by default) fires when the **background heartbeat thread** misses heartbeats (sent every 3 s), for example because the broker is unavailable or a GC pause lasts longer than 45 s. `max.poll.interval.ms` (5 minutes by default) fires when processing a polled batch takes too long: you are alive but not making progress. Slow handlers trigger the second; dead instances trigger the first:
 
 ```java
 props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "600000"); // 10 min for slow handlers

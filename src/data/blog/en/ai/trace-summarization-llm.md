@@ -1,6 +1,6 @@
 ---
 title: "Summarizing Distributed Traces with an LLM"
-description: "How FinPay's observability service turns an OpenTelemetry traceId into a plain-language narrative of what happened, the slowest span, and the error span."
+description: "How FinPay's observability service turns an OpenTelemetry traceId into a plain-language narrative explaining what happened, which span was slowest, and which span contained an error."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -9,15 +9,15 @@ featured: false
 
 > Repo: <https://github.com/finpay-lab/observability>
 
-Every serious fintech runs on distributed tracing. A single payment can fan out across an API gateway, a risk engine, a ledger, a notifier, and a half-dozen retries. When something goes wrong at 3 AM, an SRE stares at a wall of 40,000 spans and has to mentally replay the whole journey. We built `trace-summarization-llm` so that the platform can answer one question — *"what happened for this traceId?"* — in under two seconds, in plain language.
+Every serious fintech runs on distributed tracing. A single payment can fan out across an API gateway, a risk engine, a ledger, a notifier, and half a dozen retries. When something goes wrong at 3 AM, an SRE stares at a wall of 40,000 spans and has to mentally replay the whole journey. We built `trace-summarization-llm` so that the platform can answer one question — *"what happened for this traceId?"* — in under two seconds, in plain language.
 
-This post is the senior-level walkthrough of that integration. I will show you the naive implementation first (the one that burned our budget and nearly led to a wrong money decision), then the production-grade design that survived a 6-month bank pilot. Same goal, different architecture.
+This post is a senior-level walkthrough of that integration. I will show you the naive implementation first (the one that burned our budget and nearly led to the wrong financial decision), followed by the production-grade design that survived a six-month bank pilot. The goal is the same, but the architecture is different.
 
 ## What the feature is
 
-`trace-summarization-llm` is a Spring Boot service inside the FinPay observability platform. It consumes tracing telemetry, picks the spans relevant to a `traceId`, and asks an LLM to compress them into a human-readable incident summary: what failed, where, why, and what was retried.
+`trace-summarization-llm` is a Spring Boot service inside the FinPay observability platform. It consumes tracing telemetry, selects the spans relevant to a `traceId`, and asks an LLM to condense them into a human-readable incident summary: what failed, where, why, and what was retried.
 
-These are the non-negotiable ground rules we locked in before writing a single line of inference code:
+These are the non-negotiable ground rules we established before writing a single line of inference code:
 
 1. **The AI is never a money decider.** It can *describe* what happened; it can never *decide* whether to refund, release, or reverse. Any output that looks like a recommendation is presented as hypothesis, never authority.
 2. **Idempotent by `eventId`.** Consumers and producers both treat processing as at-least-once; summarization must be exactly-once per event.
@@ -27,7 +27,7 @@ These are the non-negotiable ground rules we locked in before writing a single l
 
 ## The WRONG way
 
-Here is the first implementation, and it reads exactly like something a junior team would ship after a two-day spike. It is dangerously wrong in at least five ways.
+Here is the first implementation. It reads exactly like something a junior team would ship after a two-day spike, and it is dangerously wrong in at least five ways.
 
 ```java
 // WRONG: do not ship this
@@ -73,7 +73,7 @@ public class TraceSummarizer {
 }
 ```
 
-Let me count the sins:
+Let me count the problems:
 
 1. **Secret in source.** A `static final` API key that will end up in git history, in the artifact, and possibly in a thread dump or log replay. BYOK is meaningless if the key is a compile-time constant.
 2. **No span selection.** We shove the entire trace into the context. Forty thousand spans blow past the model window, cost a fortune in tokens, and drown the signal. We measured a single trace costing over $8 in tokens.
@@ -82,11 +82,11 @@ Let me count the sins:
 5. **No resilience.** A 2-second default timeout from `RestTemplate`? Actually there is no timeout at all — the HTTP client blocks indefinitely. One slow model provider stalls the caller, which is our Kafka consumer, which stalls the whole partition.
 6. **Untrusted output logged.** We log the raw model response, which may echo the prompt, which may contain the key, or PII from the trace. That is an audit and compliance leak.
 
-And one more that is easy to miss: **the code couples the domain to the infrastructure**. The summarization service knows about `RestTemplate`, HTTP endpoints, headers, and the JSON wire format. There is no `domain/` vs `infrastructure/` split, so we can neither test the summarization logic without a live network call nor swap providers without touching business code.
+And there is one more issue that is easy to miss: **the code couples the domain to the infrastructure**. The summarization service knows about `RestTemplate`, HTTP endpoints, headers, and the JSON wire format. There is no `domain/` versus `infrastructure/` split, so we can neither test the summarization logic without a live network call nor swap providers without touching the business code.
 
 ## The RIGHT way
 
-The production version is built around hexagonal architecture. The **domain** (ports) owns the contract — what it means to summarize a trace and what guarantees must hold. The **infrastructure** (adapters) owns the details: Kafka, Spring, the LLM HTTP client, OpenSearch.
+The production version is built around hexagonal architecture. The **domain** (ports) owns the contract — what it means to summarize a trace and what guarantees must hold. The **infrastructure** (adapters) owns the details: Kafka, Spring, the LLM HTTP client, and OpenSearch.
 
 ```
 trace-summarization-llm/
@@ -121,7 +121,7 @@ trace-summarization-llm/
     └── config/AppConfig.java
 ```
 
-The domain port — notice it has no idea where the LLM lives or how it is called:
+The domain port — notice that it has no idea where the LLM lives or how it is called:
 
 ```java
 // domain/port/out/LlmPort.java
@@ -130,7 +130,7 @@ public interface LlmPort {
 }
 ```
 
-And the input port for the Kafka event. The consumer in infrastructure contains no summarization logic; it only adapts bytes into a domain command:
+And here is the input port for the Kafka event. The consumer in infrastructure contains no summarization logic; it only adapts bytes into a domain command:
 
 ```java
 // domain/port/in/HandleTraceEventUseCase.java

@@ -1,6 +1,6 @@
 ---
 title: "Ôn thi Java #7: System Design — Junior đến Senior"
-description: "System design là capstone của senior — một bài test phán đoán 45 phút. Process, ước lượng capacity, caching, CAP, scalability, và observability."
+description: "System design là phần tổng kết dành cho senior: một bài kiểm tra khả năng phán đoán trong 45 phút. Quy trình, ước lượng capacity, caching, CAP, scalability và observability."
 pubDatetime: 2026-08-10T10:25:00+07:00
 featured: false
 draft: false
@@ -11,14 +11,14 @@ tags:
   - scalability
 ---
 
-System design là buổi phỏng vấn không có đáp án đúng — chỉ có trade-off đáng để phòng thủ. Junior gọi tên component; senior đi một bài toán từ yêu cầu mơ hồ đến thiết kế dựa trên số liệu và chỉ ra nơi nó gãy. Bài này leo từ "vẽ diagram" đến "đây là latency budget và failure tôi đang canh" — 50 câu hỏi, chọn đúng level bạn đang phỏng vấn, và đọc thêm một level trên nó.
+System design là buổi phỏng vấn không có đáp án duy nhất — chỉ có những trade-off có thể bảo vệ được. Junior gọi tên các component; senior đưa một bài toán từ yêu cầu mơ hồ đến thiết kế dựa trên số liệu và chỉ ra nơi nó sẽ gãy. Bài này đi từ "vẽ diagram" đến "đây là latency budget và failure tôi đang theo dõi" — gồm 50 câu hỏi; hãy chọn đúng level bạn đang phỏng vấn và đọc thêm một level cao hơn.
 
-> Mindset: junior sản xuất diagram; senior sản xuất diagram _và_ latency budget, capacity estimate, và failure mode duy nhất có khả năng page họ lúc 2 giờ sáng nhất.
+> Mindset: junior tạo ra một diagram; senior tạo ra một diagram _và_ latency budget, capacity estimate, cùng failure mode duy nhất có khả năng page họ lúc 2 giờ sáng cao nhất.
 
-## Junior — nền tảng
+## Junior — Nền tảng
 
 **Q1. Các building block chính của một web system là gì?**
-Một stack điển hình là một pipeline nơi mỗi layer thêm một khả năng: LB dàn đều tải, cache hút các read, queue tách rời công việc chậm, DB nắm sự thật. Biết vai trò của từng block trước khi bạn có thể tranh luận về bất kỳ cái nào trong số chúng:
+Một stack điển hình là một pipeline, trong đó mỗi layer bổ sung một khả năng: LB dàn đều tải, cache hấp thụ các read, queue tách rời công việc chậm, còn DB nắm dữ liệu chuẩn. Hãy hiểu vai trò của từng block trước khi tranh luận về bất kỳ block nào:
 
 ```
 Client ──> DNS ──> Load Balancer ──> App Servers ──> Cache (Redis)
@@ -29,7 +29,7 @@ Client ──> DNS ──> Load Balancer ──> App Servers ──> Cache (Redi
 ```
 
 **Q2. Chuyện gì xảy ra khi bạn gõ một URL và nhấn Enter?**
-DNS lookup → bắt tay TCP → bắt tay TLS → HTTP request → logic app → response. Mỗi bước tốn thời gian đo được — DNS ~10–50 ms (nếu cache thì ~0 ms), RTT ~1–50 ms, TLS ~10–100 ms. Đây là latency budget đầu tiên của bạn: một request "nhanh" chủ yếu là chờ mạng, không phải chờ code của bạn:
+DNS lookup → bắt tay TCP → bắt tay TLS → HTTP request → logic app → response. Mỗi bước đều tốn một khoảng thời gian đo được — DNS ~10–50 ms (nếu đã cache thì ~0 ms), RTT ~1–50 ms, TLS ~10–100 ms. Đây là latency budget đầu tiên của bạn: một request "nhanh" chủ yếu là chờ mạng, không phải chờ code:
 
 ```text
 browser ──> DNS (10–50 ms) ──> bắt tay TCP (1 RTT) ──> TLS (1–2 RTT, ~10–100 ms)

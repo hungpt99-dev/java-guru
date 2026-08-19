@@ -1,6 +1,6 @@
 ---
 title: "AI Ops: Turning Alerts and Traces into Root-Cause Hypotheses"
-description: "tầng observability của FinPay dùng LLM để tóm tắt cảnh báo Prometheus và trace OpenTelemetry thành giả thuyết nguyên nhân gốc kèm liên kết runbook."
+description: "Tầng observability của FinPay sử dụng LLM để tóm tắt các cảnh báo Prometheus và trace OpenTelemetry thành giả thuyết về nguyên nhân gốc, kèm liên kết đến runbook."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -11,27 +11,27 @@ featured: false
 
 ## Bài toán chiếc pager lúc 3 giờ sáng
 
-FinPay xử lý thanh toán. Khi một lô quyết toán trễ hạn, hàng trăm cảnh báo bùng nổ chỉ trong vài phút: độ trễ tăng vọt, tỷ lệ lỗi rơi tự do, hàng đợi dead-letter đầy lên. Lúc kỹ sư trực ca bơi qua mớ nhiễu đó, thì sự cố *thật sự* — cái mà một phần nhỏ trong số cảnh báo kia thực ra đang nói tới — đã đốt cháy ngân sách SLO từ lâu.
+FinPay xử lý các giao dịch thanh toán. Khi một lô quyết toán bị chậm, hàng trăm cảnh báo có thể bùng lên chỉ trong vài phút: độ trễ tăng vọt, tỷ lệ lỗi lao dốc và các hàng đợi dead-letter đầy lên. Đến khi kỹ sư trực ca lần qua được mớ nhiễu đó, sự cố *thật sự* — vấn đề mà chỉ một phần nhỏ trong số các cảnh báo kia thực sự phản ánh — đã tiêu tốn ngân sách SLO từ lâu.
 
-Chúng tôi xây dựng **ai-ops-incident-triage**, tính năng thứ tư trong nền tảng observability của mình, để trả lời một câu hỏi càng sớm càng tốt: *"Đây là một sự cố hay nhiều sự cố? Thứ gì đã hỏng, và nó có đụng tới tiền không?"* AI lo phần đọc dữ liệu, tương quan, và phân loại bước đầu. Nó **không bao giờ** đưa ra quyết định về tiền.
+Chúng tôi xây dựng **ai-ops-incident-triage**, tính năng thứ tư trong nền tảng observability của mình, để trả lời một câu hỏi sớm nhất có thể: *"Đây là một sự cố hay nhiều sự cố? Điều gì đã hỏng, và sự cố có liên quan đến tiền không?"* AI đảm nhiệm việc đọc dữ liệu, đối chiếu tương quan và phân loại bước đầu. Nó **không bao giờ** đưa ra quyết định liên quan đến tiền.
 
-Bài viết này là toàn bộ thiết kế: kiến trúc, cách kết nối Spring Boot + Kafka + OpenSearch, và những đoạn code WRONG → RIGHT mà chúng tôi đã viết trong quá trình xây dựng, cùng năm rào chắn an toàn (guardrails) giúp một LLM vận hành an toàn bên trong một hệ thống kiểm soát tài chính.
+Bài viết này trình bày toàn bộ thiết kế: kiến trúc, cách kết nối Spring Boot + Kafka + OpenSearch và các đoạn code WRONG → RIGHT được viết trong quá trình xây dựng, cùng năm rào chắn an toàn (guardrails) giúp LLM vận hành an toàn bên trong hệ thống kiểm soát tài chính.
 
 > Repo: https://github.com/finpay-lab/observability
 
 ## Chúng tôi đã xây dựng gì
 
-`ai-ops-incident-triage` là một dịch vụ Spring Boot với nhiệm vụ:
+`ai-ops-incident-triage` là một dịch vụ Spring Boot có nhiệm vụ:
 
-1. Tiêu thụ các sự kiện cảnh báo và trace đã tương quan từ Kafka.
+1. Tiêu thụ các sự kiện cảnh báo và các trace đã được tương quan từ Kafka.
 2. Làm giàu mỗi cảnh báo bằng ngữ cảnh trace của nó (truy vấn từ OpenSearch).
-3. Gửi một prompt đã khử nhạy cảm (redacted) và ép theo schema tới một LLM BYOK để lấy mức độ nghiêm trọng, nguyên nhân gốc, và khuyến nghị.
-4. Áp dụng các rào chắn an toàn (idempotency, timeout/retry/circuit breaker, phê duyệt của con người cho các thao tác chạm tiền, kiểm toán đầy đủ).
-5. Xuất bản quyết định triage và bản ghi kiểm toán trở lại Kafka → OpenSearch.
+3. Gửi một prompt đã khử dữ liệu nhạy cảm (redacted) và được ràng buộc theo schema tới LLM BYOK để nhận mức độ nghiêm trọng, nguyên nhân gốc và khuyến nghị.
+4. Áp dụng các rào chắn an toàn (idempotency, timeout, retry, circuit breaker, phê duyệt của con người đối với các thao tác liên quan đến tiền và kiểm toán đầy đủ).
+5. Xuất bản quyết định triage và bản ghi kiểm toán lên Kafka → OpenSearch.
 
 ## Bản đồ kiến trúc
 
-Dịch vụ theo kiến trúc hexagonal. Lõi domain không biết gì về Kafka, Spring AI, hay OpenSearch — nó chỉ biết các cổng (ports). Các bộ điều hợp (adapters) nằm trong `infrastructure/`:
+Dịch vụ tuân theo kiến trúc hexagonal. Lõi domain không biết gì về Kafka, Spring AI hay OpenSearch; nó chỉ biết các cổng (ports). Các bộ điều hợp (adapters) nằm trong `infrastructure/`:
 
 ```
 com.finpay.observability
@@ -60,23 +60,23 @@ com.finpay.observability
                         └───────────────────────────────────────────┘
 ```
 
-Mô hình domain là những record bất biến, nhàm chán — chính xác thứ bạn cần khi đầu ra của một LLM phải chảy qua một vết kiểm toán.
+Mô hình domain gồm những record bất biến, cố ý đơn giản — chính xác là thứ bạn cần khi đầu ra của LLM phải đi qua một vết kiểm toán.
 
 ## Năm rào chắn an toàn
 
-Đây không phải những thứ trang trí tùy chọn. Đây là hợp đồng cho phép chúng tôi chạy một LLM bên trong một công ty thanh toán.
+Đây không phải những chi tiết trang trí tùy chọn. Đây là các nguyên tắc cho phép chúng tôi vận hành LLM bên trong một công ty thanh toán.
 
-1. **AI không phải người quyết định tiền.** Mô hình có thể *gợi ý* một khoản hoàn tiền hay bồi thường; chỉ con người (hoặc một rule hoàn toàn xác định) mới được thực thi. Sổ cái, không phải prompt, mới di chuyển tiền.
-2. **Idempotent theo `eventId`.** Mọi lần retry, giao lại (redelivery), hay replay phải cho ra cùng một kết quả duy nhất. Chúng tôi claim `eventId` một cách nguyên tử trong OpenSearch; xử lý trùng lặp bị bỏ qua.
-3. **Timeout, retry, circuit breaker.** Lời gọi LLM được giới hạn thời gian, retry với backoff, và được bảo vệ bởi circuit breaker. Khi breaker mở, chúng tôi hạ cấp về một rule engine xác định thay vì làm hỏng triage, hoặc tệ hơn, chặn cả đường ống cảnh báo.
-4. **Khóa BYOK, không hardcode, không log.** Khóa của khách hàng được tiêm lúc runtime qua Kubernetes Secret/Vault, và thứ duy nhất dạng khóa được phép xuất hiện trong log là bản xem trước đã được che.
-5. **Kiểm toán mọi quyết định.** Mọi triage, fallback, retry, và phê duyệt của con người là một bản ghi kiểm toán append-only, đánh chỉ số bằng `eventId`, kèm chính xác model, phiên bản, trace ID, và kết quả.
+1. **AI không phải người quyết định tiền.** Mô hình có thể *gợi ý* hoàn tiền hoặc bồi thường; chỉ con người (hoặc một quy tắc hoàn toàn xác định) mới được phép thực hiện. Sổ cái, không phải prompt, mới là nơi quyết định việc chuyển tiền.
+2. **Idempotent theo `eventId`.** Mọi lần retry, redelivery hoặc replay phải cho ra cùng một kết quả. Chúng tôi claim `eventId` một cách nguyên tử trong OpenSearch; các lần xử lý trùng lặp sẽ bị bỏ qua.
+3. **Timeout, retry, circuit breaker.** Lời gọi LLM được giới hạn thời gian, retry với backoff và bảo vệ bằng circuit breaker. Khi breaker mở, hệ thống chuyển sang một rule engine xác định thay vì làm triage thất bại hoặc, tệ hơn, chặn đường ống cảnh báo.
+4. **Khóa BYOK, không hardcode, không ghi log.** Khóa của khách hàng được tiêm lúc runtime qua Kubernetes Secret/Vault, và chuỗi duy nhất có dạng khóa được phép xuất hiện trong log là bản xem trước đã che.
+5. **Kiểm toán mọi quyết định.** Mỗi lần triage, fallback, retry và phê duyệt của con người đều tạo ra một bản ghi kiểm toán append-only, được định danh bằng `eventId` và chứa chính xác model, phiên bản, trace ID cùng kết quả.
 
 ## WRONG rồi RIGHT
 
 ### 1. Bí mật & BYOK
 
-**WRONG.** Khóa nằm trong một hằng số, nên nó nằm trong lịch sử git, trong IDE, và trong các bản dump log. Nó không bao giờ có thể xoay vòng (rotate) nếu không deploy.
+**WRONG.** Khóa nằm trong một hằng số, nên sẽ xuất hiện trong lịch sử git, IDE và các bản dump log. Không thể xoay vòng (rotate) khóa nếu không triển khai lại.
 
 ```java
 // WRONG — khóa nằm trong code, nên nằm trong lịch sử git và IDE của mọi người.
@@ -90,7 +90,7 @@ public class OpenAiClient {
 }
 ```
 
-**RIGHT.** Khóa được tiêm lúc runtime và chỉ có thể được in dưới dạng đã được che.
+**RIGHT.** Khóa được tiêm lúc runtime và chỉ có thể được in dưới dạng đã che.
 
 ```java
 // infrastructure/config/LlmProperties.java
@@ -135,18 +135,18 @@ public class LlmConfig {
 }
 ```
 
-Chúng tôi cũng có một bước kiểm tra CI quét module tìm các literal dạng `sk-`, cùng một log-filter che đi bất cứ thứ gì *trông giống* khóa — phòng thủ theo chiều sâu.
+Chúng tôi cũng có bước kiểm tra CI để quét module tìm các literal dạng `sk-`, cùng một log filter che mọi thứ *trông giống* một khóa — tạo thành cơ chế phòng thủ nhiều lớp.
 
 ### 2. Timeout, retry, circuit breaker
 
-**WRONG.** Một lời gọi chặn không có timeout nghĩa là một provider chậm sẽ treo consumer, nuốt luôn vòng poll Kafka, và làm ngừng mọi cảnh báo đứng sau nó. Không retry, không breaker, không fallback.
+**WRONG.** Một lời gọi chặn không có timeout có thể khiến một provider chậm treo consumer, làm cạn vòng poll Kafka và khiến mọi cảnh báo phía sau bị đình trệ. Không retry, không breaker, không fallback.
 
 ```java
 // WRONG — chặn vô thời hạn, điểm lỗi đơn lẻ, không có đường hạ cấp.
 HttpResponse<String> r = client.send(request, HttpResponse.BodyHandlers.ofString());
 ```
 
-**RIGHT.** Giới hạn thời gian, retry với backoff, được bảo vệ bởi circuit breaker, và có một fallback xác định.
+**RIGHT.** Lời gọi được giới hạn thời gian, retry với backoff, bảo vệ bằng circuit breaker và có fallback xác định.
 
 ```java
 // infrastructure/config/Resilience4jConfig.java
@@ -234,7 +234,7 @@ public class OpenAiIncidentTriageAdapter implements IncidentTriagePort {
 }
 ```
 
-Khi breaker mở (hoặc LLM đơn giản là không khả dụng), orchestrator hạ cấp thay vì thất bại:
+Khi breaker mở (hoặc LLM không khả dụng), orchestrator chuyển sang phương án hạ cấp thay vì thất bại:
 
 ```java
 // domain/service/TriageOrchestrator.java
@@ -255,7 +255,7 @@ Hạ cấp còn tốt hơn thất bại. Triage cảnh báo giữa lúc provider
 
 ### 3. Idempotent theo `eventId`
 
-**WRONG.** Consumer không có trí nhớ. Kafka là at-least-once: bất kỳ lần retry, rebalance, hay reset offset thủ công nào cũng phát lại cảnh báo, sinh ra sự cố trùng lặp, trang pager trùng lặp, và quyết định trùng lặp.
+**WRONG.** Consumer không có bộ nhớ. Kafka cung cấp cơ chế giao nhận at-least-once: bất kỳ lần retry, rebalance hoặc reset offset thủ công nào cũng có thể phát lại cảnh báo, tạo ra sự cố, trang pager và quyết định trùng lặp.
 
 ```java
 // WRONG — một lần giao lại là nhân đôi sự cố và nhân đôi trang pager.
@@ -266,7 +266,7 @@ public void onAlert(AlertEvent event) {
 }
 ```
 
-**RIGHT.** Mỗi sự kiện được claim một cách nguyên tử bằng `eventId` trong OpenSearch trước khi làm bất cứ việc gì. Sự kiện bị phát lại sẽ bị bỏ qua.
+**RIGHT.** Mỗi sự kiện được claim nguyên tử bằng `eventId` trong OpenSearch trước khi bắt đầu xử lý. Sự kiện bị phát lại sẽ bị bỏ qua.
 
 ```java
 // domain/port/IdempotencyPort.java
@@ -331,7 +331,7 @@ public class IncidentConsumer {
 }
 ```
 
-`_id = eventId` chính là mẹo: OpenSearch cho chúng tôi một claim nguyên tử, phân tán, an toàn với replay miễn phí. Dù consumer có chết giữa chừng, claim đang dở sẽ chặn bản trùng lặp cho tới khi lease hết hạn, và doc đã hoàn tất sẽ chặn nó vĩnh viễn.
+`_id = eventId` chính là điểm mấu chốt: OpenSearch cung cấp cho chúng tôi một claim nguyên tử, phân tán và an toàn trước replay mà không cần thêm cơ chế phối hợp. Dù consumer có dừng giữa chừng, claim đang xử lý sẽ chặn bản trùng lặp cho đến khi lease hết hạn, còn document đã hoàn tất sẽ chặn nó vĩnh viễn.
 
 ### 4. AI không phải người quyết định tiền
 
@@ -345,7 +345,7 @@ if ("REFUND".equalsIgnoreCase(decision)) {
 }
 ```
 
-**RIGHT.** Khuyến nghị là một giá trị hạng nhất, có kiểu, có thể kiểm toán, và orchestrator coi bất cứ thứ gì chạm tới tiền là "cần con người."
+**RIGHT.** Khuyến nghị là một giá trị hạng nhất, có kiểu và có thể kiểm toán; orchestrator xem mọi đề xuất liên quan đến tiền là "cần con người phê duyệt."
 
 ```java
 // domain/model/Recommendation.java
@@ -369,11 +369,11 @@ public TriageOutcome triage(IncidentContext ctx) {
 }
 ```
 
-Việc của LLM là đóng vai một nhà phân tích nhanh nhạy và tinh mắt. Việc của con người là đưa ra quyết định, còn sổ cái là nguồn sự thật duy nhất. Chúng tôi không bao giờ dựng một đường đi để đầu ra của mô hình chạm tới một lệnh ghi thanh toán mà không có một sự kiện phê duyệt trên vết kiểm toán.
+LLM có nhiệm vụ làm một nhà phân tích nhanh nhạy và tinh ý. Con người có nhiệm vụ đưa ra quyết định, còn sổ cái là nguồn sự thật. Chúng tôi không bao giờ tạo ra đường đi để đầu ra của mô hình dẫn tới thao tác ghi thanh toán nếu không có sự kiện phê duyệt trong vết kiểm toán.
 
 ### 5. Kiểm toán mọi quyết định
 
-**WRONG.** Quyết định xảy ra trong khoảng không. Khi cơ quan quản lý hay khách hàng hỏi "tại sao chuyện này xảy ra?", không có câu trả lời, không trace, không phiên bản mô hình.
+**WRONG.** Quyết định diễn ra trong khoảng không. Khi cơ quan quản lý hoặc khách hàng hỏi "Tại sao chuyện này xảy ra?", không có câu trả lời, trace hay phiên bản mô hình.
 
 ```java
 // WRONG — quyết định vô hình. Không trace, không phiên bản mô hình, không kiểm toán.
@@ -383,7 +383,7 @@ public void triage(AlertEvent event) {
 }
 ```
 
-**RIGHT.** Mọi quyết định là một bản ghi kiểm toán append-only đánh chỉ số bằng `eventId`, xuất bản lên Kafka và đổ vào OpenSearch.
+**RIGHT.** Mọi quyết định đều là một bản ghi kiểm toán append-only được định danh bằng `eventId`, xuất bản lên Kafka và ghi vào OpenSearch.
 
 ```java
 // domain/port/AuditPort.java
@@ -418,11 +418,11 @@ public record AuditEntry(
         boolean humanApproved) {}
 ```
 
-Nếu bạn không thể dựng lại, cho một `eventId` cụ thể, *mô hình đã được hỏi gì, nó trả lời gì, phiên bản nào, và ai đã phê duyệt* — thì bạn không có vết kiểm toán; bạn chỉ có một hy vọng.
+Nếu với một `eventId` cụ thể, bạn không thể dựng lại *mô hình đã được hỏi gì, đã trả lời gì, sử dụng phiên bản nào và ai đã phê duyệt*, thì bạn không có vết kiểm toán; bạn chỉ có hy vọng.
 
 ## Bước làm giàu trace
 
-`IncidentContext` được dựng bằng cách ghép cảnh báo với các trace tương quan của nó. Trace (qua OpenTelemetry → OpenSearch) nói cho mô hình biết lỗi *xảy ra ở đâu*; cảnh báo nói cho nó biết *điều gì quan sát được từ bên ngoài*.
+`IncidentContext` được xây dựng bằng cách ghép cảnh báo với các trace tương quan. Trace (thông qua OpenTelemetry → OpenSearch) cho mô hình biết lỗi *xảy ra ở đâu*; cảnh báo cho biết *điều gì có thể quan sát được từ bên ngoài*.
 
 ```java
 // infrastructure/opensearch/OpenSearchTraceEnricher.java
@@ -445,7 +445,7 @@ public class OpenSearchTraceEnricher {
 }
 ```
 
-Một lời cảnh báo dành cho kỹ sư senior: **khử nhạy cảm trước khi prompt.** Số thẻ, thông tin xác thực, và payload khách hàng không bao giờ được tới tay mô hình. Chúng tôi gỡ PII và dữ liệu thanh toán trước khi serialize `IncidentContext` và log mặt nạ khử nhạy cảm, không phải payload.
+Một cảnh báo quan trọng dành cho kỹ sư senior: **hãy khử dữ liệu nhạy cảm trước khi tạo prompt.** Số thẻ, thông tin xác thực và payload của khách hàng không bao giờ được gửi đến mô hình. Chúng tôi loại bỏ PII và dữ liệu thanh toán trước khi serialize `IncidentContext`, đồng thời log mặt nạ khử dữ liệu thay vì payload.
 
 ```java
 String redact(String raw) {
@@ -456,13 +456,13 @@ String redact(String raw) {
 
 ## Ghi chú vận hành
 
-- **`temperature = 0` + JSON schema.** Đầu ra triage được parse nghiêm ngặt; một lần parse bị lỗi được tính là một lần thất bại của breaker và sẽ chuyển sang rules. Chúng tôi không bao giờ để mô hình tự ứng biến một tên trường.
-- **Ack thủ công trên consumer.** Giao nhận at-least-once + kho claim `eventId` mang lại hiệu ứng exactly-once *trên thực tế* mà không cần Kafka transaction.
-- **Mọi fallback cũng được kiểm toán.** Một triage bằng rule engine có `actor = "rules"` và cùng `eventId`; vết kiểm toán phải kể trọn câu chuyện.
-- **Chi phí là một tính năng.** BYOK nghĩa là mỗi khách hàng tự đo đạc mức tiêu dùng và dung lượng của mình; chúng tôi đo độ trễ, không phải token, cho SLO.
+- **`temperature = 0` + JSON schema.** Đầu ra triage được parse nghiêm ngặt; lỗi parse được tính là lỗi của breaker và kích hoạt fallback sang rules. Chúng tôi không bao giờ để mô hình tự nghĩ ra tên trường.
+- **Ack thủ công trên consumer.** Cơ chế giao nhận at-least-once kết hợp với kho claim `eventId` tạo ra hiệu ứng exactly-once *trên thực tế* mà không cần Kafka transaction.
+- **Mọi fallback cũng được kiểm toán.** Một lần triage bằng rule engine có `actor = "rules"` và cùng `eventId`; vết kiểm toán phải kể trọn câu chuyện.
+- **Chi phí là một tính năng.** BYOK nghĩa là mỗi khách hàng tự chi trả và quản lý mức sử dụng cùng năng lực của mình; để phục vụ SLO, chúng tôi đo độ trễ chứ không đo token.
 
 ## Kết luận
 
-Một LLM là một người phản hồi đầu tiên tuyệt vời và một thẩm quyền cuối cùng tồi tệ. **ai-ops-incident-triage** đối xử với nó đúng như vậy: đọc nhanh, khuyến nghị có kiểu, rào chắn cứng rắn, và một vết kiểm toán đầy đủ. Khi bạn đặt một mô hình bên trong hệ thống kiểm soát tài chính, code bao quanh mô hình quan trọng hơn chính mô hình.
+LLM là một người phản hồi đầu tiên tuyệt vời nhưng là một thẩm quyền cuối cùng tồi tệ. **ai-ops-incident-triage** đối xử với nó đúng như vậy: phân tích nhanh, khuyến nghị có kiểu, rào chắn chặt chẽ và vết kiểm toán đầy đủ. Khi đặt một mô hình bên trong hệ thống kiểm soát tài chính, phần code bao quanh mô hình quan trọng hơn chính mô hình đó.
 
 > Repo: https://github.com/finpay-lab/observability

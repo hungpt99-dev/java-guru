@@ -1,6 +1,6 @@
 ---
 title: "Building a Shared AI Core Library for a Microservice Fleet"
-description: "How FinPay's platform team ships a common-ai library with BYOK clients, retry and circuit breakers, and audit logging that every AI feature consumes."
+description: "How FinPay's platform team ships a shared AI library with BYOK clients, retries and circuit breakers, and audit logging consumed by every AI feature."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -9,21 +9,21 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/platform>
 
-## Why a shared AI library
+## Why a Shared AI Library
 
-Every FinPay team had rolled its own LLM integration: one called OpenAI directly from a controller, another baked the API key into `application.yml`, and a third retried failures by throwing the event back into the dead-letter queue with no timeout. Three services, three different ways of parsing `JsonObject`, zero shared telemetry, and an audit trail that was basically `logger.info("done")`.
+Every FinPay team had built its own LLM integration: one called OpenAI directly from a controller, another baked the API key into `application.yml`, and a third retried failures by sending the event back to the dead-letter queue without a timeout. Three services, three different ways of parsing `JsonObject`, no shared telemetry, and an audit trail that was essentially `logger.info("done")`.
 
-We shipped `platform-ai-core-library` to make AI usage boring, safe, and observable across the platform. It is a Spring Boot module built around hexagonal architecture — `domain/` holds the ports and use cases, `infrastructure/` holds the adapters (Kafka, model providers, OpenSearch, Vault). The repository link is at the bottom too: <https://github.com/finpay-lab/platform>.
+We shipped `platform-ai-core-library` to make AI usage boring, safe, and observable across the platform. It is a Spring Boot module built around hexagonal architecture: `domain/` holds the ports and use cases, while `infrastructure/` holds the adapters (Kafka, model providers, OpenSearch, and Vault). The repository link also appears at the bottom: <https://github.com/finpay-lab/platform>.
 
-## Guardrails, non-negotiable
+## Non-Negotiable Guardrails
 
-Before any code, here are the rules that shape everything:
+Before writing any code, here are the rules that shape everything:
 
-1. **AI is not a money decider.** An LLM output can *enrich* a decision — a fraud score, a suggested limit, a risk label — but the decision to move or block money is made by deterministic rules and humans. The library never returns "approve/reject"; it returns a scored, labeled, auditable observation.
+1. **AI is not a money decider.** An LLM output can *enrich* a decision — a fraud score, a suggested limit, or a risk label — but the decision to move or block money is made by deterministic rules and humans. The library never returns "approve/reject"; it returns a scored, labeled, auditable observation.
 2. **Idempotent by `eventId`.** Every AI call is keyed by a caller-supplied `eventId`. Redelivery, retry, double-click — one event produces exactly one decision.
-3. **Timeout, retry, circuit breaker.** No HTTP call may block without a time bound. TimeLimit, bounded retries with backoff, and a circuit breaker degrade gracefully instead of hammering a failing provider.
+3. **Timeout, retry, circuit breaker.** No HTTP call may block without a time limit. A time limit, bounded retries with backoff, and a circuit breaker enable graceful degradation instead of hammering a failing provider.
 4. **BYOK — the key never lives in our code or logs.** Each tenant brings its own key (`BYOK`), held in Vault/secret manager, resolved by reference, rotated, and *never* serialized into logs, traces, or audit records.
-5. **Audit every decision.** Prompt hash, model, latency, cost, key id, verdict — persisted to OpenSearch for queryable forensics.
+5. **Audit every decision.** The prompt hash, model, latency, cost, key ID, and verdict are persisted to OpenSearch for queryable forensic analysis.
 
 ## Architecture in one picture
 
@@ -41,9 +41,9 @@ Before any code, here are the rules that shape everything:
                  └── VaultCredentialResolver      (BYOK by reference)
 ```
 
-The use case in `domain/` depends only on ports. Swapping OpenAI for Bedrock is a one-file change to the adapter.
+The use case in `domain/` depends only on ports. Swapping OpenAI for Bedrock requires changing only one adapter file.
 
-## WRONG then RIGHT: credentials (BYOK)
+## WRONG, then RIGHT: credentials (BYOK)
 
 ### WRONG
 
@@ -61,7 +61,7 @@ public class MoneyFairyService {
 }
 ```
 
-What's wrong: the key is in the repo, in classpath scans, and in every log line; it is impossible to rotate without a deploy, and it shows up in GitHub's secret-scanner output for the whole internet.
+What's wrong: the key is in the repository, appears in classpath scans and every log line, cannot be rotated without a deployment, and shows up in GitHub's secret-scanner output for the entire internet.
 
 ### RIGHT
 
@@ -131,7 +131,7 @@ public class AnthropicModelAdapter implements ModelProvider {
 
 The key exists only inside the adapter's scope, as a `char[]` that is scrubbed after the call. Nothing logs it, nothing persists it.
 
-## WRONG then RIGHT: timeout, retry, circuit breaker
+## WRONG, then RIGHT: timeout, retry, circuit breaker
 
 ### WRONG
 
@@ -151,7 +151,7 @@ public String callLlm(String prompt) throws IOException, InterruptedException {
 }
 ```
 
-What's wrong: a 30-minute thread hold per call, a recursive retry that doubles latency on every failure, no circuit state — when the provider is down, we burn the whole thread pool waiting on a dead endpoint.
+What's wrong: each call holds a thread for up to 30 minutes, recursive retries double the latency with every failure, and there is no circuit state. When the provider is down, we exhaust the entire thread pool waiting on a dead endpoint.
 
 ### RIGHT
 
@@ -191,9 +191,9 @@ ai-cb:
   waitDurationInOpenState: 30s
 ```
 
-When the breaker is open, the library returns a structured `ModelResult.unavailable()` instead of hanging — the caller can degrade (fall back to a simpler heuristic) because the timeout, not the thread, is what bounds the request.
+When the breaker is open, the library returns a structured `ModelResult.unavailable()` instead of hanging. The caller can degrade (fall back to a simpler heuristic) because the timeout, rather than the thread, bounds the request.
 
-## WRONG then RIGHT: idempotency by `eventId`
+## WRONG, then RIGHT: idempotency by `eventId`
 
 ### WRONG
 
@@ -222,9 +222,9 @@ public void on(TxEvent event) {
 }
 ```
 
-`OutcomeStore` keeps the pair `eventId → verdict` in Redis with a TTL that covers the Kafka redelivery window; `DecisionAudit` writes the long-term record to OpenSearch once, keyed by `eventId` as `_id` so a duplicated write is a no-op on the same shard.
+`OutcomeStore` keeps the pair `eventId → verdict` in Redis with a TTL that covers the Kafka redelivery window. `DecisionAudit` writes the long-term record to OpenSearch once, using `eventId` as `_id`, so a duplicate write is a no-op on the same shard.
 
-## WRONG then RIGHT: auditing the decision
+## WRONG, then RIGHT: auditing the decision
 
 ### WRONG
 
@@ -232,7 +232,7 @@ public void on(TxEvent event) {
 log.info("AI said: " + prompt + " -> " + rawResponse);
 ```
 
-Raw prompts (PII) and unredacted responses land in stdout — unsearchable, with no key id, no model version, no cost.
+Raw prompts (PII) and unredacted responses land in stdout, where they are unsearchable and lack a key ID, model version, or cost information.
 
 ### RIGHT
 
@@ -270,7 +270,7 @@ public class OpenSearchDecisionAudit implements DecisionAudit {
 }
 ```
 
-Every decision is queryable: "all calls using tenant-42's key on model `claude-sonnet-4-5` between two timestamps", latency p95, cost per provider. If a customer disputes a block, we can replay the exact model + prompt hash + verdict that produced it.
+Every decision is queryable: "all calls using tenant-42's key on model `claude-sonnet-4-5` between two timestamps," along with p95 latency and cost by provider. If a customer disputes a block, we can replay the exact model, prompt hash, and verdict that produced it.
 
 ## The Kafka flow end to end
 
@@ -281,12 +281,12 @@ Every decision is queryable: "all calls using tenant-42's key on model `claude-s
 5. The verdict is stored in `OutcomeStore` (short TTL) and `OpenSearchDecisionAudit` (long term).
 6. The enriched result goes to `tx.decisions` where deterministic rules and human review — *not the model* — decide the money action.
 
-## What's still hard
+## What's Still Hard
 
-- **Pinning prompt templates.** Small prompt drift changes verdicts; we version prompts and record the hash in the audit row so a verdict is reproducible.
+- **Pinning prompt templates.** Even small prompt drift can change verdicts; we version prompts and record the hash in the audit row so a verdict is reproducible.
 - **Cost explosion.** Long-context calls and retries multiply token spend; the library caps `maxTokens` and tracks cost per `eventId` in OpenSearch.
 - **BYOK rotation.** Tenants rotate keys via Vault; because keys are references, rotation never triggers a deploy or a code change.
 
-The library is part of <https://github.com/finpay-lab/platform> — both the domain ports and the infrastructure adapters live there, so the guardrails are one dependency away from any service.
+The library is part of <https://github.com/finpay-lab/platform> — both the domain ports and infrastructure adapters live there, making these guardrails available to any service through a single dependency.
 
 Repo: <https://github.com/finpay-lab/platform>
