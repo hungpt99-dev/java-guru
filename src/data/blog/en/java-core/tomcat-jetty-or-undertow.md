@@ -1,6 +1,6 @@
 ---
-title: "Tomcat, Jetty, or Undertow? A Guide to Choosing a High-Performance Java Web Server"
-description: "A detailed comparison of Tomcat, Jetty, and Undertow: thread model, memory footprint, performance, and suitable use cases for each type of Java application."
+title: "Tomcat, Jetty, or Undertow: Choosing a Java Web Server"
+description: "A practical comparison of Tomcat, Jetty, and Undertow, covering request handling, embedding, protocol support, and application fit."
 pubDatetime: 2025-09-13T11:17:00+07:00
 featured: false
 draft: false
@@ -10,98 +10,111 @@ tags:
   - backend
 ---
 
-When developing Java applications, choosing the right web server is a key factor in ensuring performance, scalability, and maintainability. The three most popular choices today are Apache Tomcat, Jetty, and Undertow. Each server has its own pros and cons and suits different types of applications. In this article, we'll analyze them in detail to help you make the right decision.
+Choosing a Java web server is rarely a matter of finding the fastest name on a benchmark. The relevant questions are usually more concrete: which APIs the application needs, whether request handling is blocking or asynchronous, how the server is embedded and configured, and what the deployment environment already standardizes.
+
+Tomcat, Jetty, and Undertow can all serve HTTP traffic and can be embedded in a Java application. They differ in defaults, integration details, and the trade-offs around servlet compatibility, non-blocking I/O, operational familiarity, and application architecture. This article compares those trade-offs without treating a server choice as a universal performance ranking.
 
 ## 1. Apache Tomcat
 
-### Introduction
+### What it is
 
-Tomcat is one of the most popular web servers in the Java ecosystem, developed by the Apache Software Foundation. It fully supports Servlet and JSP, and is often bundled with Spring Boot via the spring-boot-starter-web dependency.
+**[SOURCE FACT]** Tomcat is a widely used servlet container from the Apache Software Foundation. It supports the Servlet API and JSP, and is a common default in Spring Boot applications that use `spring-boot-starter-web`.
 
-### Advantages
+**[ANALYSIS]** Tomcat is a conservative default when the application is built around the servlet programming model, conventional MVC, or existing operational knowledge of Tomcat configuration. Its connector is not inherently “one thread per connection”: with a non-blocking connector, a small set of threads can manage connections while worker threads process requests. The actual behavior depends on the connector and executor configuration.
 
-- Stable and popular: Tomcat has existed for over 20 years, with a large community and extensive documentation.
-- Easy integration with Spring Boot: Auto-configuration, quick deployment.
-- Full Servlet and JSP support: Suitable for traditional web applications.
+### Strengths
 
-### Disadvantages
+- Mature servlet and JSP support for traditional server-side applications.
+- Broad ecosystem adoption and a large body of operational documentation.
+- Straightforward Spring Boot integration and deployment.
+- Multiple connector and executor options, including non-blocking I/O.
 
-- Performance not optimal for extremely high connection counts: Each HTTP connection occupies one thread.
-- Complex configuration for using Virtual Threads (Project Loom).
+### Constraints
 
-### Suitable Applications
+- Blocking application code still consumes request-processing capacity while it waits on a database, downstream service, or other I/O.
+- High concurrency does not disappear when the connector is non-blocking. The application still needs sensible timeouts, connection pools, backpressure, and limits on work submitted to executors.
+- Virtual-thread adoption requires checking the framework, connector, and executor configuration rather than assuming it is a server-only switch.
 
-- Enterprise web applications (MVC), small to medium REST APIs.
-- When long-term stability is needed without extremely high concurrency requirements.
+### Good fit
+
+Tomcat is a sensible choice for servlet-based MVC applications, JSP applications, and small-to-medium REST services when compatibility and operational familiarity matter more than changing the programming model.
 
 ## 2. Jetty
 
-### Introduction
+### What it is
 
-Jetty is a lightweight web server and servlet container, developed by the Eclipse Foundation. It stands out for being lightweight, fast, and flexible, suitable for microservices and embedded applications.
+**[SOURCE FACT]** Jetty is a lightweight HTTP server and servlet container associated with the Eclipse Foundation. It supports non-blocking I/O, asynchronous servlet APIs, embedded deployment, and protocols such as HTTP/2 and WebSocket when configured and supported by the relevant stack.
 
-### Advantages
+**[ANALYSIS]** Jetty is attractive when the server is part of the application rather than a separately managed runtime. Its flexibility is useful, but it also means that thread pools, connection limits, queues, and protocol settings need to be reviewed as one system. “Lightweight” does not remove the cost of blocking work in the application.
 
-- Lightweight and fast startup time.
-- Supports non-blocking I/O and asynchronous servlets.
-- Easy to embed into Java applications without an external server.
-- Good HTTP/2 and WebSocket support.
+### Strengths
 
-### Disadvantages
+- Small, embeddable runtime with fast startup in many deployments.
+- Strong support for asynchronous request handling and non-blocking I/O.
+- Flexible configuration for embedded services and custom HTTP stacks.
+- HTTP/2 and WebSocket support, subject to version and deployment configuration.
 
-- Less popular than Tomcat, smaller community.
-- More complex thread and connection pool management.
+### Constraints
 
-### Suitable Applications
+- The configuration surface can be less familiar to teams standardized on Tomcat.
+- Correct tuning requires understanding the relationship between connection limits, worker threads, queues, and downstream resources.
+- Servlet features and optional integrations may require additional dependencies or explicit configuration.
 
-- REST APIs, microservices, embedded applications.
-- When good performance with many concurrent connections is needed.
-- When wanting to leverage WebSocket or HTTP/2.
+### Good fit
+
+Jetty fits REST services, microservices, embedded applications, and systems that need asynchronous handling or WebSocket/HTTP/2 support without adopting a different server architecture by default.
 
 ## 3. Undertow
 
-### Introduction
+### What it is
 
-Undertow is an extremely lightweight and fast web server, developed by RedHat, and is the default server in WildFly. It supports embedded, non-blocking I/O, and reactive models, making it very suitable for microservices and cloud-native.
+**[SOURCE FACT]** Undertow is a lightweight HTTP server designed for embedded use and non-blocking I/O. It is associated with the WildFly/JBoss ecosystem and can serve servlet-based applications as well as lower-level HTTP handlers.
 
-### Advantages
+**[ANALYSIS]** Undertow’s handler model makes it a good option for applications that want explicit control over non-blocking request processing. It is not automatically a reactive framework, and it does not make blocking application code non-blocking. Spring WebFlux compatibility, if needed, must be checked for the chosen Spring Boot and Undertow versions; a server choice alone does not establish a reactive architecture.
 
-- Extremely high performance: Handles tens of thousands of concurrent connections with low memory footprint.
-- Supports reactive and non-blocking, integrates well with Spring WebFlux.
-- Easy embedded server, fast startup.
+### Strengths
 
-### Disadvantages
+- Embeddable server with a non-blocking handler model.
+- Useful for services that need low-level control over HTTP handling and fast startup characteristics.
+- Servlet support is available, while applications can also use Undertow handlers directly.
+- Suitable for high-concurrency designs when the application and downstream dependencies are also designed for asynchronous or bounded work.
 
-- Less popular than Tomcat and Jetty, limited documentation.
-- No JSP support, so not suitable for traditional web applications.
+### Constraints
 
-### Suitable Applications
+- It does not provide JSP support, so it is not a direct fit for JSP-based applications.
+- Teams may have less existing operational knowledge or documentation for Undertow than for Tomcat.
+- Performance and memory use are workload-dependent; “very low” overhead or a fixed connection count should not be assumed without a representative test.
 
-- REST APIs, microservices, reactive applications.
-- Cloud-native or serverless applications.
+### Good fit
 
-## 4. Overall Comparison
+Undertow is a candidate for embedded services, REST APIs, and applications using non-blocking handlers. It is a poor fit when JSP compatibility is a requirement. For reactive applications, evaluate the complete framework and dependency stack rather than selecting Undertow on the label “reactive.”
 
-| Criteria           | Tomcat             | Jetty                             | Undertow                |
-| ------------------ | ------------------ | --------------------------------- | ----------------------- |
-| Thread model       | Thread-per-request | Thread-per-request / Non-blocking | Non-blocking / Reactive |
-| Memory footprint   | Medium             | Low                               | Very low                |
-| Startup            | Medium             | Fast                              | Very fast               |
-| HTTP/2 support     | Limited            | Good                              | Good                    |
-| Embedded           | Yes                | Very easy                         | Very easy               |
-| JSP support        | Yes                | Yes                               | No                      |
-| Reactive / WebFlux | Limited            | Good                              | Excellent               |
+## 4. Comparison
 
-## 5. Server Selection Based on Application Type
+The table describes general tendencies, not guarantees. Defaults and available features vary by server version, connector, framework, and deployment configuration.
 
-- REST API / Microservices: Undertow or Jetty will handle concurrency better, with lower footprint. Tomcat still works but needs tuning for high traffic.
-- Traditional web applications (MVC / JSP): Tomcat is the safe choice, Jetty works but needs additional JSP dependencies.
-- Reactive / Cloud-native: Undertow is most optimal, Jetty is also good, Tomcat is limited.
+| Criterion | Tomcat | Jetty | Undertow |
+| --- | --- | --- | --- |
+| Request handling | Servlet worker model; non-blocking connectors are available | Servlet worker model plus asynchronous and non-blocking APIs | Non-blocking handlers plus servlet support |
+| Memory footprint | Moderate in a typical servlet deployment; measure the application | Often compact in embedded deployments; measure the application | Often compact in embedded deployments; measure the application |
+| Startup | Depends on application and configuration | Often fast in embedded deployments | Often fast in embedded deployments |
+| HTTP/2 | Available with the appropriate connector and configuration | Available with the appropriate configuration | Available with the appropriate configuration |
+| Embedding | Supported | A strong use case | A strong use case |
+| JSP | Supported | Available with the required JSP integration | Not supported |
+| Reactive framework fit | Depends on the framework and adapter | Depends on the framework and adapter | Depends on the framework and adapter |
+
+## 5. How to choose
+
+**[PROPOSED DESIGN]** Use the following decision process rather than starting with a generic performance claim:
+
+- **Servlet MVC or JSP:** Start with Tomcat. Jetty is also viable, but verify the servlet/JSP dependencies and team operating model.
+- **Embedded service or custom HTTP handling:** Compare Jetty and Undertow first. Choose based on the handler APIs, configuration model, and existing support skills.
+- **Many concurrent connections:** First make the application non-blocking where appropriate, bound queues and connection pools, and set timeouts. Then benchmark the candidate servers using the real request mix. A non-blocking server cannot compensate for unbounded blocking work.
+- **Reactive stack:** Select the framework and its supported server integration as a unit. Do not infer that Undertow, Jetty, or Tomcat alone makes the application reactive.
+- **Existing platform standard:** Prefer the server your organization already monitors, patches, and debugs well unless there is a measured requirement to change.
 
 ## 6. Conclusion
 
-- Tomcat: Stable, popular, suitable for traditional web applications.
-- Jetty: Lightweight, fast, good async support, suitable for microservices or embedded.
-- Undertow: High performance, reactive, suitable for REST APIs and cloud-native applications.
+Tomcat is usually the least surprising choice for servlet and JSP applications. Jetty is a flexible embedded server with strong asynchronous capabilities. Undertow provides an embeddable non-blocking handler model and is a reasonable candidate for services that need that level of control.
 
-Choosing a server isn't just about performance, but also depends on application architecture, technology used, and deployment environment. Understanding the pros and cons of Tomcat, Jetty, and Undertow will help you optimize performance and user experience.
+None of these servers is universally fastest. The outcome depends on blocking behavior, executor and connection-pool limits, downstream latency, protocol configuration, and the framework around the server. Establish the application requirements first, then validate the shortlist with production-like load and operational checks.
