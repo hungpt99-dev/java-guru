@@ -264,16 +264,6 @@ Replay cũng phải là yêu cầu từ đầu. Lưu input và decision có vers
 6. Đo business outcome cùng latency và error, đồng thời giữ identifier cardinality cao ngoài Prometheus label.
 7. Minimize data nhạy cảm gửi tới AI provider và coi external text là untrusted data.
 
-## Câu hỏi phỏng vấn
-
-- Ai có authority block hoặc settle payment, và điều gì xảy ra khi AI signal mâu thuẫn với authority đó?
-- Với throughput và model latency đã cho, cần bao nhiêu provider call concurrent và quota nào giới hạn thiết kế?
-- Operation chính xác nào ngăn hai Kafka consumer claim cùng một event?
-- Điều gì xảy ra sau crash giữa external side effect và idempotency record?
-- Có thể xóa OpenSearch index rồi rebuild mà không thay đổi ledger không?
-- Model, prompt, feature snapshot và policy version nào giải thích một quyết định lịch sử?
-- False positive, false negative, provider outage và model regression được phát hiện thế nào?
-
 ## Tài liệu tham khảo
 
 - Apache Kafka, “Message Delivery Semantics”: <https://kafka.apache.org/documentation/#semantics>

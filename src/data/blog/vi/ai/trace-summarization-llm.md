@@ -254,14 +254,3 @@ Chúng tôi sẽ thiết kế structured extractor và replay path trước khi 
 4. Coi LLM output là AI signal đi qua policy, không bao giờ là money command.
 5. Giới hạn evidence, concurrency, retry, token cost và replay cost trước khi scale worker.
 6. Audit input và version cần cho việc tái lập, đồng thời minimize PII gửi tới provider.
-
-## Câu hỏi phỏng vấn
-
-- Điều gì xảy ra nếu consumer crash sau khi provider trả kết quả nhưng trước khi summary được lưu?
-- Vì sao `exists()` rồi `save()` không phải idempotency guarantee?
-- Chọn span nào, và chứng minh selector không làm lộ dữ liệu KYC hoặc payment ra sao?
-- Concurrency ở 10K TPS với provider latency 2 giây và 10 giây là bao nhiêu?
-- Provider error nào retry được, và ngăn retry storm thế nào?
-- Nếu xóa OpenSearch, source nào dùng để rebuild và replay có gọi model lại không?
-- Phát hiện model regression thế nào mà không đưa `traceId` vào Prometheus label?
-- Authority để refund hoặc block tiền nằm ở đâu, và vì sao service này không được thực hiện?

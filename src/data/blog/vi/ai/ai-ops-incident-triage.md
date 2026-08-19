@@ -349,14 +349,6 @@ Chúng tôi cũng sẽ biến AI core library thành platform dependency có con
 6. Audit version, evidence, decision, fallback và approval để có thể giải thích và đánh giá kết quả.
 7. Giảm thiểu PII và coi model failure, uncertainty, rollback là các state bình thường.
 
-## Câu Hỏi Phỏng Vấn
-
-- Điều gì xảy ra khi provider hoàn thành sau khi client timeout?
-- Hai consumer tránh cùng claim một event như thế nào?
-- Authority của refund hoặc thay đổi KYC status là hệ thống nào?
-- Làm sao replay sáu tháng incident mà không tạo provider hoặc approval side effect?
-- Metric nào cho thấy model regression trước khi khách hàng báo lỗi?
-
 ## Tài Liệu Tham Khảo
 
 - Tài liệu Apache Kafka về delivery semantics: https://kafka.apache.org/documentation/#semantics

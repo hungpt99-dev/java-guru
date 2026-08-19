@@ -349,14 +349,6 @@ We would also make the AI core library a platform dependency with conformance te
 6. Audit versions, evidence, decisions, fallbacks, and approvals so a result can be explained and evaluated.
 7. Minimize PII and make model failure, uncertainty, and rollback normal states.
 
-## Interview Questions
-
-- What happens when the provider completes after the client times out?
-- How do two consumers avoid both claiming the same event?
-- What is the authority for a refund or a KYC status change?
-- How would you replay six months of incidents without creating provider or approval side effects?
-- Which metric reveals a model regression before customers report it?
-
 ## References
 
 - Apache Kafka documentation on delivery semantics: https://kafka.apache.org/documentation/#semantics

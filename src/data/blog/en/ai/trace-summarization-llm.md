@@ -254,14 +254,3 @@ We would design the structured extractor and replay path before choosing a model
 4. Treat LLM output as an AI signal that passes through policy, never as a money command.
 5. Bound evidence, concurrency, retries, token cost, and replay cost before scaling workers.
 6. Audit the inputs and versions needed to reproduce a result, while minimizing PII sent to providers.
-
-## Interview Questions
-
-- What exactly happens if the consumer crashes after the provider returns but before the summary is stored?
-- Why is `exists()` followed by `save()` not an idempotency guarantee?
-- Which spans are selected, and how do you prove the selector does not leak KYC or payment data?
-- What is the concurrency at 10K TPS with 2-second and 10-second provider latency?
-- Which provider errors are retryable, and how do you prevent a retry storm?
-- If OpenSearch is deleted, what is the source used to rebuild it, and will replay call the model again?
-- How do you detect model regression without putting `traceId` in Prometheus labels?
-- Where is the authority to refund or block money, and why can this service not exercise it?

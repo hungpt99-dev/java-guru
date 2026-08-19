@@ -264,16 +264,6 @@ We would also make replay a design requirement at the beginning. Capture version
 6. Measure business outcomes as well as latency and errors, while keeping high-cardinality identifiers out of Prometheus labels.
 7. Minimize sensitive data sent to AI providers and treat external text as untrusted data.
 
-## Interview Questions
-
-- Who has authority to block or settle a payment, and what happens when the AI signal disagrees with that authority?
-- Given throughput and model latency, how many concurrent provider calls are required, and what quota limits the design?
-- What exact operation prevents two Kafka consumers from claiming the same event?
-- What happens after a crash between an external side effect and the idempotency record?
-- Can an OpenSearch index be deleted and rebuilt without changing the ledger?
-- Which model, prompt, feature snapshot, and policy version explain a historical decision?
-- How are false positives, false negatives, provider outages, and model regressions detected?
-
 ## References
 
 - Apache Kafka documentation, “Message Delivery Semantics”: <https://kafka.apache.org/documentation/#semantics>
