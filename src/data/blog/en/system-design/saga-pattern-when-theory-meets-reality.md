@@ -1,6 +1,6 @@
 ---
-title: "Saga Pattern: When Theory Meets Reality"
-description: "Real-world lessons from implementing Saga Pattern: partial failure, imperfect compensation, duplicate events, and the trade-off between Orchestration and Choreography."
+title: "Saga Pattern: Failure Modes, Trade-offs, and Design Choices"
+description: "A practical review of Saga transactions: partial failure, compensation, duplicate events, eventual consistency, and the trade-offs between orchestration and choreography."
 pubDatetime: 2025-09-02T09:02:00+07:00
 featured: true
 draft: false
@@ -10,129 +10,97 @@ tags:
   - microservices
 ---
 
-You open your machine, open your IDE, ready to implement an ordering flow in microservices. In your head, you still picture what you've read about Saga Pattern:
+The Saga pattern is often introduced as a simple answer to distributed transactions: each service commits its local transaction, and a later failure triggers compensating actions. That description is useful, but incomplete. A Saga does not provide a distributed rollback. It coordinates a sequence of local commits and defines how the system should recover when the sequence cannot complete.
 
-"Oh, easy. Each service handles its own transaction, on error, rollback with compensate. Eventual consistency? No big deal, Saga handles it all."
+Consider an order flow:
 
-Sounds great, sounds neat… but when coding for real, you realize things aren't that smooth.
+- Order Service creates the order.
+- Payment Service charges the customer.
+- Inventory Service reserves or reduces stock.
+- Shipping Service creates a shipment.
 
-You imagine the ideal flow in your head:
+The difficult cases are not the successful path. They are timeouts, duplicate delivery, services that recover at different times, and side effects that cannot be undone. This article covers those failure modes, the limits of compensation, eventual consistency, orchestration versus choreography, and when a Saga is the wrong tool.
 
-- Order Service creates order.
-- Payment Service deducts money.
-- Inventory Service reduces stock.
-- Shipping Service creates shipment.
+## 1. Partial Failure Is the Normal Failure Mode
 
-In the books, if any step fails → compensate → everything returns to the initial state, a perfect system. In your head, it's a smooth dance.
+**[SOURCE FACT]** A distributed workflow can complete a local transaction in one service while another service does not observe the resulting event. For example, Payment Service may charge the customer, while Order Service does not receive the corresponding message because of a network timeout.
 
-But reality… is a different dance. A network timeout, a duplicate event, or an imperfect compensation, and that dance quickly becomes… an operational nightmare.
+The system now has an ambiguous state. The charge may have succeeded even though the caller received a timeout. Retrying without a clear identity for the operation can charge the customer again. The same class of problem can produce duplicate stock changes or duplicate shipments.
 
-## 1. Partial Failure – The First Shock
+**[ANALYSIS]** A timeout does not tell the caller whether the operation failed. It only says that the result was not confirmed within the timeout window. The workflow therefore needs a way to distinguish a new operation from a retry of an operation that may already have succeeded.
 
-You imagine: Payment Service deducts money successfully, but Order Service hasn't received the event due to network timeout.
+**[PROPOSED DESIGN]** Give each business operation a stable idempotency key (a key used to recognize repeated requests). Each consumer should record the key and the result it applied, then return the recorded result when the same operation is delivered again. Retry policies should also have explicit limits and a path to a retry queue or manual review. Idempotency is not optional when messages or requests can be retried.
 
-Result? Customer loses money, order not created. You try retrying, but things get worse: duplicate event → money deducted twice, stock reduced incorrectly, duplicate shipment.
+## 2. Compensation Is Not Rollback
 
-Partial failure and duplicate events are not exceptions, they are the reality of microservices.
+**[SOURCE FACT]** A database rollback can undo work inside one local transaction. It cannot reliably undo an external side effect that has already happened.
 
-You realize: if partial failure is already complex, can rollback and compensation save the situation?
+Examples include:
 
-## 2. Compensation – When Rollback Is Never Perfect
+- An SMS or email has already been sent.
+- A shipping label has already been created.
+- A third-party booking has already been accepted.
 
-Textbooks teach: rollback just needs to call the compensate function → everything returns to the initial state.
+The corresponding compensating action may be a cancellation message, a refund, a credit, or a request to cancel the external booking. These actions change the business state; they do not restore the world to its exact previous state.
 
-Reality:
+**[ANALYSIS]** Compensation is therefore an application-level recovery action. It can be incomplete, delayed, rejected by a dependency, or require a human decision. A Saga should model these outcomes explicitly instead of treating compensation as an automatic guarantee of correctness.
 
-- Email already sent → cannot undo.
-- Shipment label already created → cannot reverse.
-- Third-party booking → rollback nearly impossible.
+**[PROPOSED DESIGN]** Define a compensation policy for every step that has an externally visible side effect. Record the Saga state and each step's outcome. Make compensation retryable and idempotent where possible, and expose unresolved cases to operations. For example, a payment confirmation that cannot be withdrawn may require a cancellation notice or a credit rather than an attempt to recall the original message.
 
-Example: a service sends an SMS confirming payment. If the transaction fails, you can't "recall" the sent SMS. Compensation only makes up with another action, like sending a cancellation notice or creating credit.
+## 3. Eventual Consistency Has a Product Cost
 
-Saga is not magic. Compensation is only approximately correct, sometimes requiring manual intervention.
+**[SOURCE FACT]** In a Saga, services commit independently. Their views of the workflow can therefore be temporarily different. A customer may see `Processing` after the payment has been accepted but before the order has been created or the next event has been handled.
 
-But the story doesn't end here. If the state isn't synchronized, what will the customer see? This is when you need to think about Eventual Consistency.
+**[ANALYSIS]** Eventual consistency is not just a storage property. It affects user experience, customer support, and operations. A status page that implies `Completed` before all required steps finish is misleading. A status of `Processing` without a recovery path is also insufficient.
 
-## 3. Eventual Consistency – An Unavoidable Trade-Off
+**[PROPOSED DESIGN]** Treat intermediate states as part of the product contract. Show an honest status, define what happens when a step is delayed, and provide a clear outcome when the Saga ends in failure or requires review. Monitor event age, failed steps, compensation attempts, and unresolved Sagas. Reconciliation should compare the state held by participating services and identify cases that need correction.
 
-Data will eventually synchronize, but customers may see: "Processing", while money has been deducted, order not yet created.
+## 4. Orchestration and Choreography
 
-You realize:
+Orchestration uses a coordinator to issue commands and track the workflow. Choreography lets services react to events and determine their own next action. Neither model removes the underlying failure modes.
 
-- UX must hide temporary states.
-- The system needs monitoring, retry, reconciliation.
-- Alerts must be clear.
+| Criterion | Orchestration | Choreography |
+| --- | --- | --- |
+| Debugging and monitoring | Central Saga state is easier to inspect | Requires consistent correlation and event logging across services |
+| Failure concentration | The orchestrator is an additional dependency that must be made highly available | No central coordinator, but responsibility is spread across services |
+| Duplicate events | A coordinator can centralize retries and state transitions | Each consumer must implement idempotency and failure handling |
+| Change management | The workflow is explicit, but the coordinator changes as the flow changes | Services can add event consumers, but event contracts and interactions become harder to reason about |
+| Scaling | The coordinator needs its own capacity and availability planning | Individual consumers can scale independently |
 
-Eventual consistency isn't free. It requires you to accept temporary risk. Otherwise, you'll receive a flood of support tickets from customers.
+**[ANALYSIS]** Calling choreography "free of a single point of failure" is too broad. It removes one central coordinator, not the need for reliable brokers, consumers, observability, or recovery procedures. Likewise, orchestration does not automatically make a workflow correct; it only makes the control flow more explicit.
 
-As you're calculating UX, a question flashes: should you manage the flow with a "central director" or let services handle it themselves? This is when Orchestration and Choreography appear.
+Suppose the business adds a service that issues a promotional voucher after an order is completed. In an orchestrated design, the coordinator is updated to include the new step or branch. In a choreographed design, the voucher service consumes the order-completed event. The second option may reduce changes to existing services, but the consumer still needs idempotency, a retry policy, and a defined behavior for delayed or duplicate events.
 
-## 4. Orchestration or Choreography – A Painful Choice
+**[PROPOSED DESIGN]** Choose the model based on ownership, workflow complexity, observability, and failure handling. Whichever model is selected, propagate a correlation identifier, make state transitions inspectable, and document event contracts and retry behavior.
 
-You have to choose:
+## 5. When a Saga Is the Wrong Tool
 
-| Criteria                | Orchestration                      | Choreography                                    |
-| ----------------------- | ---------------------------------- | ----------------------------------------------- |
-| Debug & Monitoring      | Easy to track Saga state           | Hard to debug, needs detailed logging           |
-| Single Point of Failure | Has orchestrator                   | No SPoF, distributed                            |
-| Duplicate Event         | Easy to control                    | Prone to occur, needs idempotency & retry queue |
-| Flexibility             | Standard flow, less flexible       | Flexible when adding/removing services          |
-| Deployment & Scaling    | Orchestrator needs special scaling | Easy to scale individual services               |
+**[SOURCE FACT]** Some business operations require a strong consistency boundary. A transfer between two accounts is a common example: debiting one account and crediting another must not leave balances in an ambiguous state.
 
-An example: you want to add a service that sends promotional vouchers after an order is completed.
+**[ANALYSIS]** A Saga can define a compensating credit after a debit, but the interval between those actions is a real business risk. If the credit event is lost, delayed, or rejected, the system needs detection and recovery. That may be acceptable for some workflows, but it is a poor default for an operation whose invariant requires an atomic decision.
 
-- Orchestration: update orchestrator flow, easy to control.
-- Choreography: add listener for event, but must ensure idempotency and retry queue, prone to errors if events are delayed or duplicated.
+Two-Phase Commit (2PC) is one possible alternative when the participating resources support it and its coordination and availability costs are acceptable. It coordinates prepare and commit phases so participants agree on a transaction outcome. It is not a universal solution: it introduces its own operational and performance trade-offs, and not every service or external dependency can participate.
 
-You realize: there's no perfect choice. Easy debugging or avoid SPoF? Accept temporary inconsistency or strict consistency? Saga is not just technique — it's continuous trade-offs.
+**[PROPOSED DESIGN]** Start with the business invariant, not the pattern. If temporary inconsistency and compensation are acceptable, a Saga may fit. If the operation requires an atomic boundary, prefer a design that provides that boundary, such as a local transaction, synchronous coordination, or 2PC where appropriate. Do not introduce a Saga merely because the system uses microservices.
 
-And as you weigh options, a red warning appears: Saga can't always save the day, especially for systems requiring strong consistency.
+## 6. Operational Requirements
 
-## 5. Saga Is Not the Solution for Every Problem
+The pattern is only as reliable as its failure handling. Before adopting it, make the following decisions explicit:
 
-Imagine: banking, transferring money between two accounts. You decide to use Saga: deduct from A, credit to B, log the transaction.
+- Define an idempotency key and deduplication behavior for every retryable command and event.
+- Specify timeout, retry, and backoff behavior. An uncontrolled retry loop can amplify an outage.
+- Persist Saga state and step outcomes so operators can inspect what happened.
+- Define compensation for each step, including steps that cannot be reversed.
+- Route exhausted retries and unresolved compensation to a controlled recovery process.
+- Expose intermediate status to users without implying that the workflow has completed.
+- Implement monitoring and reconciliation for delayed, failed, and divergent state.
 
-Initially you're confident: any step fails → compensate → everything's fine.
-
-Then disaster strikes. Payment Service has deducted money, but Ledger Service hasn't received the event. Customer panics, support team is busy. Compensate? Can't save it. Only manual intervention remains.
-
-At this point, you understand: Saga is not suitable for banking transactions. A safer solution: 2-Phase Commit (2PC).
-
-- 2PC ensures strong consistency: synchronous commit, fail → immediate rollback.
-- Avoids dangerous partial failure: customers don't see temporarily incorrect balances.
-- Absolute integrity: critical transactions are always accurate.
-
-Lesson: choose the wrong tool, and microservices can become an operational nightmare, even if you just wanted to "apply techniques for show."
-
-## 6. Real-World Lessons When Applying Saga
-
-After all the shocks from partial failure, approximate compensation, duplicate events, and model choices, you begin to draw "deep" lessons.
-
-You remember the first time you deployed Saga: events were delayed, compensation was called in the wrong order, customers called support continuously. At that point, you understood:
-
-- Uncontrolled retry = disaster. Idempotency is mandatory.
-- Compensation doesn't save everything. It only reduces risk; sometimes you still need manual intervention.
-- Customers see temporarily unsynchronized states? UX must be clever, alerts must be clear, reconciliation always ready.
-- Implementation models have no perfect choice. Orchestration is easy to debug but has SPoF; Choreography is distributed but hard to trace. Choose the right flow, not based on emotion.
-- Saga is not for every system. If the business requires strong consistency — e.g., banking — 2PC or synchronous transactions are still safer choices.
-
-Looking back, you realize: Saga is not magic, but a refined tool. Applied correctly → reduces risk, flexible. Applied wrong → operational nightmare.
-
-The most important thing: don't apply it because it's "cool", apply it because it truly fits your business.
+These are design requirements, not implementation details to add after the first incident. A workflow that only describes the happy path is not a complete Saga design.
 
 ## Conclusion
 
-Saga Pattern is an excellent tool for complex distributed transactions, but not the solution for every problem.
+Saga is a coordination pattern for workflows that span independent local transactions. It manages partial failure by combining forward actions with compensating actions, but it does not provide a perfect rollback or eliminate inconsistency.
 
-Key points to remember:
+Use it when the business can tolerate intermediate states and has a credible recovery model. Make retries idempotent, make state observable, design compensation as an explicit business action, and keep reconciliation available. Use orchestration when explicit central control helps, or choreography when independently reacting services are a better fit, while accepting the observability and coordination costs of either choice.
 
-- Understand trade-offs and edge cases.
-- Prepare monitoring, alerts, retry, reconciliation, and even manual intervention.
-- Choose between Orchestration and Choreography based on flow, debugging, SPoF.
-- Evaluate system characteristics before implementing Saga, avoiding environments requiring strong consistency where 2PC or other synchronous transactions would be more appropriate.
-
-After reading this, you'll ask yourself:
-
-"Does this business really need Saga, or am I just creating complexity for myself?"
-
-Understanding this clearly, you'll implement Saga safely, flexibly, and effectively, rather than being drawn into an entirely avoidable operational nightmare.
+For operations that require an atomic consistency boundary, choose a mechanism designed for that requirement instead. The useful question is not whether Saga is fashionable. It is whether its failure model matches the business invariant.
