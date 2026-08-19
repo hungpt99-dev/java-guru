@@ -1,6 +1,6 @@
 ---
-title: "Understanding Zero Trust in 5 Minutes"
-description: "Explaining the Zero Trust security model: core principles, comparison with traditional security, and practical examples."
+title: "Zero Trust: Principles and Practical Examples"
+description: "A practical introduction to Zero Trust, including its principles, how it differs from perimeter security, and example access flows."
 pubDatetime: 2025-09-03T10:12:00+07:00
 featured: false
 draft: false
@@ -9,70 +9,80 @@ tags:
   - security
 ---
 
-If you work in technology, you've probably heard of Zero Trust — a modern security model that helps prevent hackers and protect important data. This article will help you understand Zero Trust quickly, with illustrative examples, pros and cons, and differences from traditional security.
+Zero Trust is a security approach for systems where users, devices, services, and data may be distributed across corporate networks, cloud environments, and the public internet. The difficult part is not naming the principle; it is deciding what should be verified for each request, how access should be limited, and how the system should respond when context changes.
 
-## 1. What is Traditional Security? (The "Implicit Trust" Model)
+This article explains the difference between perimeter-based security and Zero Trust, introduces the main principles, and applies them to common access scenarios.
 
-Traditionally, most enterprises use a "Castle-and-Moat" security model:
+## 1. Perimeter-Based Security and Implicit Trust
 
-- The internal network is considered "inside the castle" — safe.
-- The moat (firewall) is built at the network perimeter to block threats from outside.
-- Once you've crossed the moat (connected to the internal network), you are trusted by default and can broadly access many resources.
+**[SOURCE FACT]** A traditional enterprise design often treats the internal network as a more trusted zone than the public internet. A firewall protects the network perimeter, and a user or device that has entered the network may receive access based largely on its network location.
 
-Problem: If a hacker steals login credentials or infects a device inside the network with malware, they can move laterally and access the entire system.
+This is commonly described as a castle-and-moat model:
 
-## 2. What is Zero Trust? (The "Never Trust by Default" Model)
+- The internal network is the area inside the perimeter.
+- The firewall is the boundary that filters external traffic.
+- Network access can become a proxy for trust.
 
-Simple definition:
+**[ANALYSIS]** This model makes lateral movement easier after an account is compromised or a device inside the network is infected. Passing the perimeter does not prove that the request is legitimate, that the device is healthy, or that the user needs access to every reachable resource.
 
-Zero Trust is a "Never Trust, Always Verify" security model. Every access request, whether from inside or outside the network, is considered suspicious and must go through rigorous identity verification, authorization, and encryption processes.
+## 2. What Zero Trust Means
 
-This means:
+**[SOURCE FACT]** Zero Trust is commonly summarized as "never trust, always verify." It does not treat network location as sufficient evidence of trust. An access request is evaluated using identity, authorization policy, device and request context, and the security controls required for the resource.
 
-- There is no default "safe zone". The internal network perimeter is no longer considered a trust boundary.
-- Every access to a resource must be authenticated, authorized, and encrypted.
-- Access is granted on the principle of least privilege and only for the necessary duration (Just-In-Time).
+In practice:
 
-## 3. Core Principles of Zero Trust
+- There is no permanently trusted internal zone.
+- Each resource must enforce authentication and authorization.
+- Encryption protects communication where appropriate.
+- Access follows least privilege and should be limited in scope and duration when possible.
 
-According to standard frameworks (such as NIST), Zero Trust is based on three main pillars:
+Zero Trust is not the same as asking for a password on every request. Verification can use an existing session, a service identity, device posture, risk signals, and step-up authentication such as MFA when policy requires it.
 
-1. Verify Explicitly: Always authenticate and authorize based on all available data points (user identity, location, device status, service being accessed, etc.).
-2. Use Least Privilege Access: Only grant the minimum access needed for users to perform their tasks and for the shortest possible time.
-3. Assume Breach: Design systems with the assumption that attackers are already inside the network. From there, implement micro-segmentation to prevent lateral movement, encrypt data, and continuously monitor to minimize the blast radius of a breach.
+## 3. Core Principles
 
-## 4. Specific Examples
+**[SOURCE FACT]** The following three principles are a concise, commonly used summary of Zero Trust guidance:
 
-### 4.1 Accessing Company Email
+1. **Verify explicitly.** Authenticate and authorize using the available signals, such as user identity, device state, location, requested service, and request context.
+2. **Use least privilege.** Grant only the permissions required for the task. Limit the scope and lifetime of access where the system supports it, including Just-In-Time access.
+3. **Assume breach.** Design as though an attacker may already have obtained access to part of the environment. Use micro-segmentation, encryption, logging, and continuous monitoring to reduce lateral movement and the blast radius of an incident.
 
-- Traditional security: Employees on the internal network access email without additional authentication.
-- Zero Trust: Even if an employee is on the company network, when opening email containing sensitive data, the system checks identity (SSO login status), device status (security patches installed), and may require Multi-Factor Authentication (MFA) if abnormal context is detected.
+These principles are design constraints, not a single product. Identity providers, policy engines, endpoint controls, service-to-service authentication, network controls, and monitoring may all contribute to an implementation.
 
-### 4.2 Accessing Internal Servers
+## 4. Access Scenarios
 
-- Traditional security: One network login grants access to all servers in the same network segment.
-- Zero Trust: Each server is protected as a separate "castle" through micro-segmentation. Server access requires authorization by a centralized Identity Provider and is only granted if the user/algorithm meets the correct policy.
+### 4.1 Company Email
+
+**[ANALYSIS]** In a perimeter-based design, being on the internal network may be enough to reach email or may reduce the amount of additional verification required.
+
+**[PROPOSED DESIGN]** An email service can evaluate the user's SSO session, device posture, request context, and resource sensitivity. It can require MFA when policy detects an elevated risk and can limit access when the device does not meet the required security state.
+
+### 4.2 Internal Servers
+
+**[ANALYSIS]** A network login that exposes a broad server segment creates unnecessary lateral-movement paths. Network reachability is not equivalent to authorization.
+
+**[PROPOSED DESIGN]** Treat each server or service as a separately protected resource. An identity provider and policy enforcement point can authorize a specific user, workload, or automation client for a specific operation. Micro-segmentation reduces which resources are reachable even if one credential is compromised.
 
 ### 4.3 Remote Workers
 
-- Traditional security: Use VPN to "tunnel" into the internal network, then be trusted with broad access.
-- Zero Trust: Instead of traditional VPN, employees connect directly to each application through security proxies (e.g., ZTNA - Zero Trust Network Access). The system continuously assesses risk (login location, behavior) and can block access if anomalies are detected, even after successful authentication.
+**[ANALYSIS]** A traditional VPN can provide a user with network-level connectivity, but connectivity alone does not express which applications or actions the user actually needs.
 
-## 5. Zero Trust vs Traditional Security
+**[PROPOSED DESIGN]** Zero Trust Network Access (ZTNA) can expose individual applications through security proxies rather than placing the user directly on the internal network. Policies can evaluate location, device state, and behavior, and can deny or step up verification after authentication if the context becomes anomalous.
 
-| Criteria        | Traditional Security (Castle-and-Moat) | Zero Trust                                                     |
-| --------------- | -------------------------------------- | -------------------------------------------------------------- |
-| Philosophy      | "Trust, then verify"                   | "Never Trust, Always Verify"                                   |
-| Trust boundary  | At the network perimeter               | At each resource (user, device, app, data)                     |
-| Authentication  | Once when entering the network         | Continuous and contextual verification for each access session |
-| Access rights   | Often broadly granted by network zone  | Principle of Least Privilege and Just-In-Time                  |
-| Data protection | Focused on perimeter defense           | Micro-segmentation and encryption everywhere                   |
-| Assumption      | Threats come from outside              | Assume Breach                                                  |
+## 5. Zero Trust and Perimeter Security
+
+| Criterion | Perimeter-based security | Zero Trust |
+| --- | --- | --- |
+| Trust model | Network location provides an initial trust signal | Each request is evaluated explicitly |
+| Trust boundary | Primarily the network perimeter | The individual resource and its access policy |
+| Authentication | Often emphasized at network entry | Based on the identity, context, and session for the requested resource |
+| Authorization | May be broad within a network zone | Least privilege, with Just-In-Time access where appropriate |
+| Containment | Perimeter controls limit external entry | Segmentation, encryption, and monitoring limit movement and impact |
+| Security assumption | The internal network is more trusted | Assume that part of the environment may be compromised |
+
+This comparison describes design tendencies, not a claim that every legacy or modern system implements the model in exactly this way.
 
 ## 6. Conclusion
 
-Zero Trust is not a product, but a security strategy and framework. It is the inevitable choice for the era of remote work, cloud computing, and today's sophisticated threats.
+Zero Trust is a security strategy and set of design principles, not a product. Its central change is to stop using network location as a default authorization decision. Instead, each resource evaluates identity, context, policy, and the minimum permissions required for the operation.
 
-This model requires a mindset shift from "Trust by default" to "Continuous verification", helping organizations protect their data and applications more flexibly and effectively, regardless of where they reside.
-
-To put it humorously: Zero Trust is like "always being suspicious of everyone, including yourself", but in return, it creates a defense system with superior threat detection and prevention capabilities.
+The approach is useful for remote access, cloud services, internal applications, and service-to-service communication. It does not eliminate breaches. It is intended to reduce the chance that one compromised account or device leads to broad access, and to make access decisions and security events easier to observe and control.

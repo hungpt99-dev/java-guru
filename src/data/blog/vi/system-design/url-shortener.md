@@ -1,45 +1,60 @@
 ---
-title: "Thiết kế Hệ thống Rút ngắn URL quy mô 1 tỷ lượt chuyển hướng/ngày"
-description: "Thiết kế production cho dịch vụ rút ngắn URL có độ trễ thấp, liên kết bền vững, chuyển hướng toàn cầu, alias tùy chỉnh, hết hạn và phân tích bất đồng bộ."
+title: "Thiết kế dịch vụ rút ngắn URL cho lưu lượng chuyển hướng lớn"
+description: "Thiết kế thực tế cho mapping URL bền vững, chuyển hướng độ trễ thấp, alias tùy chỉnh, hết hạn và analytics bất đồng bộ."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: ["system-design", "architecture"]
 draft: false
 featured: false
 ---
 
-## 1. Problem
+## 1. Bài toán
 
-Ta xây dựng một dịch vụ rút ngắn URL cho người dùng và ứng dụng, biến một đích đến dài thành liên kết ngắn ổn định. Liên kết có thể được tạo tự động hoặc bằng alias tùy chỉnh; sau đó phục vụ chuyển hướng HTTP 301 (vĩnh viễn) hoặc 302 (tạm thời). Chủ sở hữu có thể xem phân tích lượt nhấp và đặt thời gian sống (TTL).
+Ta cần một dịch vụ biến destination dài thành short URL ổn định. Client có thể yêu cầu key được sinh tự động hoặc alias tùy chỉnh. Redirect có thể là vĩnh viễn (`301`) hoặc tạm thời (`302`). Owner có thể vô hiệu hóa link, đặt thời gian hết hạn và xem analytics về lượt nhấp.
 
-Dịch vụ phải giữ các liên kết vĩnh viễn: sau khi alias được công bố, nó không được âm thầm trỏ sang nơi khác. Lưu lượng chuyển hướng là đường đi quan trọng, còn phân tích được cố ý tách khỏi đường đi đó. Ta giả định tỷ lệ đọc:tạo là 100:1, người dùng toàn cầu và client có thể retry sau timeout.
+Điểm khó không nằm ở việc sinh một chuỗi ngắn. Vấn đề là giữ redirect path nhanh và sẵn sàng, đồng thời bảo toàn ý nghĩa của alias đã công bố. Redirect nhạy với độ trễ; analytics hữu ích nhưng có thể xử lý bất đồng bộ. Client cũng có thể retry sau timeout, nên thao tác tạo link cần idempotency.
 
-Mục tiêu phi chức năng:
+Các yêu cầu và con số lưu lượng trong bài là đầu vào lập kế hoạch, không phải số đo của một hệ thống production cụ thể. Bài dùng các nhãn sau:
 
-- p99 chuyển hướng dưới 50 ms tại edge dịch vụ, không tính mạng của người dùng và việc tải đích đến.
-- Availability hàng tháng 99.99% cho việc phục vụ chuyển hướng; tạo liên kết và phân tích có thể có SLO thấp hơn riêng.
-- Key sinh tự động không va chạm và quyền sở hữu alias tùy chỉnh được tuyến tính hóa.
-- Không mất mapping đã commit; phân tích có thể trễ nhưng không bị nhân đôi âm thầm trong báo cáo.
-- Đường đọc vẫn hoạt động trong thời gian region ghi hoặc hệ thống phân tích gặp sự cố.
+- **[SOURCE FACT]**: yêu cầu hoặc đầu vào được cung cấp cho bài toán này.
+- **[ASSUMPTION]**: giả định rõ ràng để sizing hoặc minh họa.
+- **[ANALYSIS]**: hệ quả rút ra từ các đầu vào đó.
+- **[PROPOSED DESIGN]**: một phương án triển khai đáp ứng các yêu cầu.
 
-## 2. Scale Estimation
+### Yêu cầu [SOURCE FACT]
 
-Các con số dưới đây là giả định lập kế hoạch, không phải tuyên bố về một sản phẩm hiện hữu cụ thể.
+- Alias đã công bố không được âm thầm trỏ sang destination khác về sau. Vì vậy alias hết hạn không được tái sử dụng.
+- Lưu lượng redirect là critical path. Analytics không được là điều kiện để hoàn tất redirect.
+- Người dùng ở nhiều khu vực, và client có thể retry sau timeout.
+- Read path nên vẫn hữu dụng khi write region hoặc hệ thống analytics gặp sự cố.
 
-- Giả định 100 triệu client hoạt động hằng ngày tạo chuyển hướng. Với 10 chuyển hướng/client/ngày: `100M x 10 = 1B redirects/day`.
-- Tốc độ chuyển hướng trung bình là `1B / 86,400 = 11,574 requests/s`.
-- Đỉnh theo ngày và chiến dịch tăng 10x cho `115,740 requests/s`; cấp năng lực 150,000 requests/s để có dư địa.
-- Với tỷ lệ đọc:ghi 100:1, tạo liên kết là `10M/day`, trung bình `116 writes/s` và khoảng `1,160 writes/s` lúc đỉnh.
-- Nếu một row mapping trung bình 600 byte, gồm index và metadata replication, bảy năm liên kết không hết hạn cần `10M x 365 x 7 x 600 = 15.33 TB` trước replica và compaction. Với ba bản sao, lập kế hoạch khoảng 46 TB.
-- Một response chuyển hướng khoảng 1 KB, gồm header. Băng thông egress đỉnh là `150,000 x 1 KB x 8 = 1.2 Gb/s`; edge provider cần thêm dư địa cho TLS và cache miss.
-- Một click event khoảng 200 byte. Với một event cho mỗi chuyển hướng, ingress thô là `1B x 200 = 200 GB/day`, tương đương khoảng 73 TB/năm trước replication Kafka và lưu trữ warehouse.
-- Dùng hệ số lập kế hoạch tích lũy 1.2 cho tăng trưởng link: mapping giữ bảy năm xấp xỉ `10M x 1.2 x 365 x 7 = 30.66B` row, hay 18.4 TB byte row chính với ước tính 600 byte.
-- Ngân sách availability cho SLO 99.99% là khoảng 4.32 phút mỗi tháng 30 ngày. Vì vậy redirect fail-open về cache khi an toàn, nhưng tuyệt đối không tự tạo destination.
+### Mục tiêu dịch vụ [ASSUMPTION]
 
-Hệ quả chính là database được sizing theo ghi vẫn chưa đủ: read fleet, edge cache và replication liên vùng phải hấp thụ lưu lượng lớn hơn hai bậc độ lớn.
+- p99 của redirect dưới 50 ms tại service edge, không tính mạng của người dùng và việc tải destination.
+- Phục vụ redirect có mục tiêu availability hàng tháng 99.99%. Tạo link và analytics có thể có SLO riêng.
+- Key sinh tự động không va chạm; quyền sở hữu alias tùy chỉnh được tuyến tính hóa, tức các write đồng thời có một thứ tự có thẩm quyền.
+- Mapping đã commit không bị mất. Analytics có thể trễ, nhưng một click không bị âm thầm đếm hai lần trong báo cáo.
 
-## 3. API Design
+## 2. Ước tính quy mô
 
-### Tạo liên kết
+Đây là **[ASSUMPTION] các con số lập kế hoạch**, không phải tuyên bố về một sản phẩm hiện hữu.
+
+- Giả định 100 triệu client hoạt động hằng ngày tạo redirect. Với 10 redirect mỗi client mỗi ngày, ta có `100M x 10 = 1B redirects/day`.
+- Tốc độ trung bình là `1B / 86,400 = 11,574 requests/s`.
+- Giả định peak do chu kỳ ngày và campaign tăng 10x. Peak là `115,740 requests/s`; cấp năng lực 150,000 requests/s để có headroom.
+- Với tỷ lệ redirect:tạo là 100:1, tạo link là `10M/day`, trung bình 116 writes/s và khoảng 1,160 writes/s lúc peak.
+- Giả định một mapping row trung bình 600 byte, gồm index và replication metadata. Bảy năm link không hết hạn cần `10M x 365 x 7 x 600 = 15.33 TB` trước replica và compaction. Ba bản sao cần khoảng 46 TB.
+- Giả định một redirect response khoảng 1 KB, gồm headers. Egress peak là `150,000 x 1 KB x 8 = 1.2 Gb/s`, chưa tính capacity bổ sung cho TLS và cache miss.
+- Giả định mỗi redirect tạo một click event 200 byte. Raw event ingress là `1B x 200 = 200 GB/day`, tương đương khoảng 73 TB/năm trước log replication và warehouse storage.
+- Áp dụng hệ số lập kế hoạch tích lũy 1.2 cho tăng trưởng link. Mapping lưu bảy năm thành khoảng `10M x 1.2 x 365 x 7 = 30.66B` row, tương đương 18.4 TB primary row bytes với cùng ước tính 600 byte.
+- SLO hàng tháng 99.99% cho phép khoảng 4.32 phút unavailable trong một tháng 30 ngày.
+
+**[ANALYSIS]** Write workload nhỏ hơn nhiều so với redirect workload. Database chỉ được sizing theo số lần tạo là chưa đủ: read fleet, edge cache và cross-region replication phải xử lý lưu lượng redirect. Cache có thể giảm số lần đọc store, nhưng không thể là bản sao duy nhất của mapping đã commit.
+
+## 3. API
+
+Đây là **[PROPOSED DESIGN]**. Các JSON body chỉ là ví dụ minh họa.
+
+### Tạo link
 
 `POST /v1/links`
 
@@ -52,7 +67,7 @@ Hệ quả chính là database được sizing theo ghi vẫn chưa đủ: read 
 }
 ```
 
-`alias` là tùy chọn. Chủ sở hữu đã xác thực được lấy từ access token, không lấy từ body. Client gửi `Idempotency-Key`; server lưu request fingerprint và kết quả trong 24 giờ.
+`alias` là tùy chọn. Owner đã xác thực được lấy từ access token, không bao giờ lấy từ request body. Client gửi `Idempotency-Key`. Service lưu request fingerprint và response kết quả trong 24 giờ. Nếu retry dùng cùng key nhưng fingerprint khác, request bị từ chối thay vì được coi là thao tác mới.
 
 ```json
 {
@@ -64,19 +79,23 @@ Hệ quả chính là database được sizing theo ghi vẫn chưa đủ: read 
 }
 ```
 
-Trả `201` cho link mới, `200` cho replay idempotent, `409` khi alias tùy chỉnh đã có người dùng, `422` cho destination hoặc TTL không hợp lệ và `429` khi vượt rate limit của owner hoặc IP. Alias tùy chỉnh không bao giờ được gán lại, kể cả sau khi hết hạn.
+Trả `201` cho link mới, `200` cho idempotent replay, `409` khi custom alias đã được dùng, `422` cho destination hoặc TTL không hợp lệ và `429` khi vượt rate limit của owner hoặc IP. Custom alias không bao giờ được gán lại, kể cả sau khi hết hạn.
 
-### Chuyển hướng
+### Redirect
 
-`GET /{alias}` trả `301` cho mapping vĩnh viễn hoặc `302` cho mapping tạm thời, kèm header `Location`. Alias không tồn tại, hết hạn, bị vô hiệu hóa hoặc sai định dạng trả `404`, không tiết lộ alias đã xóa từng tồn tại hay chưa. Edge có thể cache response âm trong thời gian ngắn nhưng phải tôn trọng negative TTL ngắn.
+`GET /{alias}` trả `301` cho mapping permanent hoặc `302` cho mapping temporary, kèm header `Location`. Alias không tồn tại, hết hạn, bị disable hoặc sai format trả `404`. Response không tiết lộ alias đã xóa từng tồn tại hay chưa. Edge có thể cache negative response trong thời gian ngắn, theo một negative TTL ngắn.
 
-### Phân tích
+Thứ tự lookup là edge cache, regional L1/L2 cache rồi replicated link store. Cache hit có thể phục vụ redirect trong lúc store outage nếu entry vẫn hợp lệ theo policy. Service tuyệt đối không tự tạo destination hoặc kéo dài mapping đã hết hạn chỉ vì store không khả dụng.
 
-`GET /v1/links/{id}/analytics?from=...&to=...&bucket=hour` trả các bộ đếm tổng hợp và timestamp độ mới. Dữ liệu nhất quán cuối cùng. `POST /v1/links/{id}/disable` yêu cầu xác thực và idempotent; việc vô hiệu hóa là một state transition có thứ tự mạnh.
+### Analytics
+
+`GET /v1/links/{id}/analytics?from=...&to=...&bucket=hour` trả aggregate count và timestamp thể hiện độ mới của dữ liệu. Dữ liệu có eventual consistency.
+
+`POST /v1/links/{id}/disable` yêu cầu xác thực và idempotent. Disable là một state transition có thứ tự mạnh: sau khi write được acknowledge, các read sau đó không được phục vụ link ở trạng thái active. Cache invalidation là một phần của write path; policy cho phép stale cache trong giới hạn phải không phá vỡ semantics đã chọn.
 
 ## 4. Data Model
 
-Source of truth là một kho key-value/SQL-compatible được sharding và nhất quán mạnh. Ký hiệu SQL làm rõ constraint; triển khai vật lý có thể dùng distributed SQL hoặc key-value với các conditional write tương đương.
+Source of truth là một key-value store hoặc SQL-compatible store được sharding và có strong consistency. SQL dưới đây là logical model; triển khai vật lý có thể dùng distributed SQL hoặc key-value store với conditional write tương đương.
 
 ```sql
 CREATE TABLE links (
@@ -96,33 +115,35 @@ CREATE INDEX links_owner_created ON links (owner_id, created_at DESC);
 CREATE INDEX links_expiry ON links (expires_at) WHERE state = 'active';
 
 CREATE TABLE idempotency_records (
-  owner_id      BIGINT NOT NULL,
+  owner_id        BIGINT NOT NULL,
   idempotency_key VARCHAR(128) NOT NULL,
-  request_hash  CHAR(64) NOT NULL,
-  response_json JSON NOT NULL,
-  created_at    TIMESTAMP NOT NULL,
+  request_hash    CHAR(64) NOT NULL,
+  response_json   JSON NOT NULL,
+  created_at      TIMESTAMP NOT NULL,
   PRIMARY KEY (owner_id, idempotency_key)
 );
 ```
 
-`alias` là key tra cứu redirect, nên unique index là nơi kiểm tra va chạm có thẩm quyền. `(owner_id, created_at)` hỗ trợ màn hình danh sách của owner mà không quét alias. Partial expiry index cung cấp dữ liệu cho sweeper; expiry cũng được kiểm tra đồng bộ lúc đọc nên sweeper không phải dependency của tính đúng. `shard_key` là hash ổn định của alias, không phải ID tăng dần: nó phân bổ alias nóng và tránh write partition đơn điệu.
+Unique constraint trên `alias` là nơi kiểm tra collision có thẩm quyền. Create transaction phải insert mapping và idempotency record atomically, hoặc dùng compare-and-set tương đương. `(owner_id, created_at)` hỗ trợ trang danh sách của owner mà không cần scan alias.
 
-Analytics tách riêng:
+Partial expiry index cung cấp dữ liệu cho sweeper. Read cũng kiểm tra expiry đồng bộ, nên sweeper chạy trễ không làm link hết hạn trở nên hợp lệ. Sweeper có thể đánh dấu row là expired và invalidate cache liên quan. `shard_key` là hash ổn định của alias thay vì ID tăng dần; cách này phân bổ write và tránh write partition tăng đơn điệu. Alias phổ biến vẫn cần cache protection vì hash không loại bỏ hotspot của một key.
+
+Analytics được lưu riêng:
 
 ```sql
 CREATE TABLE click_hourly (
-  link_id       UUID NOT NULL,
-  hour          TIMESTAMP NOT NULL,
-  country       CHAR(2) NOT NULL,
-  device_class  VARCHAR(16) NOT NULL,
-  clicks        BIGINT NOT NULL,
+  link_id      UUID NOT NULL,
+  hour         TIMESTAMP NOT NULL,
+  country      CHAR(2) NOT NULL,
+  device_class VARCHAR(16) NOT NULL,
+  clicks       BIGINT NOT NULL,
   PRIMARY KEY (link_id, hour, country, device_class)
 );
 ```
 
-Event stream, không phải redirect database, là nguồn của aggregate này. Aggregate key làm truy vấn link/time hiệu quả; retention và rollup ngăn storage analytics tăng vô hạn.
+Event stream, không phải redirect database, là input của aggregate này. Aggregate key giúp query theo link/time hiệu quả. Retention và rollup giữ cho analytics storage có giới hạn.
 
-## 5. High-Level Architecture
+## 5. Kiến trúc cấp cao
 
 ```mermaid
 flowchart LR
@@ -138,147 +159,56 @@ flowchart LR
   Auth --> P[Write Service]
   P --> M
   P --> O[Outbox / Change Stream]
-  O --> Rep[Cross-region Replicator]
-  Rep --> M
-  Sweep[Expiry Sweeper] --> M
+  O --> C
 ```
 
-- Global DNS/Anycast đưa client tới edge khỏe gần nhất, giảm handshake và độ trễ mạng.
-- CDN/WAF hấp thụ redirect có thể cache, chặn scan lạm dụng và áp dụng rate limit thô trước khi tiêu thụ capacity origin.
-- Regional redirect service tra cache, kiểm tra state và expiry rồi trả redirect. Nó stateless nên scale ngang được.
-- Replicated link store là source of truth bền vững. Read dùng replica cục bộ; write tới home region của alias hoặc endpoint ghi có quorum.
-- Click event log tách analytics khỏi latency redirect. Payload giới hạn tránh đưa user-agent hay destination vào đường mapping nóng.
-- Consumer batch và upsert aggregate theo giờ vào analytics store, có thể replay từ event còn retention.
-- Outbox/change stream khiến create đã commit được replication và cache invalidation nhìn thấy mà không có khoảng trống dual-write.
-- Expiry sweeper thu hồi hoặc đánh dấu row cũ, nhưng kiểm tra expiry lúc request bảo vệ tính đúng nếu sweeper trễ.
+**[ANALYSIS]** Anycast hoặc global DNS đưa client tới edge gần hơn. Edge terminate TLS, áp dụng policy của WAF và rate limit, đồng thời phục vụ redirect đã cache khi an toàn. Regional redirect service xử lý cache miss và đọc replicated store. Service phát click event mà không chờ analytics consumer.
 
-## 6. Deep Dive
+**[PROPOSED DESIGN]** Write đi qua authenticated write service. Với custom alias, service thực hiện conditional insert trên authoritative store. Key sinh tự động cũng phải qua cùng uniqueness check; việc sinh ngẫu nhiên tự nó không chứng minh uniqueness. Outbox hoặc change stream publish thay đổi mapping để populate và invalidate cache. Redirect service consume các thay đổi này hoặc fetch on demand.
 
-### Đường redirect và caching
+## 6. Redirect Path và Quy tắc Cache
 
-Lookup key là alias đã normalize. Edge cache an toàn cho `301` chỉ khi hợp đồng sản phẩm coi destination là bất biến. `302` có thời gian cache ngắn và cấu hình được. Cache entry chứa `state`, `expires_at`, `redirect_code` và mapping version. Origin so sánh expiry với clock của mình và trả `404` sau khi hết hạn.
+Redirect path chỉ nên làm công việc cần thiết để chọn destination:
 
-Dùng L1 memory cache theo region cho alias nóng nhất và L2 shared cache cho dữ liệu ấm. Cache-aside đọc sẽ nạp L2 sau miss; write invalidate hoặc tăng version cả hai tầng sau khi store commit. Cơ chế single-flight gộp các miss đồng thời của một alias. Nó bị giới hạn và cục bộ, nên cache outage làm giảm về store thay vì tạo global lock.
+1. Validate format của alias tại edge và từ chối input sai.
+2. Kiểm tra edge cache và regional cache.
+3. Nếu miss, đọc mapping theo alias từ replicated store.
+4. Kiểm tra state và `expires_at` bằng current time đáng tin cậy.
+5. Trả status đã cấu hình và header `Location`.
+6. Publish click event bất đồng bộ.
 
-Alias phổ biến tạo hot key dù shard đã cân bằng. CDN cache, request coalescing theo key và read copy được nhân bản xử lý vấn đề này; chỉ thêm database shard thì không.
+Permanent và temporary redirect cần cache policy khác nhau. Permanent mapping có thể có positive TTL dài nếu semantics của disable và correction chấp nhận độ trễ đó. Temporary mapping nên có TTL ngắn hơn. Event disable và expiry phải invalidate positive cache entry; negative entry cũng cần TTL ngắn để alias mới không bị che khuất lâu.
 
-### Sinh key và alias tùy chỉnh
+Service nên dùng request coalescing cho một popular key đang cold, để nhiều miss đồng thời không cùng query store. Đồng thời phải giới hạn connection pool và timeout. Nếu store timeout, trả cached mapping còn hợp lệ khi policy cho phép; nếu không, trả error chứ không đoán redirect. Circuit breaker và backpressure bảo vệ store khỏi cache-miss storm.
 
-Alias tự động dùng ID ngẫu nhiên 64-bit hoặc ID có thứ tự theo thời gian, mã hóa base62. Không gian 64-bit có `62^11`, khoảng `5.2e19`, chuỗi 11 ký tự khả dĩ. Vẫn phải enforce uniqueness bằng transaction: va chạm hiếm gặp sẽ retry với ID mới. Alias tùy chỉnh dùng conditional insert trên alias key duy nhất. Thao tác chỉ idempotent với cùng owner và request key; hai owner tranh cùng alias sẽ có một bên thành công và một bên `409`.
+## 7. Write, Replication và Xử lý Sự cố
 
-Không bao giờ tái sử dụng alias. Tombstone hoặc reservation vĩnh viễn ghi nhận ownership lịch sử, ngăn QR cũ hoặc 301 đã cache mang ý nghĩa khác.
+Quyền sở hữu custom alias cần một conditional write có authoritative duy nhất. Cross-region replica có thể phục vụ read sau khi mapping được replicate bền vững theo consistency contract đã chọn. Nếu write region không khả dụng, service có thể từ chối create hoặc route sang authority khác; không được chấp nhận hai owner cho cùng alias.
 
-### Write, replication và transaction
+Redirect read path có thể dùng replica, nhưng replica phải đáp ứng freshness cần thiết của redirect contract. Link vừa tạo có thể tạm thời trả `404` ở một region nếu cho phép replication bất đồng bộ. Nếu điều này không chấp nhận được, route các read đầu tiên qua write authority hoặc chờ replication acknowledgement cần thiết. Đây là lựa chọn thiết kế, không phải thuộc tính mặc định của mọi replicated store.
 
-Write transaction insert `links` và `idempotency_records` cùng nhau. Unique constraint và conditional write là ranh giới kiểm tra va chạm. Chỉ trả response sau khi replica home xác nhận transaction bền vững. Change stream/outbox phát từ committed state, nên process crash không thể báo thành công nhưng làm mất thông báo replication.
+Với disable, state transition được commit ở source of truth rồi truyền qua change stream. Implementation phải quy định acknowledgement có chờ cache invalidation hay không. Nếu có, thao tác chậm hơn nhưng guarantee rõ hơn. Nếu không, contract cần nêu bounded stale-read window và cache phải thực thi giới hạn đó.
 
-Read được phục vụ cục bộ sau replication. Link vừa tạo có thể tạm thời chưa có ở region khác; API có thể trả home region và redirect service có thể bounded read-through tới home region khi local miss. Cách này bảo vệ read-your-write của người tạo mà không biến mọi redirect toàn cầu thành synchronous.
+Event log trong phương án này dùng at-least-once delivery. Vì vậy consumer deduplicate bằng event ID hoặc key xác định như `(link_id, timestamp, request ID)` trước khi cập nhật aggregate. Retry ở consumer khi đó an toàn, nhưng ta không tuyên bố transport là exactly once. Poison event được đưa vào dead-letter path và retry theo policy rõ ràng.
 
-### Analytics, queue và backpressure
+## 8. Bảo mật và Kiểm soát Lạm dụng
 
-Redirect handler phát event gọn gồm `event_id`, `link_id`, timestamp, địa lý thô, device class và region. Nó không chờ analytics. Log được partition bằng salted hash của `link_id`, đủ partition cho ingress đỉnh và consumer parallelism. Một link nổi tiếng không được dồn mọi event vào một partition.
+Service validate scheme của destination và áp dụng policy allow/deny. Cần từ chối URL sai và định nghĩa cách xử lý redirect tới private hoặc local address range để hạn chế SSRF trong các component có fetch hoặc preview destination. Bản thân redirect service không nên fetch destination.
 
-Consumer commit offset sau durable aggregate upsert. Upsert có key `(link_id, hour, country, device_class)` và mang deduplication watermark hoặc tập event-ID trong cửa sổ replay. Điều này cho at-least-once delivery với chống duplicate có giới hạn. Exact global event uniqueness không đáng để làm chậm redirect; báo cáo công khai freshness và có thể reconcile event đến muộn.
+Authentication bắt buộc cho create, list, analytics và disable. Authorization kiểm tra owner gắn với token. Rate limit áp dụng theo owner và, khi phù hợp, theo IP hoặc network identity. Custom alias cần quy tắc normalization, reserved name và chính sách case sensitivity rõ ràng; collision check dùng giá trị đã normalize.
 
-Nếu consumer lag, log giữ event, scale thêm consumer, còn dimension ưu tiên thấp có thể sample hoặc xử lý muộn. Nếu log unavailable, redirect vẫn thành công; buffer cục bộ có giới hạn hấp thụ outage ngắn, sau đó drop phải được đếm rõ ràng. Dead-letter queue giữ event sai sau ngân sách retry hữu hạn. Exponential backoff kèm jitter ngăn downstream lỗi gây retry storm.
+Edge và application log mặc định không nên lưu sensitive query parameter. Các dimension của analytics phải có giới hạn rõ ràng để attacker không tạo cardinality không có giới hạn.
 
-### Rate limit, retry và load balancing
+## 9. Vận hành và Đánh đổi
 
-API create và disable dùng token bucket theo owner đã xác thực, API key, IP và uy tín domain đích. Redirect dùng WAF abuse control và limit theo edge, nhưng link phổ biến bình thường không bị throttle như tấn công. Load balancer route theo latency và health, có connection draining khi deploy.
+Theo dõi redirect latency p50/p95/p99, cache hit ratio, store read latency, timeout và error rate, stale-cache age, replication lag, event-log lag, consumer retry rate và freshness của aggregate. Alert riêng cho tác động tới redirect SLO và độ trễ analytics; analytics backlog không nên page đội redirect ở cùng ngưỡng với redirect outage.
 
-Client chỉ retry create với cùng `Idempotency-Key`. Server từ chối key đã dùng với request hash khác (`409`). Redirect GET an toàn để retry, nhưng retry không được tạo side effect billing hoặc analytics lần hai; `event_id` được suy ra từ request ID cộng time bucket ngắn hoặc được deduplicate downstream.
+Backup và restore drill bảo vệ mapping đã commit. Retention job xóa hoặc archive analytics data theo policy. Nếu hỗ trợ deletion mapping, cần tombstone hoặc reservation vĩnh viễn để URL cũ không về sau nhận một ý nghĩa khác.
 
-Connection pool phải thấp hơn giới hạn database: mỗi service instance có pool giới hạn và request queue có deadline. Khi queue đầy, fail-fast thay vì để thread chất đống và khuếch đại latency. Circuit breaker ngừng gửi tới replica lỗi; half-open probe kiểm tra phục hồi.
+Đánh đổi chính là consistency so với availability khi có sự cố. Phục vụ mapping từ cache có thể giữ availability của redirect, nhưng chỉ khi entry được biết là còn hợp lệ theo policy expiry và disable. Phục vụ stale data sau khi disable đã được xác nhận có thể không chấp nhận được. Ngược lại, bắt buộc authoritative read mới ở mọi request bảo vệ consistency nhưng làm tăng latency và khiến store outage lộ ra với người dùng. Ranh giới đúng phải nằm trong API contract, không phải là hành vi tình cờ của cache.
 
-### TTL và disaster recovery
+## 10. Tóm tắt
 
-TTL là metadata, không phải timer phải thức đúng tại deadline. Kiểm tra lúc request là authoritative. Sweeper đánh dấu link hết hạn theo batch, rate-limit để không tranh capacity với read, và cache invalidation đi sau state change. Alias vĩnh viễn giữ tombstone.
+Thiết kế giữ redirect path nhỏ: edge cache, regional cache, authoritative lookup khi miss và click event bất đồng bộ. Strong conditional write bảo vệ quyền sở hữu alias và idempotent create. Replication cùng cache invalidation giúp read chịu lỗi mà không biến cache thành source of truth. Analytics consume durable event stream và deduplicate tại consumer.
 
-Mỗi region có compute và cache capacity độc lập. Link data bền vững đồng bộ trong home region và replication bất đồng bộ sang region khác với RPO được công bố, ví dụ năm phút. Regional failover đổi routing sang replica khỏe; control plane ngăn hai region nhận write xung đột cho cùng alias. Backup được mã hóa, kiểm thử bằng restore drill và giữ tách khỏi live store.
-
-## 7. Consistency Model
-
-Nhất quán mạnh cần cho quyền sở hữu alias, idempotency record, thao tác disable và mapping source-of-truth đã commit. Alias tùy chỉnh không thể có hai destination, và disable thành công không được update cũ ghi đè.
-
-Nhất quán cuối cùng chấp nhận được cho replica theo region, cache fill, analytics aggregate, owner list view và expiry sweeping. Replica lag được đo và giới hạn. Khi cache miss ngay sau khi tạo, service có thể route request của creator về home region; với người khác, propagation delay ngắn là đánh đổi availability/latency rõ ràng.
-
-Nếu response create bị mất sau commit, client retry cùng idempotency key và nhận response đã lưu. Nếu server timeout trước commit, retry hoặc tìm thấy idempotency record đã commit hoặc thực thi transaction an toàn. Key khác là operation mới và có thể tạo link khác theo thiết kế.
-
-## 8. Failure Scenarios
-
-| Failure | Impact | Detection | Recovery |
-|---|---|---|---|
-| Home link-store quorum không khả dụng | Create lỗi hoặc chuyển read-only; redirect đã cache vẫn chạy | Tỷ lệ lỗi write, quorum health, commit latency | Route write tới failover region được phê duyệt hoặc trả `503`; không acknowledge mapping chưa commit |
-| Regional read replica down hoặc lag | Cache miss cục bộ tăng; link mới có thể vắng mặt | Replica health, replication lag, tỷ lệ read fallback | Dùng replica khác hoặc bounded home-region read; loại endpoint không khỏe khỏi routing |
-| Cache cluster lỗi | Origin QPS và p99 redirect tăng mạnh | Cache hit ratio, origin QPS, store saturation | Phục vụ từ store với admission control; khôi phục cache từ từ và tránh stampede bằng single-flight |
-| Kafka/log producer không khả dụng | Event analytics trễ hoặc bị drop khỏi buffer giới hạn | Producer error, buffer utilization, event-loss counter | Vẫn thành công redirect, replay buffer cục bộ nếu có, cảnh báo loss, khôi phục log và backfill nếu còn source |
-| Analytics consumer mắc ở poison event | Freshness aggregate dừng; log depth tăng | Consumer lag từng partition, retry count, DLQ rate | Pause partition, đưa event vào DLQ sau retry budget, sửa consumer, replay từ offset |
-| Network toàn region lỗi | Client trong region tăng latency hoặc lỗi | Anycast health probe, regional SLO, synthetic redirect | Rút region, failover read, giữ write fencing, khôi phục sau khi kiểm tra health và lag |
-| Idempotency store timeout sau DB commit | Client có thể retry và tưởng create bị duplicate | Mismatch giữa link đã commit và idempotency record | Giữ cả hai trong một transaction; reconciliation job phát hiện bất thường lịch sử và trả mapping gốc |
-| Hot alias campaign làm origin quá tải | Một key làm shard hoặc service pool bão hòa | QPS theo alias, shard skew, cache bypass rate | Tăng edge TTL khi hợp đồng cho phép, coalesce miss, nhân bản read data, bảo vệ có mục tiêu |
-
-## 9. Observability
-
-Mỗi request mang hoặc nhận `trace_id` và `request_id`; log gồm alias hash, link ID nếu biết, region, cache tier, store outcome và response class. Mặc định không log destination đầy đủ hoặc định danh người dùng thô.
-
-SLI và alert hữu ích:
-
-- Redirect success rate và latency p50/p95/p99 theo region, cache outcome, status code và alias class. Alert khi p99 vượt 50 ms hoặc error budget burn.
-- Cache hit ratio, origin reads/giây, single-flight waiter và phân bố hot-key. Hit ratio sụp báo cache failure hoặc deployment đổi cache key.
-- Store read/write latency, conditional-write conflict, replica lag, shard unavailable và connection-pool utilization. Pool saturation với CPU bình thường cho thấy queueing hoặc rò rỉ connection.
-- Log producer error rate, publish latency, buffer fill, consumer lag theo partition, retry rate, DLQ count và aggregate freshness. Lag không kèm consumer CPU thường là partition mắc hoặc downstream store lỗi.
-- WAF block, rate-limit reject, malformed alias, tỷ lệ 404 và QPS theo alias. 404 tăng đột ngột có thể báo replication lỗi hoặc release normalize alias sai.
-- Synthetic probe tạo test link, redirect từ nhiều region, kiểm tra expiry và query analytics. Trace nối các đường create, replication, cache fill, redirect và aggregate.
-
-## 10. Capacity Planning
-
-Lập kế hoạch cho 150,000 redirect/s đỉnh và 1,160 create/s đỉnh.
-
-- Nếu một redirect instance xử lý an toàn 2,000 request/s ở p99 mục tiêu, `150,000 / 2,000 = 75`; deploy 100 instance để có 25% headroom và kịch bản mất một region. Nếu một region thường mang 25%, fleet còn lại phải xử lý 100% lúc failover, nên capacity được cấp theo failure domain, không chỉ toàn cục.
-- Giả định hit edge/L1/L2 là 90%. Origin nhận `150,000 x 10% = 15,000 reads/s`; với 100 instance, tải trung bình hướng origin là 150 read/s/instance, trước failover.
-- Với 600 byte/mapping, 30.66B row trong bảy năm là 18.4 TB dữ liệu chính. Ba replica, index và 30% headroom vận hành cho khoảng `18.4 x 3 / 0.7 = 79 TB` storage provisioned.
-- Với 200 GB/ngày click event, giữ 14 ngày trong log: `200 x 14 = 2.8 TB` raw; ba replica và 30% headroom cần khoảng 10.9 TB. Aggregate dài hạn thuộc analytics storage rẻ hơn.
-- Ở đỉnh 200,000 event/s, với event 200 byte và giới hạn payload bảo thủ 1 MB/s cho mỗi log partition, payload cần khoảng 40 partition; chọn 64 để có consumer parallelism và chỗ rebalance. Bắt đầu 16 consumer, mỗi consumer bốn partition, rồi autoscale theo lag, không chỉ CPU.
-- Với 1,160 write/s đỉnh và 300 write/s mỗi database writer, cần ít nhất bốn writer worker; deploy tám worker trên các failure domain. Giữ pool mỗi instance ở 20 connection: 100 redirect instance không nên giữ write pool lớn, nên redirect service dùng read-only pool và write service sở hữu write connection.
-- L2 cache chứa 2B mapping nóng, trung bình 450 byte cộng overhead, cần khoảng 1.5 TB usable memory. Đây là mục tiêu dựa trên popularity đo được, không phải yêu cầu cache toàn bộ 30.66B row.
-
-Các số này được xác nhận bằng load test có phân bố alias Zipfian, chạy cache warm và cold, traffic failover cùng overhead TLS/serialization thực tế.
-
-## 11. Bottlenecks and Evolution
-
-Bottleneck đầu tiên thường không phải sinh alias; đó là origin capacity khi cache miss trong burst của link phổ biến hoặc cache invalidation storm. Vì vậy redesign đầu tiên là edge cache tốt hơn, single-flight và hot-key replication, không phải thêm bit cho ID.
-
-Ở 10x, origin read tiến tới 150,000/s dù hit rate giữ nguyên, còn analytics đạt 2B event/ngày. Tách redirect serving khỏi control plane, dùng mapping tier replicated toàn cầu chuyên dụng và partition analytics bằng salted link hash với retention raw và aggregate riêng.
-
-Ở 100x, một global store và một event log trở thành bottleneck về tổ chức và vận hành. Đưa mapping bất biến vào read store replicated theo region hoặc edge-distributed key-value layer, giữ ownership write trong control plane sharded và dùng hierarchical aggregation. Kiến trúc đích có redirect data tại edge, alias ownership được bảo vệ bằng quorum, failure domain region độc lập và analytics có thể replay. Mọi bước chuyển phải giữ invariant không tái sử dụng alias.
-
-## 12. Trade-offs
-
-| Decision | Option A | Option B | Decision | Why |
-|---|---|---|---|---|
-| Primary store | Distributed SQL | Key-value store | Distributed SQL-compatible store initially | Conditional uniqueness, owner query và transaction có giá trị; chuyển read replica sang KV khi access pattern ổn định |
-| Event transport | Kafka/log | RabbitMQ | Kafka-like durable log | Replay volume lớn, ordering theo partition và consumer recovery quan trọng hơn routing từng message |
-| Cache | Redis/shared cache | Database cache | L1 cộng shared cache | Đưa hot read khỏi store và hỗ trợ TTL; cache không bao giờ là source of truth |
-| Analytics timing | Synchronous | Asynchronous | Asynchronous | Bảo vệ redirect p99 khỏi warehouse và consumer failure |
-| Multi-region | Active-active | Active-passive | Active reads, fenced regional writes | Read cần locality; alias ownership cần một conflict boundary |
-| Sharding | Range by alias | Hash by alias | Hash by alias | Tránh hot partition tuần tự và theo lexical; owner/time query dùng secondary index |
-| Client updates | Polling | Push/webhook | Polling for analytics | Aggregate không khẩn cấp và polling đơn giản hơn ở scale này |
-| Service protocol | REST/HTTP | gRPC | REST ở edge, gRPC nội bộ khi hữu ích | Redirect và public API vốn dùng HTTP; internal typed call có thể giảm overhead mà không buộc browser dùng gRPC |
-
-## 13. Production Checklist
-
-- [ ] Alias uniqueness, tombstone, normalization và no-reuse được kiểm thử với concurrent write.
-- [ ] Create retry cùng idempotency key trả cùng response; hash khác trả `409`.
-- [ ] Cache directive 301/302, expiry check, disabled state và negative cache được xác minh từ nhiều region.
-- [ ] Alert redirect p99, error budget, replica lag, cache hit ratio, store pool, queue depth, consumer lag và DLQ có owner.
-- [ ] Load test bao gồm hot key Zipfian, cold-cache storm, đỉnh 10x, failover và downstream chậm.
-- [ ] Backpressure, buffer giới hạn, retry budget, circuit breaker và dead-letter replay được kiểm thử.
-- [ ] Backup restore thành công; regional failover và write fencing được diễn tập với RPO/RTO đo được.
-- [ ] Privacy của destination, chống lạm dụng, SSRF policy cho metadata fetcher, authentication, authorization và audit log được review.
-
-## 14. Engineering References
-
-1. **Google, _Site Reliability Engineering Book_** — https://sre.google/sre-book/table-of-contents/ — Các nguyên tắc về service-level objective, error budget và xử lý quá tải định hình redirect SLO riêng, ngân sách failover và alert saturation.
-2. **Google Research, _Research Publications_** — https://research.google/pubs/ — Chỉ mục nghiên cứu công khai định hình cách dùng tư duy xác suất cho phân tích va chạm và kỷ luật nêu giả định đo được thay vì coi scale là khẩu hiệu sản phẩm.
-3. **Netflix, _Netflix Tech Blog_** — https://netflixtechblog.com/ — Trọng tâm vận hành vào các service lỗi độc lập ảnh hưởng đến regional redirect fleet stateless, graceful degradation và retry có kiểm soát.
-4. **Cloudflare, _Cloudflare Blog_** — https://blog.cloudflare.com/ — Bài học quản lý traffic ở edge ảnh hưởng đến vị trí Anycast/CDN, bảo vệ WAF, cache policy và quyết định tách redirect path khỏi analytics.
+Các con số quy mô ở trên là giả định lập kế hoạch được nêu rõ. Trước khi triển khai, cần thay chúng bằng traffic distribution đo được, policy cho destination và alias, yêu cầu khi region lỗi, guarantee về cache staleness và recovery plan đã được kiểm thử.
