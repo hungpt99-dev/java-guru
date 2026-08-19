@@ -7,169 +7,153 @@ draft: false
 featured: false
 ---
 
-Repo: <https://github.com/finpay-lab/gateway>
+## Ranh giới cần có
 
-## Bài toán
+FinPay đã có payment core. Ledger là hệ thống ghi nhận chính; settlement là một state machine xác định. Một payment chỉ được chuyển từ `RECEIVED` sang `AUTHORIZED`, `HELD` hoặc `REJECTED` thông qua các business rule có thể audit và replay.
 
-Hãy xét một payment gateway đã xác thực caller bằng JWT và đang chuẩn bị định tuyến request. Request có thể chứa free text từ merchant, customer hoặc integration upstream. Text này có thể chứa prompt injection, instruction sai hoặc mô tả mâu thuẫn với các field thanh toán có cấu trúc.
+Giờ đây merchant gửi payment kèm một ghi chú dạng văn bản tự do. Ghi chú có thể chỉ là ngữ cảnh vô hại, một nỗ lực vượt qua rule review, hoặc văn bản khách hàng không tin cậy sao chép vào request. Đội ngũ muốn kiểm tra bằng AI trước khi route payment. Yêu cầu này nghe như “gửi text cho model rồi từ chối nếu kết quả xấu”. Thực tế không đơn giản như vậy. Model từ xa chậm, có tính xác suất, tốn chi phí, và do một provider nằm ngoài phạm vi lỗi mà FinPay trực tiếp kiểm soát.
 
-Team muốn có một AI check trước khi routing. Nghe có vẻ đơn giản: gửi text cho model, nhận fraud hoặc safety verdict rồi reject request đáng ngờ. Câu hỏi kỹ thuật chính xác hơn là:
+Câu hỏi thiết kế thực sự là:
 
-> Làm thế nào để gateway sử dụng một component không chắc chắn, ở xa và tốn chi phí mà không biến nó thành nguồn có thẩm quyền đối với việc chuyển tiền?
+> Làm thế nào để API gateway sử dụng một dependency không chắc chắn mà không cho phép nó trực tiếp authorize, reject hoặc mutate tiền?
 
-Đây là thiết kế hư cấu/tham khảo, không phải tuyên bố về một deployment FinPay đã được xác minh độc lập. Một thiết kế hướng production có thể đặt guardrail sau JWT authentication và trước routing, nhưng settlement và business rule xác định vẫn phải có thẩm quyền.
-
-## Vì sao khó hơn tưởng tượng
-
-Guardrail không chỉ là classifier. Nó nằm giữa hai contract rất khác nhau:
-
-- Ledger và settlement cần consistency chặt, outcome ổn định và side effect được kiểm soát.
-- Phân tích anomaly và content có thể chấp nhận xử lý eventual, mức độ không chắc chắn có giới hạn và fallback.
-
-Tách hai path giúp mỗi path có thể fail độc lập. Model timeout không được làm hỏng payment, còn audit index bị mất vẫn phải có cách rebuild mà không biến index thành source of truth.
-
-Model còn có các failure mode mà một HTTP dependency thông thường không có: false positive, false negative, response không deterministic, prompt injection, field bị hallucinate, thay đổi model hoặc prompt, rate limit từ provider và câu trả lời đúng cú pháp nhưng không thể đúng về mặt nghiệp vụ. Một JSON hợp lệ không chứng minh quyết định thanh toán là hợp lệ.
-
-Vì vậy contract nên là:
+Đây là thiết kế tham chiếu hư cấu, không phải tuyên bố về một hệ thống FinPay đã triển khai. Ranh giới trung tâm dưới đây là thiết kế đề xuất, không phải kết luận từ số đo production:
 
 ```text
-AI signal -> deterministic policy -> business decision
+AI inference -> bounded AI signal -> deterministic policy -> business decision -> financial state transition
 ```
 
-Không phải:
+Model có thể báo `injection_suspected`, một risk score hoặc một classification. Model không được update account balance, ghi ledger, authorize settlement, hay biến phần giải thích của chính nó thành payment command.
+
+## Thiết kế hiển nhiên thất bại
+
+Bản phác thảo đầu tiên hấp dẫn vì gần như không có component:
 
 ```text
-AI response -> block money
+client -> JWT authentication -> LLM -> route or reject -> payment service
 ```
 
-## Thiết kế ngây thơ
+Gateway gửi request đã authenticate cho model và chỉ route nếu model trả về `allow`. Như vậy model trở thành một authorization service ẩn. Đồng thời mọi payment đều phụ thuộc vào latency và availability của provider.
 
-Thiết kế nhỏ nhất đặt model vào synchronous gateway path:
+Giả sử cho mục đích minh họa gateway nhận 10.000 request mỗi giây và provider mất hai giây. Stage model tạo ra xấp xỉ:
 
 ```text
-client -> JWT auth -> LLM -> route hoặc reject -> payment service
+in-flight concurrency = throughput x latency = 10,000/s x 2s = 20,000 calls
 ```
 
-Thiết kế này dường như giải quyết bài toán với ít infrastructure. Model thấy request, trả JSON, gateway chỉ routing khi câu trả lời là positive.
+Ở mười giây, cùng lưu lượng đó tạo ra 100.000 call đang xử lý. Tăng thread pool không tạo thêm capacity cho provider. Nó chỉ tiêu thụ memory, connection và downstream slot cho tới khi queue trở thành sự cố.
 
-## Khi thiết kế ngây thơ hỏng
+Vấn đề thứ hai là timeout không tự ngăn lỗi lan truyền. Giả sử lúc 14:03 latency của provider tăng từ 300 ms lên 4 giây. Gateway worker bị giữ lâu hơn, deadline của các layer hết hạn ở những thời điểm khác nhau, và một retry lạc quan gửi request thứ hai trong khi request đầu có thể vẫn đang chạy. Connection pool đầy. Provider bắt đầu trả lỗi rate limit. Retry queue phình ra, khiến payment bình thường phải cạnh tranh với các AI call đã lỗi. Circuit breaker và concurrency limit không phải đồ trang trí hiệu năng; chúng ngăn dependency này kéo payment path xuống theo.
 
-Ở 10.000 request/giây, synchronous model call biến gateway thành connection pool của AI. Nếu provider mất hai giây, Little’s Law cho lượng request đang xử lý xấp xỉ:
+Kết quả của model cũng tạo ra vấn đề correctness. Model có thể trả JSON hợp lệ nhưng chứa amount không thể xảy ra, lý do bịa ra, hoặc false positive có độ tin cậy cao. False negative có thể để lọt payment đáng ngờ; false positive có thể từ chối merchant hợp lệ. Không hậu quả nào nên được chọn một cách ngầm định bởi nhánh timeout hoặc parser tình cờ chạy.
 
-```text
-concurrency = throughput x latency = 10,000/s x 2s = 20,000 calls
-```
+Cuối cùng, chuyển sang async cũng không tự động an toàn. Consumer có thể crash sau khi gọi downstream service nhưng trước khi ghi trạng thái hoàn tất. Message được giao lại. Một lần `exists()` rồi insert cho phép hai consumer cùng thấy “chưa có” và cùng gọi provider. Search index có thể nhận verdict trong khi bản ghi durable bị thiếu, hoặc index lỗi trong khi payment vẫn khỏe. Search là read model, không phải ledger.
 
-Ở mười giây là 100.000 calls. Một fixed thread pool bằng bốn không phải capacity plan; nó chỉ biến overload thành queue. Queue không có admission policy giới hạn cuối cùng sẽ tiêu thụ memory và làm latency của customer tăng.
+## Xác định constraint trước component
 
-Các failure khác khó nhìn thấy hơn:
+Trong ví dụ này, ta giả định các constraint sau. Đây là assumption, không phải số đo production của FinPay:
 
-- Provider unavailable nên mọi request chờ timeout. Retry khuếch đại outage và có thể tạo retry storm.
-- Model trả `allow` do false negative hoặc `block` với customer hợp lệ do false positive. Business phải chọn hậu quả; model không được tự ngầm chọn.
-- Payment thành công rồi audit indexing thất bại. Coi OpenSearch là authority sẽ biến index outage vô hại thành payment failure; coi nó là best-effort mà không có kế hoạch audit lại làm mất bằng chứng.
-- Kafka record được redelivery sau khi consumer crash. Kiểm tra `exists()` rồi insert là race: hai consumer có thể cùng thấy `false` và cùng gọi provider hoặc side effect downstream.
-- Rebalance hoặc event out-of-order khiến request mới được xử lý trước request cũ. Ordering không tự động được bảo toàn giữa các partition hoặc business key.
-- Một record lỗi bị retry vô hạn, làm đói các record khỏe mạnh. Poison message cần retry có giới hạn và dead-letter hoặc quarantine path.
-- Model update làm thay đổi phân bố quyết định. Không có model version và prompt version, team không thể giải thích vì sao hai request tương đương có kết quả khác nhau hoặc reproduce kết quả cũ.
+- Authorization của payment và các chuyển trạng thái ledger phải deterministic, có audit, và độc lập với response của LLM.
+- Budget synchronous của gateway có giới hạn. Thiết kế phải nói rõ điều gì xảy ra khi hết budget.
+- Free text là input không tin cậy. Không được gửi PII của khách hàng hay credential cho model chỉ vì gateway có thể truy cập chúng.
+- Quota, latency, thay đổi model và outage của provider nằm ngoài quyền kiểm soát trực tiếp của FinPay.
+- Analysis phải replay đủ để điều tra quyết định, trong khi prompt thô và dữ liệu payment phải tuân theo retention policy.
+- Duplicate delivery và consumer crash là các sự kiện recovery bình thường, không phải trường hợp ngoại lệ.
+- Search và dashboard có thể tạm unavailable mà không được thay đổi financial truth.
 
-Failure trông có vẻ vô hại thường là audit write. Nếu hệ thống ghi verdict vào OpenSearch index rồi coi operation đã hoàn tất, việc mất index sẽ âm thầm phá hủy query model. OpenSearch hữu ích cho search và investigation, nhưng Kafka hoặc durable audit store phải giữ source có thể rebuild.
+Các constraint này loại bỏ ý tưởng “LLM là bước kiểm tra cuối cùng”. Nhưng chúng chưa quyết định mọi request có phải chờ synchronous hay không.
 
-## Quyết định thiết kế đầu tiên
+## Chọn detector
 
-Gateway không được hỏi model phê duyệt payment. Gateway hỏi một signal có giới hạn về untrusted content hoặc thuộc tính bất thường. Policy sau đó kết hợp signal với fact có thẩm quyền:
+Rule phù hợp với schema validation, allowlist, amount limit và các mẫu prompt injection rõ ràng. Chúng nhanh và dễ giải thích, nhưng khả năng tổng quát hóa hạn chế.
 
-```text
-structured payment + bounded text -> AI signal
-AI signal + rules + limits + account state -> policy outcome
-policy outcome -> route, step-up, hold hoặc manual review
-```
+Velocity và thống kê theo nhóm tương đồng có thể phát hiện amount hoặc frequency bất thường. Chúng ít tốn kém, nhưng hành vi merchant theo mùa có thể trông như anomaly. Một model truyền thống đã calibrate có thể phù hợp hơn cho risk score ổn định, nếu FinPay có label, drift check và quy trình release.
 
-Policy có thể coi `confidence=0.61` là “review” thay vì “block”. Nó có thể bỏ qua claim của model nếu claim mâu thuẫn với amount hoặc account đã authenticated. Policy phải deterministic, có version, được test và chịu trách nhiệm trước business.
+LLM hữu ích khi signal phụ thuộc vào free text mơ hồ hoặc cần trích xuất có cấu trúc nhỏ. Đây cũng là lựa chọn khó dự đoán nhất: output có thể không deterministic, latency và cost thay đổi, và một ghi chú độc hại có thể cố ảnh hưởng tới instruction. Gateway không nên dùng LLM ở nơi rule hoặc model đã calibrate là đủ.
 
-## Các bài toán kỹ thuật khó
+AI core dùng chung từ bài viết FinPay trước cung cấp `LlmPort` hẹp, redaction, deadline, provider metadata và metrics. Dùng lại port này tránh lặp cơ chế provider. Nhưng nó không được che giấu policy của gateway. KYC intake và giải thích có retrieval-augmentation là các use case bounded khác; guardrail này không nên truy xuất knowledge tùy ý hoặc gửi toàn bộ customer profile tới provider bên ngoài chỉ vì nó dùng chung client AI.
 
-### 1. Detector nào phù hợp với gateway?
+## Giới hạn signal
 
-Không có lý do dùng LLM cho mọi signal.
-
-- **Rules** phù hợp với indicator đã biết, allowlist, amount limit, schema constraint và pattern của prompt injection. Chúng nhanh, dễ giải thích nhưng cứng nhắc trước pattern mới.
-- **Statistical methods** phù hợp với rate, amount, velocity và độ lệch so với peer group. Chúng rẻ, hữu ích cho baseline nhưng có thể nhầm hành vi mùa vụ hợp lệ là risk.
-- **Traditional ML** phù hợp với fraud hoặc risk score được train trên feature ổn định. Nó hỗ trợ calibration và offline evaluation nhưng cần labeled data, drift monitoring và quy trình release có kiểm soát.
-- **LLM** phù hợp với free text mơ hồ, classification có context và extraction một nhóm nhỏ signal có cấu trúc. Nó chậm hơn, đắt hơn, không deterministic và dễ bị prompt injection hoặc hallucination. Không nên dùng nó làm control duy nhất trên payment path.
-
-Gateway có thể dùng AI core library dùng chung cho provider adapter, timeout, redaction, metadata của model và metrics. Library này không nên che giấu business policy. KYC document intake và RAG-based transaction explanation là use case riêng: gateway guardrail không nên tự retrieve knowledge tùy ý hoặc gửi toàn bộ customer profile ra external model chỉ vì shared client làm việc đó dễ dàng.
-
-### 2. Làm thế nào giới hạn remote model?
-
-`LlmPort` nên expose operation hẹp như `analyze(BoundedInput)`, không phải general chat interface. Adapter cần enforce:
-
-- total deadline được truyền từ request hoặc event;
-- connection, read và response-size limit;
-- chỉ một hoặc một số ít retry cho transient failure đã phân loại;
-- exponential backoff kèm jitter;
-- circuit breaker và concurrency limit;
-- xử lý rate limit của provider và fallback outcome.
-
-Nếu caller có budget 300 ms, một retry có thể mất thêm 300 ms không phải retry policy; đó là vi phạm timeout. Khi provider down, guardrail nên trả `unavailable` và routing sang deterministic rules, step-up authentication hoặc review tùy policy. Failure không được âm thầm trở thành approval.
-
-### 3. Ngăn duplicate work và duplicate effect thế nào?
-
-Đoạn code này không idempotent:
+Port nên nhận input theo một mục đích cụ thể, không phải chat transcript tổng quát:
 
 ```java
-// SAI: check và write là hai operation riêng biệt.
-if (!processingStore.exists(eventId)) {
-    ModelOutput output = llm.analyze(input);
-    settlementApi.execute(output);
-    processingStore.save(eventId, output);
+record BoundedInput(
+        String paymentId,
+        String merchantText,
+        long amountMinor,
+        String currency) {}
+
+record AiSignal(
+        String classification,
+        double confidence,
+        String modelVersion,
+        String promptVersion) {}
+```
+
+Adapter redact hoặc tokenize field trước khi gọi, giới hạn kích thước input và output, đồng thời validate structured output nghiêm ngặt. Response đúng cú pháp vẫn cần semantic check: confidence phải nằm trong range, classification phải được biết, và model không được tự tạo ra payment fact có thẩm quyền. Adapter có deadline cho connection, read và toàn bộ operation. Chỉ retry lỗi transient đã phân loại, và chỉ khi deadline còn đủ.
+
+Nếu request có budget 300 ms, retry thêm 300 ms là vi phạm budget. Exponential backoff có jitter, chính sách xử lý rate limit, circuit breaker và concurrency limit giúp giới hạn thiệt hại. Khi provider unavailable, adapter trả về kết quả kiểu `unavailable`, không âm thầm biến nó thành `allow`.
+
+## Sync, async hay hybrid?
+
+Ba lựa chọn đều hợp lý.
+
+**Synchronous blocking.** Provider khỏe cho signal ngay, nhưng availability của payment bị gắn với latency, quota và health của model. Chỉ dùng khi đây là một gate hẹp và business chấp nhận rõ latency cũng như degraded mode.
+
+**Asynchronous analysis sau acceptance.** Gateway accept payment và publish event; consumer phân tích sau đó, rồi có thể chuyển payment sang `HELD` hoặc `REVIEW`. Cách này bảo vệ latency của gateway và hỗ trợ replay, nhưng không thể ngăn side effect đã authorize. Payment state machine phải hỗ trợ trạng thái pending hoặc đường compensating.
+
+**Hybrid bounded gate.** Cheap deterministic check chạy synchronous. Chỉ một subset được gọi model trong deadline nghiêm ngặt; analysis sâu hơn được publish để xử lý async. Cách này cần nhiều thiết kế hơn, nhưng giữ high-volume path ổn định và cho case không chắc chắn một kết quả có kiểm soát.
+
+Ta chọn hybrid cho hệ thống tham chiếu này vì nó giữ một safety boundary synchronous nhỏ mà không biến AI thành điều kiện bắt buộc của mọi payment. Outcome cụ thể là quyết định về product và risk:
+
+- `fail-open` bảo vệ availability nhưng tăng exposure khi provider outage;
+- `fail-closed` giảm exposure nhưng có thể biến outage thành denial of service;
+- `STEP_UP` yêu cầu authentication mạnh hơn và tạo thêm friction;
+- `REVIEW` giữ payment ở trạng thái pending deterministic.
+
+Payment rủi ro thấp có thể dùng rule deterministic khi AI unavailable. Nhóm payment rủi ro cao có thể yêu cầu step-up hoặc review. “AI lỗi nên block tất cả” không phải kiến trúc; đó là một quyết định business chưa được xem xét.
+
+## Async tạo ra vấn đề correctness mới
+
+Event boundary tách latency, nhưng at-least-once delivery nghĩa là consumer phải chờ duplicate. Đoạn code sau không an toàn:
+
+```java
+// WRONG: the check and the side effect are separate.
+if (!store.exists(eventId)) {
+    AiSignal signal = llm.analyze(input);
+    settlementApi.execute(signal);
+    store.save(eventId, signal);
 }
 ```
 
-Hai consumer có thể cùng thấy `false`. Nếu process crash sau `settlementApi.execute` nhưng trước `save`, replay sẽ thực thi external effect lần nữa.
-
-Boundary thực sự cần atomic claim, thường là unique constraint hoặc atomic insert:
+Crash sau `execute` nhưng trước `save` sẽ lặp external call. Atomic inbox claim ngăn xử lý đồng thời cùng event, nhưng idempotency của storage không làm external side effect trở thành idempotent:
 
 ```java
-// ĐÚNG: claim là atomic; unique key serialize duplicate.
-if (!processingStore.insertIfAbsent(eventId, PROCESSING)) {
-    return processingStore.resultFor(eventId); // existing hoặc in-progress
+// RIGHT: claim atomically; the unique key serializes duplicates.
+if (!store.insertIfAbsent(eventId, PROCESSING)) {
+    return store.resultFor(eventId); // existing or in-progress
 }
 
 try {
-    ModelOutput output = llm.analyze(input);
-    GuardrailVerdict verdict = policy.validate(input, output);
-    processingStore.complete(eventId, verdict); // durable result
-    outbox.append(eventId, verdict);            // publish later
+    AiSignal signal = llm.analyze(input);
+    Verdict verdict = policy.evaluate(input, signal);
+    store.complete(eventId, verdict);
+    outbox.append(eventId, verdict); // publish after durable state is committed
     return verdict;
 } catch (RetryableFailure failure) {
-    processingStore.releaseOrLease(eventId);
+    store.releaseOrLease(eventId);
     throw failure;
 }
 ```
 
-`insertIfAbsent` có thể dựa trên database unique index, Redis `SETNX` kèm expiry hoặc transactional inbox. Chọn cách nào phụ thuộc vào yêu cầu recovery và durability. Deterministic event ID và downstream idempotency key vẫn cần thiết.
+Unique key có thể đặt trong database inbox hoặc một durable atomic store khác. Lease cho phép reclaim row `PROCESSING` bị bỏ dở. Settlement API vẫn cần idempotency key riêng, vì crash có thể xảy ra sau network call dù inbox đúng. Outbox làm cho database state và publish intent atomic, nhưng consumer của outbox cũng phải deduplicate. Mỗi guarantee mới đóng một failure window và đồng thời để lộ một failure window khác.
 
-Idempotent **storage** không đồng nghĩa với idempotent **side effect**. Processing row unique ngăn hai row nhưng không thể hoàn tác hai email, provider call hoặc settlement request đã gửi. Với money movement, settlement API cần contract idempotency riêng hoặc durable deduplication boundary. Transactional outbox làm update processing record và intent publish atomic trong một database, nhưng consumer của outbox cũng phải deduplicate.
+Ordering cũng có giới hạn. Partition theo `paymentId` có thể giữ thứ tự của key đó, nhưng không giữ global order. Stale event phải bị deterministic payment state machine từ chối, không phải được tin chỉ vì nó đến từ một partition cụ thể. Poison message cần số lần thử hữu hạn, backoff có jitter và quarantine trong dead-letter topic; nếu không, một payload hỏng có thể chiếm toàn bộ retry.
 
-## Các lựa chọn thiết kế
+## Kiến trúc hình thành sau cùng
 
-**A. Synchronous blocking guardrail.** Conceptual latency thấp nhất khi provider khỏe, nhưng payment availability bị ghép với AI latency, capacity và health của provider. Chỉ dùng cho control có giới hạn chặt và fail-closed nếu business chấp nhận latency đó.
-
-**B. Asynchronous analysis sau acceptance.** Kafka nhận event, guardrail phân tích, rồi policy ở bước sau có thể hold hoặc đưa vào review. Payment path được cô lập và consumer scale độc lập, nhưng không ngăn được action đã authorize nếu state machine không có trạng thái pending.
-
-**C. Hybrid bounded gate.** Chạy check deterministic rẻ ở synchronous path, chỉ gọi AI cho một subset trong budget chặt, đồng thời emit event cho phân tích sâu hơn. Đây thường là cách tách tốt nhất: request chắc chắn xấu bị từ chối nhanh, request không chắc chắn đi qua path có kiểm soát và phân tích đắt tiền chạy asynchronous.
-
-Với gateway này, hướng đề xuất là option C. Hành vi synchronous cụ thể là quyết định về product và risk, không phải giả định tự động của architecture.
-
-## Trade-off
-
-Fail-open tối đa availability nhưng có thể tăng exposure khi provider outage. Fail-closed giảm exposure nhưng có thể từ chối traffic hợp lệ và biến dependency thành denial of service. Review hoặc step-up thường là outcome thứ ba tốt hơn.
-
-Kafka at-least-once processing thực tế và replay được, nhưng cần consumer idempotent. Kafka exactly-once semantics không làm external HTTP settlement call exactly once. Thêm partition tăng throughput nhưng không bảo đảm global ordering. Audit record gọn giúp bảo vệ privacy và chi phí nhưng giảm forensic detail; mặc định nên lưu evidence tối thiểu có thể reproduce thay vì toàn bộ prompt.
-
-## Architecture
-
-Boundary sau khi suy luận là:
+Chỉ sau các quyết định trên, các component mới có lý do tồn tại:
 
 ```text
 JWT-authenticated request
@@ -193,80 +177,39 @@ guardrail consumers
                  OpenSearch (query/index model)
 ```
 
-Kafka là event source và cơ chế replay, không phải ledger. Payment hoặc ledger database vẫn là system of record. OpenSearch là read model cho investigation; nếu index mất, consume event hoặc audit record còn retained để rebuild. Database inbox/outbox hoặc durable store tương đương sở hữu processing state. Application layer điều phối flow; các hexagonal port như `LlmPort`, `KeyProviderPort`, `ProcessingStore`, `PolicyPort` và `DecisionAuditPort` giữ adapter Spring, Kafka, HTTP, secret manager và OpenSearch ở ngoài domain.
+Kafka xuất hiện vì analysis cần hấp thụ burst, replay được và tách khỏi latency của provider. Ledger database vẫn là financial source of truth. Inbox sở hữu processing state. Outbox bảo vệ publish intent. OpenSearch phục vụ investigation và query nhanh; nó có thể được rebuild và không bao giờ authorize settlement.
 
-Guardrail emit recommendation như `ALLOW_WITH_SIGNAL`, `HOLD`, `STEP_UP` hoặc `REVIEW`. Settlement service tự áp dụng state transition có thẩm quyền. Nó không bao giờ coi AI verdict là permission để mutate ledger.
+Guardrail phát ra recommendation bounded như `ALLOW_WITH_SIGNAL`, `HOLD`, `STEP_UP` hoặc `REVIEW`. Payment service áp dụng transition có thẩm quyền và kiểm tra account state, limit cùng idempotency. Model không bao giờ có port tới ledger.
 
-## Các kịch bản failure
+## Thực tế vận hành
 
-- **AI provider unavailable hoặc rate-limited:** circuit mở, không retry vô hạn, policy chọn rules, step-up hoặc review.
-- **Timeout hoặc JSON không hợp lệ:** ghi typed failure và model metadata; không parse text dở dang hay mặc định approve.
-- **Duplicate hoặc event out-of-order:** inbox atomic và event key deterministic trả kết quả cũ. Sequence check nghiệp vụ từ chối state transition cũ.
-- **Consumer crash hoặc rebalance:** lease chưa hoàn tất có thể được reclaim. Downstream idempotency key ngăn external effect lặp lại.
-- **Retry storm:** exponential backoff, jitter, maximum attempts, concurrency limit và circuit breaker giới hạn áp lực. Dead-letter topic quarantine poison message để kiểm tra.
-- **Queue saturation hoặc backpressure:** giới hạn consumer concurrency và local buffer. Pause hoặc giảm intake thay vì cho memory tăng vô hạn; alert theo consumer lag.
-- **Database failure:** không acknowledge Kafka record trước khi durable processing state commit. Nếu database unavailable, record vẫn retryable.
-- **OpenSearch failure:** giữ durable audit hoặc outbox record, alert và rebuild index sau. Search availability không được quyết định settlement correctness.
-- **Model regression hoặc rollback:** deploy model và prompt version như configuration kèm evaluation gate. Route traffic theo version, so sánh decision distribution và giữ version cũ để rollback.
-- **Replay:** replay Kafka chỉ reproduce signal khi lưu input snapshot, feature values, model, prompt, provider và policy version. Nếu không, phải đánh dấu đó là analysis mới, không phải historical truth.
-
-## Capacity & Performance
-
-Capacity bắt đầu từ giả định workload đo được, không phải từ số thread. Nếu phân tích 2.000 event/giây và model p95 latency là 400 ms:
+Với 2.000 event được phân tích mỗi giây và p95 model minh họa là 400 ms:
 
 ```text
 required in-flight calls ~= 2,000/s x 0.4s = 800
 ```
 
-Con số này chưa bao gồm headroom, retry, slow-tail latency, connection limit và provider quota. Concurrency limit nên thấp hơn quota provider và được chọn qua load test; phần việc dư nên nằm trong Kafka thay vì chiếm application thread không giới hạn. Nếu provider chỉ cho 500 concurrent calls, phải dùng detector rẻ hơn, chia traffic hoặc chấp nhận lag. Tăng consumer count không tự tạo thêm provider capacity.
+Đó là work đang xử lý trước khi tính headroom, retry, slow tail, connection limit và provider quota. Nếu provider cho phép 500 call đồng thời, thêm consumer không thể tạo ra 300 slot còn thiếu. FinPay phải giảm lượng gọi model bằng rule, chấp nhận lag, dùng detector khác hoặc thương lượng capacity. Nếu 5% trong 10.000 request mỗi giây gọi model, đó là 500 call mỗi giây, tương đương 43,2 triệu call mỗi ngày trước retry. Cost là một constraint của capacity.
 
-Cost cũng là capacity. Nếu 5% của 10.000 request/giây đi tới model, đó là 500 call/giây, tương đương 43,2 triệu call/ngày trước retry. Rules và statistical feature có thể giảm cả cost lẫn blast radius. Theo dõi token hoặc request usage theo model và service, nhưng không đặt `transaction_id` hoặc `account_id` làm Prometheus label; các giá trị này tạo cardinality không giới hạn. Dùng log hoặc trace cho ID cụ thể.
+On-call lúc 3 giờ sáng cần lần theo một payment qua toàn hệ thống. Trace nên nối request ID, payment ID, event ID, AI inference ID, model version và policy version mà không đưa các identifier đó vào metric label. Metric chỉ nên dùng label bounded như provider, model version, policy version, outcome và error class. Cần theo dõi gateway latency, AI timeout và provider error rate, circuit state, consumer lag và queue age, duplicate rate, policy outcome, retry và DLQ rate, mức sử dụng database connection cùng lỗi index.
 
-## Security & Privacy
+Audit data nên ghi decision timestamp và event timestamp, feature snapshot đã tối giản hoặc protected reference, signal và confidence, validation result, provider, model và prompt version, policy version, latency, fallback reason và override. Không mặc định lưu raw prompt. Dùng hash hoặc reference khi chúng đủ để tái hiện evidence, và ghi rõ phần nào không thể reconstruct.
 
-`X-FinPay-Key-Id` chỉ định danh BYOK credential do caller chọn; nó không phải credential. Resolve secret qua secret manager, giữ secret ngoài source, prompt, exception và log, chỉ đưa vào adapter khi gọi. Rotate và scope key, đồng thời audit việc truy cập key.
+Security cũng tuân theo ranh giới này. Key ID do caller chọn chỉ định danh credential; nó không phải credential. Resolve secret qua secret manager, scope và rotate key, đồng thời không để secret xuất hiện trong prompt, log hay exception. Authenticate caller, authorize tenant, rate-limit trước phần xử lý tốn kém, và ngăn một tenant tiêu thụ toàn bộ provider budget dùng chung. Coi merchant text là dữ liệu hostile, không phải instruction. Tối giản PII, kiểm tra điều khoản retention và residency của provider, rồi áp dụng kiểm soát xóa dữ liệu.
 
-Minimize input gửi cho model. Chỉ gửi field cần cho signal cụ thể, tokenize hoặc redact PII, mã hóa khi truyền và khi lưu, giới hạn quyền operator, áp dụng retention và deletion policy. Không gửi tùy tiện toàn bộ transaction, customer profile hoặc KYC document tới external provider. Trước khi gửi data, cần kiểm tra retention, training, data residency và subprocessor của provider. Prompt injection có thể tìm cách lấy system instruction hoặc context nhạy cảm; coi mọi external text là data và không đưa secret vào prompt.
+Thay đổi model cần evaluation set gồm injection attempt, output hỏng, edge case hợp lệ và outcome đã review. Theo dõi precision, recall, calibration, drift, mức bất đồng với rule deterministic và thay đổi phân phối decision. Version model, prompt, input snapshot, provider và policy. Replay bằng model mới là một analysis mới, không phải bằng chứng về historical truth.
 
-## Observability
+## Bài học của ranh giới này
 
-Metrics vận hành là cần thiết nhưng chưa đủ. Các business và system signal hữu ích gồm:
+Đơn vị kiến trúc hữu ích không phải là “một LLM đứng trước payment”. Đó là một port bounded biến input không tin cậy thành signal có version. Deterministic policy quyết định signal có ý nghĩa gì. Payment state machine quyết định tiền có được chuyển hay không. Ledger ghi financial truth.
 
-- `transactions_processed`, `anomalies_detected`, `review_rate` và decision distribution;
-- false-positive rate và false-negative rate ước tính từ outcome đã review;
-- `ai_timeout_rate`, provider error rate, model error rate, circuit-open event và Kafka lag;
-- request latency, queue age, retry count, dead-letter count và database/OpenSearch failure;
-- AI request cost hoặc token usage, model version, prompt version, policy version và provider.
+Xử lý async giải quyết latency nhưng tạo duplicate delivery. Atomic claim giải quyết concurrent work nhưng không giải quyết external side effect. Retry cải thiện recovery nhưng có thể tạo retry storm. Cache có thể giảm tải nhưng tạo staleness. Mỗi lần sửa đều di chuyển failure boundary; thiết kế tốt làm rõ sự di chuyển đó.
 
-Dùng label có miền giá trị giới hạn như `provider`, `model_version`, `policy_version`, `outcome` và `error_class`. Không bao giờ dùng transaction hoặc account identifier làm Prometheus label value. Log và trace có thể mang protected correlation ID với access control, nhưng phải redact prompt, token, API key và payment data không cần thiết.
-
-Để audit được, tối thiểu lưu `transaction_id`, `event_id`, event timestamp và decision timestamp, minimized feature snapshot, `risk_score` hoặc signal, decision, model version, prompt version, provider, latency, validation result, policy version, fallback reason và human hoặc rule override. Đây không chỉ là application logging. Đây là evidence để giải thích và, khi có thể, reproduce quyết định. Khi raw payload quá nhạy cảm, lưu hash hoặc reference và ghi rõ phần nào không thể reconstruct.
-
-## Các điểm riêng của AI
-
-Hãy đánh giá guardrail như một decision-support system. Hold rate tăng không có nghĩa model tốt hơn. Xây labeled evaluation set cho injection, output sai, edge case hợp lệ và text adversarial. Theo dõi precision, recall, calibration, drift, mức bất đồng với deterministic rule và thay đổi trong decision distribution. Test provider và model change offline trước khi route traffic giống production.
-
-Dùng structured output với giới hạn chặt về size và field, nhưng không nhầm schema compliance với truth. Đặt temperature ít biến động nếu provider hỗ trợ, ghi nhận nondeterminism và làm policy chịu được signal thiếu hoặc confidence thấp. Timeout, explanation bị hallucinate hoặc confidence thấp phải tạo fallback reason rõ ràng. Explanation là evidence cho review, không phải fact có thẩm quyền.
-
-## Nếu làm lại
-
-Chúng tôi sẽ không bắt đầu bằng một service “AI guardrail” tổng quát. Trước hết cần xác định business state machine và authority boundary, sau đó tìm những signal không thể có từ rules hoặc model đã calibrated. KYC intake, RAG retrieval và gateway content analysis nên là các use case bounded riêng, dù chúng có thể dùng chung AI core library.
-
-Replay cũng phải là yêu cầu từ đầu. Lưu input và decision có version, dùng inbox/outbox, rồi test duplicate, crash, rebalance, provider outage và index rebuild trước khi tối ưu happy path. Architecture là kết quả của các guarantee đó, không phải điểm xuất phát.
-
-## Bài học chính
-
-1. Đặt AI sau một port có giới hạn và để nó tạo signal, không tạo command chuyển tiền.
-2. Dùng durable idempotency boundary có atomic operation; `exists()` rồi `save()` không an toàn khi concurrent.
-3. Tách Kafka replay, ledger system of record và query model của OpenSearch.
-4. Thiết kế timeout, fallback, backpressure và provider outage trước khi chọn model.
-5. Version model, prompt, feature snapshot, policy và provider để audit và replay quyết định.
-6. Đo business outcome cùng latency và error, đồng thời giữ identifier cardinality cao ngoài Prometheus label.
-7. Minimize data nhạy cảm gửi tới AI provider và coi external text là untrusted data.
+Ở các lớp FinPay tiếp theo, đây là contract cần giữ: AI có thể tư vấn, giải thích, phân loại và enrich. Nó không trở thành authority chỉ vì được đặt gần payment API.
 
 ## Tài liệu tham khảo
 
-- Apache Kafka, “Message Delivery Semantics”: <https://kafka.apache.org/documentation/#semantics>
+- Tài liệu Apache Kafka, “Message Delivery Semantics”: <https://kafka.apache.org/documentation/#semantics>
 - OWASP, “LLM01: Prompt Injection”: <https://owasp.org/www-project-top-10-for-large-language-model-applications/>
-- Prometheus, “Instrumentation labels”: <https://prometheus.io/docs/practices/instrumentation/#labels>
+- Tài liệu Prometheus, “Instrumentation labels”: <https://prometheus.io/docs/practices/instrumentation/#labels>
 - NIST, “AI Risk Management Framework”: <https://www.nist.gov/itl/ai-risk-management-framework>

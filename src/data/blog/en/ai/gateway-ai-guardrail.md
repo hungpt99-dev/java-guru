@@ -7,169 +7,153 @@ draft: false
 featured: false
 ---
 
-Repo: <https://github.com/finpay-lab/gateway>
+## The Boundary We Need
 
-## The Problem
+FinPay already has a payment core. Its ledger is the system of record; settlement is a deterministic state machine. A payment can move from `RECEIVED` to `AUTHORIZED`, `HELD`, or `REJECTED` only through business rules that can be audited and replayed.
 
-Consider a payment gateway that has already authenticated a caller with JWT and now has to route a request. The request may contain free text from a merchant, customer, or upstream integration. That text can contain a prompt-injection attempt, malformed instructions, or a description that conflicts with the structured payment fields.
+Now a merchant sends a payment with a free-text note. The note might be harmless context, an attempt to override a review rule, or text copied from an untrusted customer. The team wants an AI check before routing the payment. That request sounds like “send the text to a model and reject a bad answer.” It is not that simple. A remote model is slow, probabilistic, expensive, and controlled by a provider outside FinPay’s failure domain.
 
-The team wants an AI check before routing. It sounds modest: send the text to a model, receive a fraud or safety verdict, and reject suspicious requests. The engineering question is more precise:
+The real design question is:
 
-> How can a gateway use an uncertain, remote, expensive component without letting it become the authority for money movement?
+> How can an API gateway use an uncertain dependency without allowing it to authorize, reject, or mutate money directly?
 
-This is a fictional/reference design, not a claim about an independently verified FinPay deployment. A production-oriented design would put the guardrail after JWT authentication and before routing, but would keep settlement and deterministic business rules authoritative.
-
-## Why This Is Harder Than It Looks
-
-The guardrail is not just a classifier. It sits at the intersection of two very different contracts:
-
-- The ledger and settlement path needs strict consistency, stable outcomes, and controlled side effects.
-- Anomaly and content analysis can tolerate eventual processing, bounded uncertainty, and a fallback.
-
-Keeping those paths separate lets each fail independently. A model can time out without corrupting a payment, and an audit index can be rebuilt without becoming the source of truth.
-
-The model also has failure modes that a normal HTTP dependency does not: false positives, false negatives, nondeterministic responses, prompt injection, hallucinated fields, model or prompt changes, provider rate limits, and an answer that is syntactically valid but semantically impossible. A valid JSON document is not evidence that a payment decision is valid.
-
-The useful contract is therefore:
+This is a fictional reference design, not a claim about a deployed FinPay system. The central boundary is proposed, not discovered from production measurements:
 
 ```text
-AI signal -> deterministic policy -> business decision
+AI inference -> bounded AI signal -> deterministic policy -> business decision -> financial state transition
 ```
 
-Not:
+The model may report `injection_suspected`, a risk score, or a classification. It may not update an account balance, write the ledger, authorize settlement, or turn its own explanation into a payment command.
+
+## The Obvious Design Fails
+
+The first sketch is attractive because it has almost no moving parts:
 
 ```text
-AI response -> block money
+client -> JWT authentication -> LLM -> route or reject -> payment service
 ```
 
-## The Naive Design
+The gateway sends the authenticated request to the model and routes only if the model says `allow`. That makes the model a hidden authorization service. It also makes every payment depend on model latency and provider availability.
 
-The smallest design places the model in the synchronous gateway path:
+Suppose, as an illustrative capacity assumption, the gateway receives 10,000 requests per second and the provider takes two seconds. The model stage creates approximately:
 
 ```text
-client -> JWT auth -> LLM -> route or reject -> payment service
+in-flight concurrency = throughput x latency = 10,000/s x 2s = 20,000 calls
 ```
 
-It appears to solve the problem with little infrastructure. The model sees the request, returns JSON, and the gateway routes only when the answer is positive.
+At ten seconds, the same traffic creates 100,000 in-flight calls. Increasing a thread pool does not create provider capacity. It consumes memory, connections, and downstream slots until the queue becomes the outage.
 
-## Where the Naive Design Breaks
+There is a second problem: the timeout does not stop propagation. At 14:03, imagine provider latency rising from 300 ms to 4 seconds. Gateway workers remain occupied, request deadlines expire at different layers, and an optimistic retry sends another request while the first is still running. Connection pools fill. The provider rate limit starts returning errors. The retry queue grows, and healthy payments now compete with failed AI calls. A circuit breaker and concurrency limit are not performance decorations; they stop this dependency from taking the payment path with it.
 
-At 10,000 requests per second, a synchronous model call makes the gateway an AI connection pool. If the provider takes two seconds, Little's Law gives an approximate in-flight demand of:
+The model’s answer creates correctness problems too. It can produce valid JSON with an impossible amount, a fabricated reason, or a confident false positive. A false negative may expose a suspicious payment; a false positive may deny a legitimate merchant. Neither consequence should be selected accidentally by whichever timeout or parser branch happened to run.
 
-```text
-concurrency = throughput x latency = 10,000/s x 2s = 20,000 calls
-```
+Finally, an asynchronous repair is not automatically safe. A consumer can crash after calling a downstream service but before recording completion. The message is delivered again. An `exists()` check followed by an insert lets two consumers both see “absent” and both call the provider. A search index can accept the verdict while the durable record is missing, or fail while the payment is healthy. Search is a read model, not the ledger.
 
-At ten seconds, it is 100,000 calls. A fixed thread pool of four is not a capacity plan; it merely turns overload into a queue. A queue with no bounded admission policy eventually consumes memory and increases customer latency.
+## Constraints Before Components
 
-Other failures are less visible:
+For this example, we assume the following design constraints. They are assumptions, not FinPay production measurements:
 
-- The provider is unavailable, so every request waits for a timeout. Retries amplify the outage and can create a retry storm.
-- A model says `allow` after a false negative, or says `block` for a legitimate customer. The business must choose the consequence; the model cannot choose it implicitly.
-- Payment succeeds, then audit indexing fails. Treating OpenSearch as the authority would make a harmless index outage look like a payment failure; treating it as best-effort without an audit plan loses evidence.
-- A Kafka record is redelivered after a consumer crash. An `exists()` check followed by an insert is racy: two consumers can both observe `false` and both call the provider or downstream side effect.
-- A consumer rebalance or out-of-order event may process a newer request before an older one. Ordering is not automatically preserved across partitions or business keys.
-- One malformed record is retried forever, starving healthy records: a poison message needs a bounded retry policy and a dead-letter or quarantine path.
-- A model update changes the decision distribution. Without model and prompt versions, the team cannot explain why two equivalent requests received different treatment or reproduce a previous result.
+- Payment authorization and ledger transitions must remain deterministic, auditable, and independent of an LLM response.
+- The synchronous gateway budget is bounded. The design must declare what happens when that budget is exhausted.
+- Free text is untrusted input. Customer PII and credentials must not be sent to a model merely because the gateway can access them.
+- Provider quotas, latency, model changes, and outages are outside FinPay’s direct control.
+- Analysis must be replayable enough to investigate a decision, while raw prompts and payment data follow retention rules.
+- Duplicate delivery and consumer crashes are normal recovery events, not exceptional cases.
+- Search and dashboards may be unavailable without changing financial truth.
 
-The failure that looks harmless is often an audit write. If the system writes a verdict to an OpenSearch index and considers the operation complete, an index loss silently destroys the query model. OpenSearch is useful for search and investigation, but Kafka or a durable audit store must retain the rebuildable source.
+These constraints rule out “the LLM is the final check.” They do not yet tell us whether every request should wait synchronously.
 
-## The First Design Decision
+## Choosing the Detector
 
-The gateway must not ask the model to approve a payment. It asks for a bounded signal about untrusted content or unusual attributes. Policy then combines that signal with authoritative facts:
+Rules are the right tool for schema validation, allowlists, amount limits, and obvious prompt-injection patterns. They are fast and explainable, but they do not generalize well.
 
-```text
-structured payment + bounded text -> AI signal
-AI signal + rules + limits + account state -> policy outcome
-policy outcome -> route, step-up, hold, or manual review
-```
+Velocity and peer-group statistics can identify unusual amount or frequency patterns. They are inexpensive, but seasonal merchant behavior can look anomalous. A calibrated traditional model may be a better fit for a stable risk score, provided FinPay has labels, drift checks, and a release process.
 
-A policy may treat `confidence=0.61` as “review” rather than “block.” It may ignore a model claim that contradicts the payment amount or authenticated account. The policy is deterministic, versioned, tested, and accountable to the business.
+An LLM is useful when the signal depends on ambiguous free text or small structured extraction. It is also the least predictable option here: output can be nondeterministic, latency and cost vary, and a malicious note can try to influence the instructions. The gateway should not use an LLM where a rule or calibrated model is sufficient.
 
-## The Hard Engineering Problems
+The shared AI core from the earlier FinPay article gives adapters a narrow `LlmPort`, redaction, deadlines, provider metadata, and metrics. Reusing that port avoids duplicating provider mechanics. It must not hide gateway policy. KYC intake and retrieval-augmented explanations are different bounded use cases; this guardrail should not retrieve arbitrary knowledge or send a full customer profile to an external model.
 
-### 1. What kind of detector belongs here?
+## Make the Signal Bounded
 
-There is no reason to use an LLM for every signal.
-
-- **Rules** fit known indicators, allowlists, amount limits, schema constraints, and prompt-injection patterns. They are fast and explainable, but brittle against new patterns.
-- **Statistical methods** fit rate, amount, velocity, and peer-group deviations. They are cheap and useful for baselines, but can confuse legitimate seasonal behavior with risk.
-- **Traditional ML** fits a trained fraud or risk score over stable features. It supports calibration and offline evaluation, but requires labeled data, drift monitoring, and a controlled release process.
-- **LLMs** fit ambiguous free text, classification with context, and extracting a small set of structured signals. They are slower, costlier, nondeterministic, and vulnerable to prompt injection and hallucination. They should not be the only control on a payment path.
-
-The gateway can use a shared AI core library for provider adapters, timeouts, redaction, model metadata, and metrics. It should not use that library to hide business policy. KYC document intake and RAG-based transaction explanation are separate use cases: a gateway guardrail should not retrieve arbitrary knowledge or send a full customer profile to an external model merely because a shared client makes it easy.
-
-### 2. How do we make a remote model bounded?
-
-`LlmPort` should expose a narrow operation, such as `analyze(BoundedInput)`, rather than a general chat interface. The adapter should enforce:
-
-- a total deadline propagated from the request or event;
-- connection, read, and response-size limits;
-- one or a small number of retries only for classified transient failures;
-- exponential backoff with jitter;
-- a circuit breaker and concurrency limit;
-- provider rate-limit handling and a fallback outcome.
-
-If the caller has a 300 ms budget, a retry that can consume another 300 ms is not a retry policy; it is a timeout violation. When the provider is down, the guardrail should return `unavailable` and route to deterministic rules, step-up authentication, or review according to policy. Failure must not silently become approval.
-
-### 3. How do we prevent duplicate work and duplicate effects?
-
-This code is not idempotent:
+The port should accept a purpose-specific input, not a general chat transcript:
 
 ```java
-// WRONG: the check and the write are separate operations.
-if (!processingStore.exists(eventId)) {
-    ModelOutput output = llm.analyze(input);
-    settlementApi.execute(output);
-    processingStore.save(eventId, output);
+record BoundedInput(
+        String paymentId,
+        String merchantText,
+        long amountMinor,
+        String currency) {}
+
+record AiSignal(
+        String classification,
+        double confidence,
+        String modelVersion,
+        String promptVersion) {}
+```
+
+The adapter redacts or tokenizes fields before the call, caps input and output size, and validates strict structured output. A syntactically valid response still needs semantic checks: confidence must be in range, classification must be known, and the model cannot invent authoritative payment facts. The adapter has connection, read, and total deadlines. A retry is allowed only for a classified transient failure and only if the remaining deadline permits it.
+
+If a request has a 300 ms budget, a second 300 ms retry violates the budget. Exponential backoff with jitter, a provider rate-limit policy, a circuit breaker, and a concurrency limit bound the damage. When the provider is unavailable, the adapter returns a typed `unavailable` result, not an implicit `allow`.
+
+## Sync, Async, or Hybrid?
+
+Three alternatives are reasonable.
+
+**Synchronous blocking.** A healthy provider gives an immediate signal, but payment availability is coupled to model latency, quota, and provider health. This is acceptable only for a narrow gate when the business explicitly accepts its latency and degraded-mode behavior.
+
+**Asynchronous analysis after acceptance.** The gateway accepts the payment and publishes an event; a consumer later analyzes it and can place the payment into `HELD` or `REVIEW`. This protects gateway latency and supports replay, but it cannot prevent an already-authorized side effect. The payment state machine must support a pending or compensating path.
+
+**Hybrid bounded gate.** Cheap deterministic checks run synchronously. Only a selected subset receives a model call within a strict deadline, while deeper analysis is published for asynchronous processing. This costs more design effort, but keeps the high-volume path predictable and gives uncertain cases a controlled outcome.
+
+We choose the hybrid design for this reference system because it preserves a small synchronous safety boundary without making AI a prerequisite for every payment. The exact outcome is a product and risk decision:
+
+- `fail-open` protects availability but increases exposure during an outage;
+- `fail-closed` limits exposure but can turn a provider outage into a denial of service;
+- `STEP_UP` asks for stronger authentication and adds friction;
+- `REVIEW` leaves the payment in a deterministic pending state.
+
+Low-risk payments may use deterministic rules when AI is unavailable. High-risk payment classes may require step-up or review. “AI failed, so block everything” is not an architecture; it is an unexamined business decision.
+
+## Async Creates a New Correctness Problem
+
+The event boundary isolates latency, but at-least-once delivery means a consumer must expect duplicates. This is unsafe:
+
+```java
+// WRONG: the check and the side effect are separate.
+if (!store.exists(eventId)) {
+    AiSignal signal = llm.analyze(input);
+    settlementApi.execute(signal);
+    store.save(eventId, signal);
 }
 ```
 
-Two consumers can both see `false`. A crash after `settlementApi.execute` and before `save` causes a replay to execute the external effect again.
-
-The real boundary needs an atomic claim, normally a unique constraint or atomic insert:
+A crash after `execute` and before `save` repeats the external call. An atomic inbox claim prevents concurrent processing of the same event, but storage idempotency does not make an external side effect idempotent:
 
 ```java
 // RIGHT: claim atomically; the unique key serializes duplicates.
-if (!processingStore.insertIfAbsent(eventId, PROCESSING)) {
-    return processingStore.resultFor(eventId); // existing or in-progress
+if (!store.insertIfAbsent(eventId, PROCESSING)) {
+    return store.resultFor(eventId); // existing or in-progress
 }
 
 try {
-    ModelOutput output = llm.analyze(input);
-    GuardrailVerdict verdict = policy.validate(input, output);
-    processingStore.complete(eventId, verdict); // durable result
-    outbox.append(eventId, verdict);            // publish later
+    AiSignal signal = llm.analyze(input);
+    Verdict verdict = policy.evaluate(input, signal);
+    store.complete(eventId, verdict);
+    outbox.append(eventId, verdict); // publish after durable state is committed
     return verdict;
 } catch (RetryableFailure failure) {
-    processingStore.releaseOrLease(eventId);
+    store.releaseOrLease(eventId);
     throw failure;
 }
 ```
 
-`insertIfAbsent` can be backed by a database unique index, Redis `SETNX` with an expiry, or a transactional inbox. The choice depends on recovery and durability requirements. A deterministic event ID and downstream idempotency key are still required.
+The unique key can live in a database inbox or another durable atomic store. A lease makes abandoned `PROCESSING` rows reclaimable. The settlement API still needs its own idempotency key, because a crash can happen after the network call even when the inbox is correct. An outbox makes the database state and publish intent atomic, but its consumers must deduplicate too. Each new guarantee closes one failure window and exposes another.
 
-Idempotent **storage** is not idempotent **side effects**. A unique processing row prevents two rows, but it cannot undo two emails, provider calls, or settlement requests already sent. For money movement, the settlement API needs its own idempotency contract or a durable deduplication boundary. A transactional outbox makes the processing-record update and the intent to publish atomic within one database, but the consumer of that outbox must also deduplicate.
+Ordering is similarly limited. Partitioning by `paymentId` can preserve order for that key, but not global order. A stale event must be rejected by the deterministic payment state machine, not trusted because it arrived from a particular partition. Poison messages need bounded attempts, backoff and jitter, and quarantine in a dead-letter topic; otherwise one malformed payload can consume all retries.
 
-## Design Options
+## The Resulting Architecture
 
-**A. Synchronous blocking guardrail.** Lowest conceptual latency when the provider is healthy, but it couples payment availability to AI latency, capacity, and provider health. Use only for a narrowly bounded, fail-closed control when the business accepts the latency.
-
-**B. Asynchronous analysis after acceptance.** Kafka receives the event, the guardrail analyzes it, and a later policy action can hold or review the transaction. This isolates the payment path and scales consumers independently, but cannot prevent an already authorized action unless the business state machine supports a pending state.
-
-**C. Hybrid bounded gate.** Run cheap deterministic checks synchronously, optionally call AI within a strict budget for a subset, and emit an event for deeper analysis. This usually gives the best separation: obvious bad requests fail quickly, uncertain requests take a controlled path, and expensive analysis is asynchronous.
-
-For this gateway, option C is the proposed direction. The exact synchronous behavior is a product and risk decision, not an architectural assumption.
-
-## Trade-offs
-
-Fail-open maximizes availability but can increase exposure during a provider outage. Fail-closed reduces that exposure but can deny legitimate traffic and create a denial of service through the dependency. A review or step-up state is often a better third outcome.
-
-At-least-once Kafka processing is practical and replayable, but requires idempotent consumers. Exactly-once Kafka semantics do not make an external HTTP settlement call exactly once. More partitions improve throughput but do not guarantee global ordering. A compact audit record protects privacy and cost but may reduce forensic detail; the system should store the minimum reproducible evidence rather than entire prompts by default.
-
-## The Architecture
-
-The resulting boundary is:
+Only after those decisions do the components earn their place:
 
 ```text
 JWT-authenticated request
@@ -193,76 +177,35 @@ guardrail consumers
                  OpenSearch (query/index model)
 ```
 
-Kafka is the event source and replay mechanism, not the ledger. The payment or ledger database remains the system of record. OpenSearch is a read model for investigations; if its index is lost, consume retained events or audit records and rebuild it. A database inbox/outbox or equivalent durable store owns processing state. The application layer coordinates this flow; hexagonal ports such as `LlmPort`, `KeyProviderPort`, `ProcessingStore`, `PolicyPort`, and `DecisionAuditPort` keep Spring, Kafka, HTTP, secret-manager, and OpenSearch adapters outside the domain.
+Kafka exists here because the analysis must absorb bursts, be replayable, and be decoupled from provider latency. The ledger database remains the financial source of truth. The inbox owns processing state. The outbox protects publication intent. OpenSearch exists for investigation and query speed; it can be rebuilt and never authorizes settlement.
 
-The guardrail emits a recommendation such as `ALLOW_WITH_SIGNAL`, `HOLD`, `STEP_UP`, or `REVIEW`. A settlement service applies its own authoritative state transition. It never treats an AI verdict as permission to mutate the ledger.
+The guardrail emits a bounded recommendation such as `ALLOW_WITH_SIGNAL`, `HOLD`, `STEP_UP`, or `REVIEW`. A payment service applies the authoritative transition and enforces account state, limits, and idempotency. The model never receives a port to the ledger.
 
-## Failure Scenarios
+## Operational Reality
 
-- **AI provider unavailable or rate-limited:** circuit opens, no unbounded retry occurs, and policy selects rules, step-up, or review.
-- **Timeout or invalid JSON:** record a typed failure and model metadata; do not parse partial text or approve by default.
-- **Duplicate or out-of-order event:** the atomic inbox and deterministic event key return the prior result. Business sequence checks reject stale state transitions.
-- **Consumer crash or rebalance:** an unfinished lease becomes reclaimable. The downstream idempotency key prevents repeated external effects.
-- **Retry storm:** exponential backoff, jitter, maximum attempts, concurrency limits, and a circuit breaker cap pressure. A dead-letter topic quarantines poison messages for inspection.
-- **Queue saturation or backpressure:** bound Kafka consumer concurrency and local buffers. Pause or slow intake rather than allowing unbounded memory growth; alert on consumer lag.
-- **Database failure:** do not acknowledge the Kafka record until the durable processing state is committed. If the database is unavailable, the record remains retryable.
-- **OpenSearch failure:** keep the durable audit or outbox record, alert, and rebuild the index later. Search availability must not determine settlement correctness.
-- **Model regression or rollback:** deploy model and prompt versions as configuration with evaluation gates. Route traffic by version, compare decision distributions, and retain the prior version for rollback.
-- **Replay:** replaying Kafka should reproduce signals only when the input snapshot, feature values, model, prompt, provider, and policy versions are retained. Otherwise mark the result as a new analysis, not historical truth.
-
-## Capacity & Performance
-
-Capacity starts with measured workload assumptions, not a thread count. If 2,000 events/s are analyzed and the model p95 latency is 400 ms:
+At 2,000 analyzed events per second and an illustrative model p95 of 400 ms:
 
 ```text
 required in-flight calls ~= 2,000/s x 0.4s = 800
 ```
 
-That is before headroom, retries, slow-tail latency, connection limits, and provider quotas. A concurrency limit should be lower than the provider quota and sized through load tests; excess work should remain in Kafka rather than occupy unbounded application threads. If the provider allows 500 concurrent calls, the design must either use a cheaper detector, partition traffic, or accept lag. Raising consumer count alone cannot create provider capacity.
+That is in-flight work before headroom, retries, slow tails, connection limits, and provider quotas. If the provider permits 500 concurrent calls, adding consumers cannot create the missing 300 slots. FinPay must reduce model traffic with rules, accept lag, use another detector, or negotiate capacity. If 5% of 10,000 requests per second reach the model, that is 500 calls per second, or 43.2 million calls per day before retries. Cost is a capacity constraint.
 
-Cost is also capacity. If 5% of 10,000 requests/s reach a model, that is 500 calls/s, or 43.2 million calls per day before retries. Rules and statistical features can reduce both cost and blast radius. Track token or request usage by model and service, but never place `transaction_id` or `account_id` in Prometheus labels; those create unbounded cardinality. Use logs or traces for individual IDs.
+An on-call engineer at 3 AM needs to follow one payment through the system. Traces should connect a request ID, payment ID, event ID, AI inference ID, model version, and policy version without putting those identifiers into metric labels. Metrics should use bounded labels such as provider, model version, policy version, outcome, and error class. Watch gateway latency, AI timeout and provider error rates, circuit state, consumer lag and queue age, duplicate rate, policy outcomes, retry and DLQ rates, database connection utilization, and index failures.
 
-## Security & Privacy
+Audit data should record decision and event timestamps, a minimized feature snapshot or protected reference, signal and confidence, validation result, provider, model and prompt versions, policy version, latency, fallback reason, and override. Do not retain raw prompts by default. Store hashes or references when they are enough to reproduce the evidence, and document what cannot be reconstructed.
 
-`X-FinPay-Key-Id` identifies a caller-selected BYOK credential; it is not the credential. Resolve the secret through a secret manager, keep it out of source, prompts, exceptions, and logs, and expose it to the adapter only for the call. Rotate and scope keys, and audit access to them.
+Security follows the same boundary. A caller-selected key ID identifies a credential; it is not the credential. Resolve the secret through a secret manager, scope and rotate it, and keep it out of prompts, logs, and exceptions. Authenticate callers, authorize tenants, rate-limit before expensive work, and prevent one tenant from consuming the shared provider budget. Treat merchant text as hostile data, not instructions. Minimize PII, verify provider retention and residency terms, and apply deletion controls.
 
-Minimize the model input. Send only the fields needed for the specific signal, tokenize or redact PII, encrypt data in transit and at rest, restrict operator access, and enforce retention and deletion policies. Do not casually send an entire transaction, customer profile, or KYC document to an external provider. Verify provider retention, training, residency, and subprocessors before sending data. Prompt injection can attempt to extract system instructions or sensitive context; treat all external text as data and keep secrets out of prompts.
+Model changes need evaluation sets containing injection attempts, malformed output, legitimate edge cases, and reviewed outcomes. Track precision, recall, calibration, drift, disagreement with deterministic rules, and decision-distribution changes. Version the model, prompt, input snapshot, provider, and policy. A replay with a changed model is a new analysis, not proof of historical truth.
 
-## Observability
+## What This Boundary Teaches
 
-Operational metrics are necessary but insufficient. Useful business and system signals include:
+The useful architectural unit is not “an LLM in front of payments.” It is a bounded port that turns untrusted input into a versioned signal. Deterministic policy decides what that signal means. The payment state machine decides whether money may move. The ledger records the financial truth.
 
-- `transactions_processed`, `anomalies_detected`, `review_rate`, and decision distribution;
-- estimated false-positive and false-negative rates from reviewed outcomes;
-- `ai_timeout_rate`, provider error rate, model error rate, circuit-open events, and Kafka lag;
-- request latency, queue age, retry count, dead-letter count, and database/OpenSearch failures;
-- AI request cost or token usage, model version, prompt version, policy version, and provider.
+Async processing solves the latency problem but creates duplicate delivery. Atomic claims solve concurrent work but do not solve external side effects. Retries improve recovery but can create storms. Caches may reduce load but introduce staleness. Every fix moves the failure boundary; experienced design makes that movement explicit.
 
-Use bounded labels such as `provider`, `model_version`, `policy_version`, `outcome`, and `error_class`. Never use transaction or account identifiers as Prometheus label values. Logs and traces may carry a protected correlation ID under access control, but should redact prompts, tokens, API keys, and unnecessary payment data.
-
-For auditability, preserve at least `transaction_id`, `event_id`, event and decision timestamps, the minimized feature snapshot, `risk_score` or signal, decision, model version, prompt version, provider, latency, validation result, policy version, fallback reason, and human or rule override. This is more than application logging. It is the evidence needed to explain and, where possible, reproduce a decision. Store hashes or references when the raw payload is too sensitive, and document what cannot be reconstructed.
-
-## AI-Specific Considerations
-
-Evaluate the guardrail as a decision-support system. A hold rate can rise while the model becomes worse. Build labeled evaluation sets for injection, malformed output, legitimate edge cases, and adversarial text. Monitor precision, recall, calibration, drift, disagreement with deterministic rules, and changes in decision distribution. Test provider and model changes offline before routing production-like traffic.
-
-Use structured output with strict size and field constraints, but do not confuse schema compliance with truth. Set a low-variance temperature where supported, record nondeterminism, and make policy robust to missing or low-confidence signals. A timeout, hallucinated explanation, or low confidence should produce an explicit fallback reason. Explanations are evidence for review, not authoritative facts.
-
-## What We Would Do Differently
-
-We would avoid starting with a generic “AI guardrail” service. First define the business state machine and authority boundary, then identify which signals cannot be produced by rules or a calibrated model. We would keep KYC intake, RAG retrieval, and gateway content analysis as separate bounded use cases even if they share an AI core library.
-
-We would also make replay a design requirement at the beginning. Capture versioned inputs and decisions, use an inbox/outbox, and test duplicate, crash, rebalance, provider outage, and index rebuild scenarios before optimizing the happy path. The architecture is a consequence of those guarantees, not the other way around.
-
-## Key Lessons
-
-1. Put AI behind a bounded port and make it produce a signal, not a money-moving command.
-2. Use an atomic durable idempotency boundary; `exists()` followed by `save()` is not safe under concurrency.
-3. Separate Kafka replay, the ledger system of record, and OpenSearch’s query model.
-4. Design timeout, fallback, backpressure, and provider outage behavior before choosing a model.
-5. Version the model, prompt, policy, input features, and provider so decisions can be audited and replayed.
-6. Measure business outcomes as well as latency and errors, while keeping high-cardinality identifiers out of Prometheus labels.
-7. Minimize sensitive data sent to AI providers and treat external text as untrusted data.
+For the next FinPay layers, this boundary is the useful contract: AI can advise, explain, classify, and enrich. It cannot become the authority merely because it sits close to the payment API.
 
 ## References
 
