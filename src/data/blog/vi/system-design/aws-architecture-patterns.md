@@ -1,46 +1,46 @@
 ---
-title: "AWS Architecture Blog: Các Mẫu Thiết kế Hệ thống Sản xuất"
-description: "Phân tích có kỷ luật nguồn về hệ thống sản xuất đa AZ, tách rời, dựa trên hàng đợi và có khả năng chống lỗi, cùng một phần mở rộng dùng cho phỏng vấn."
+title: "Xử lý đơn hàng production với các mẫu kiến trúc AWS"
+description: "Thiết kế có phân biệt nguồn cho một hệ thống xử lý đơn hàng đa AZ, dựa trên hàng đợi, kèm ranh giới lỗi và bảo đảm delivery."
 pubDatetime: 2026-08-16T10:00:00+07:00
 tags: ["system-design", "big-tech", "architecture"]
 draft: false
 featured: false
 ---
 
-## 1. Original Engineering Problem
+## 1. Bài toán và phạm vi
 
-[SOURCE FACT] Nguồn được cung cấp là AWS Architecture Blog, một tuyển tập do AWS xuất bản tại [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/). Đoạn trích đã xác minh được cung cấp không mô tả một hệ thống sản xuất cụ thể, lưu lượng, lược đồ cơ sở dữ liệu hay cách triển khai nào.
+[SOURCE FACT] Nguồn được cung cấp là [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/). Tài liệu đã xác minh được cung cấp cùng bài viết không mô tả một hệ thống production cụ thể, traffic, schema cơ sở dữ liệu hay chi tiết triển khai nào.
 
-[ANALYSIS] Giới hạn này rất quan trọng. Một trang tập hợp về kiến trúc không phải là bằng chứng cho một cấu trúc liên kết nội bộ cụ thể của AWS. Câu hỏi kỹ thuật có thể bảo vệ được là: làm thế nào chuyển trọng tâm về thiết kế well-architected, triển khai đa AZ, tách rời, hàng đợi và khả năng chống lỗi thành một hệ thống có thể chịu lỗi cục bộ mà không buộc người gọi đồng bộ phải chờ mọi thao tác phía sau?
+[ANALYSIS] Giới hạn này quyết định những gì có thể khẳng định. Một trang tập hợp bài viết về kiến trúc không phải bằng chứng cho topology nội bộ cụ thể của AWS. Câu hỏi kỹ thuật hữu ích là: làm thế nào áp dụng các chủ đề như well-architected design, triển khai multi-AZ, decoupling, queue và resilience vào một hệ thống chịu được partial failure mà không buộc caller đồng bộ chờ mọi downstream operation?
 
-[PROPOSED DESIGN] Ta sẽ thiết kế một nền tảng xử lý đơn hàng. Máy khách gửi đơn, nhận phản hồi chấp nhận đã được lưu bền vững, rồi theo dõi tiến độ hoàn tất sau đó. Nền tảng phải giữ được ý định của đơn, tránh tác dụng phụ trùng lặp khi retry, cô lập worker chậm khỏi đường dẫn request, và tiếp tục nhận việc khi một availability zone hoặc một nhóm worker bị suy giảm.
+[PROPOSED DESIGN] Bài viết dùng một nền tảng xử lý đơn hàng làm bài toán thiết kế cụ thể. Client gửi order, nhận response sau khi request đã được ghi durable, rồi đọc tiến độ fulfillment sau đó. Nền tảng phải giữ được intent của order, tránh duplicate side effect khi retry, đưa worker chậm ra khỏi request path, và tiếp tục nhận việc khi một availability zone hoặc worker pool bị suy giảm.
 
-Vấn đề cốt lõi không phải là chọn một dịch vụ thời thượng. Đó là chọn ranh giới lỗi và làm rõ các bảo đảm:
+Phần quan trọng nhất là xác định failure boundary và guarantee:
 
-- Đường dẫn đồng bộ xác thực và ghi bền vững một đơn hàng.
-- Hàng đợi hấp thụ đột biến và tách việc tiếp nhận khỏi xử lý.
+- Synchronous path xác thực và ghi durable order.
+- Queue hấp thụ burst và tách admission khỏi processing.
 - Worker thực hiện fulfillment idempotent và phát hành thay đổi trạng thái.
-- Đường đọc vẫn khả dụng khi xử lý bất đồng bộ bị chậm.
+- Read path vẫn hoạt động khi async processing bị chậm.
 
-## 2. What the Original System Did
+## 2. Ranh giới nguồn và hệ thống đề xuất
 
-[SOURCE FACT] Tài liệu đã xác minh được cung cấp cho bài viết này không mô tả hệ thống runtime gốc nào. Nguồn duy nhất được xác minh là trang AWS Architecture Blog: https://aws.amazon.com/blogs/architecture/.
+[SOURCE FACT] Tài liệu đã xác minh được cung cấp cho bài viết không mô tả runtime system gốc nào. Nguồn duy nhất được xác minh là landing page của AWS Architecture Blog: https://aws.amazon.com/blogs/architecture/.
 
-[ANALYSIS] Vì vậy, không có cách có trách nhiệm để viết rằng “AWS đã sử dụng” một hàng đợi, cơ sở dữ liệu, chính sách retry hay sơ đồ đa AZ cụ thể dựa trên nguồn này. Các mẫu trong bài nên được đọc là phân tích kỹ thuật về trọng tâm được yêu cầu, không phải bản tái dựng một triển khai sản xuất của AWS.
+[ANALYSIS] Vì vậy, sẽ không có cơ sở nếu nói AWS đã dùng queue, database, retry policy hay sơ đồ multi-AZ cụ thể dựa trên nguồn này. Các mẫu bên dưới là phân tích kỹ thuật và proposed design, không phải bản tái dựng một triển khai production của AWS.
 
-[PROPOSED DESIGN] Trong nền tảng đề xuất, dịch vụ request ghi đơn hàng và bản ghi outbox trong cùng một giao dịch cơ sở dữ liệu. Một relay phát hành bản ghi outbox vào hàng đợi bền vững. Fulfillment worker đọc message, cập nhật trạng thái đơn và ghi nhận kết quả idempotency. Một consumer thông báo riêng xử lý email hoặc webhook. Các consumer này có thể được scale, tạm dừng hoặc sửa chữa độc lập.
+[PROPOSED DESIGN] Request service ghi order và outbox record trong cùng một database transaction. Outbox relay phát hành record vào durable queue. Fulfillment worker consume message, cập nhật order state và ghi nhận kết quả idempotency. Notification consumer riêng xử lý email hoặc webhook. Các consumer có thể được scale, pause hoặc repair độc lập.
 
-Lựa chọn này tạo ra một hợp đồng hữu ích: đơn được chấp nhận nghĩa là “nền tảng đã ghi bền vững request”, không phải “mọi hành động phía sau đã hoàn tất”. Phân biệt đó ngăn nhà cung cấp thông báo chậm kéo dài latency của request khách hàng.
+Do đó, accepted order chỉ có nghĩa nền tảng đã ghi request một cách durable. Nó không có nghĩa mọi downstream action đã hoàn tất. Contract này ngăn notification provider chậm kéo dài request latency của khách hàng.
 
-## 3. Architecture Diagram
+## 3. Kiến trúc
 
-[ANALYSIS] Sơ đồ không có runtime component nào được nguồn hỗ trợ vì đoạn trích được cung cấp không nêu component nào. Bối cảnh nguồn được hiển thị riêng để cấu trúc đề xuất không bị nhầm là hệ thống do AWS mô tả.
+[ANALYSIS] Nguồn được cung cấp không nêu runtime component nào, nên không component nào trong sơ đồ được hiểu là claim về AWS.
 
-[PROPOSED DESIGN] Tất cả runtime node bên dưới đều là component đề xuất. Nhãn cố ý phân biệt chúng với bối cảnh nguồn.
+[PROPOSED DESIGN] Topology dưới đây cố ý đánh dấu rõ các component được đề xuất:
 
 ```mermaid
 flowchart LR
-    SRC["AWS Architecture Blog\n[Source-backed component]"]
+    SRC["AWS Architecture Blog\n[Source-backed context]"]
     C["Client"] --> G["API ingress\n[Proposed component]"]
     G --> R["Order API\n[Proposed component]"]
     R --> DB[("Orders + outbox\n[Proposed component]")]
@@ -57,142 +57,77 @@ flowchart LR
     SRC -. "focus only; not an implementation claim" .- R
 ```
 
-[ANALYSIS] Triển khai đa AZ là thuộc tính bố trí, không phải bảo đảm availability kỳ diệu. Mỗi API stateless và worker pool nên có instance ở ít nhất hai zone; cơ sở dữ liệu, hàng đợi và lớp cân bằng tải phải có hành vi khi lỗi mà ta hiểu và kiểm thử được. Dự phòng liên zone cũng không loại bỏ lỗi dependency, deployment hỏng, cạn connection pool hay poison message.
+[ANALYSIS] Multi-AZ deployment là thuộc tính bố trí, tự nó không phải availability guarantee. Theo proposed deployment choice, stateless API và worker pool nên được đặt ở ít nhất hai availability zone. Database, queue và load-balancing layer cần có failure behavior được hiểu và kiểm thử. Redundancy giữa các zone không loại bỏ dependency failure, deployment lỗi, connection pool cạn hay poison message.
 
-## 4. System Design Analysis
+## 4. Request path và delivery guarantee
 
-[ANALYSIS] Thiết kế tách bốn mối quan tâm. Admission bảo vệ đường dẫn hướng người dùng. Durability bảo vệ intent đã chấp nhận. Xử lý bất đồng bộ bảo vệ hệ thống trước latency biến động của downstream. Idempotency bảo vệ tính đúng đắn khi delivery bị retry.
+[ANALYSIS] Thiết kế tách các mối quan tâm chính: admission bảo vệ user-facing path; durability bảo vệ intent đã được chấp nhận; async processing cô lập downstream latency biến động; idempotency bảo vệ tính đúng đắn khi delivery bị retry.
 
-[PROPOSED DESIGN] Order API dùng idempotency key do client cung cấp, giới hạn theo customer. Nó xác thực request, kiểm tra key, rồi insert order cùng outbox event một cách nguyên tử. Nếu cùng key được retry với cùng request hash, nó trả về kết quả ban đầu. Nếu key được dùng lại với payload khác, nó trả conflict.
+[PROPOSED DESIGN] Order API nhận idempotency key do client cung cấp và scope theo customer. API validate request, kiểm tra key, rồi insert order và outbox event một cách atomic. Retry với cùng key và request hash sẽ trả về kết quả ban đầu. Dùng lại key với payload khác sẽ trả conflict.
 
-[ANALYSIS] Outbox tránh khoảng trống dual-write. Không có nó, API có thể commit order rồi lỗi trước khi publish message, hoặc publish message rồi lỗi trước khi commit order. Relay có thể publish cùng event nhiều hơn một lần; do đó không nên giả định “exactly once”. Consumer phải idempotent.
+[ANALYSIS] Outbox đóng dual-write gap. Không có outbox, API có thể commit order rồi lỗi trước khi publish queue message, hoặc publish message rồi lỗi trước khi commit order. Relay có thể publish event nhiều hơn một lần, nên không được giả định exactly-once delivery. Consumer phải idempotent.
 
-[PROPOSED DESIGN] State transition là đơn điệu và có kiểm soát: `PENDING -> PROCESSING -> FULFILLED`, cùng các trạng thái rõ ràng `FAILED_RETRYABLE` và `FAILED_FINAL`. Worker claim việc bằng lease, thực hiện external call với idempotency token, rồi commit kết quả. Lease hết hạn cho phép worker khác retry.
+[PROPOSED DESIGN] Dùng state transition có kiểm soát và đơn điệu:
 
-## 5. Data Model
+`PENDING -> PROCESSING -> FULFILLED`
 
-[PROPOSED DESIGN] Mô hình quan hệ giúp state transition của order và insert outbox có tính nguyên tử.
+Đồng thời model rõ `FAILED_RETRYABLE` và `FAILED_FINAL`. Worker claim việc bằng lease, gọi external fulfillment system với idempotency token, rồi commit kết quả. Khi lease hết hạn, worker khác có thể retry message. External operation phải chịu được retry đó; local database lock không thể biến external side effect thành exactly-once.
+
+## 5. Data model
+
+[PROPOSED DESIGN] Relational model giúp order transition và outbox insert atomic. Unique constraint trên `(customer_id, idempotency_key)` thực thi request contract ở database boundary.
 
 ```sql
 CREATE TABLE orders (
   order_id          UUID PRIMARY KEY,
   customer_id       UUID NOT NULL,
-  request_key       VARCHAR(128) NOT NULL,
-  request_hash      CHAR(64) NOT NULL,
-  state             VARCHAR(32) NOT NULL,
-  version           BIGINT NOT NULL DEFAULT 0,
-  external_ref      VARCHAR(128),
+  idempotency_key   TEXT NOT NULL,
+  request_hash      TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  result_json       JSONB,
   created_at        TIMESTAMP NOT NULL,
   updated_at        TIMESTAMP NOT NULL,
-  UNIQUE (customer_id, request_key)
+  UNIQUE (customer_id, idempotency_key)
 );
 
-CREATE TABLE outbox_events (
+CREATE TABLE outbox (
   event_id          UUID PRIMARY KEY,
   aggregate_id      UUID NOT NULL,
-  event_type        VARCHAR(64) NOT NULL,
-  payload           JSON NOT NULL,
-  published_at      TIMESTAMP,
-  created_at        TIMESTAMP NOT NULL
-);
-
-CREATE TABLE idempotency_results (
-  consumer_name     VARCHAR(64) NOT NULL,
-  message_id        UUID NOT NULL,
-  result_hash       CHAR(64) NOT NULL,
-  completed_at      TIMESTAMP NOT NULL,
-  PRIMARY KEY (consumer_name, message_id)
+  event_type        TEXT NOT NULL,
+  payload_json      JSONB NOT NULL,
+  published_at      TIMESTAMP
 );
 ```
 
-[ANALYSIS] `version` hỗ trợ optimistic concurrency, còn cặp customer/key duy nhất khiến retry API có thể quan sát được. Bảng idempotency ghi nhận công việc của consumer, nhưng không thể hoàn tác tác dụng phụ tại provider bên ngoài. Provider phải chấp nhận idempotency token, hoặc integration cần reconciliation và hành động bù trừ theo nghiệp vụ.
+[ANALYSIS] Outbox relay nên claim các row chưa publish một cách an toàn, publish chúng, rồi đánh dấu published. Crash xảy ra giữa publish và update sẽ tạo duplicate, vì vậy queue consumer cần durable deduplication hoặc idempotency record. Giữ outbox row đến khi publication policy được đáp ứng cũng giúp recovery dễ chẩn đoán; retention policy là quyết định vận hành, không phải source fact.
 
-## 6. API Design
+## 6. Xử lý failure
 
-[PROPOSED DESIGN] Contract bên ngoài được cố ý giữ nhỏ:
+[PROPOSED DESIGN] Đặt timeout cho database call và external call. Chỉ retry transient failure, dùng exponential backoff có giới hạn kèm jitter, và giới hạn số lần hoặc tổng thời gian retry. Retry không có timeout có thể giữ worker vô thời hạn; retry không giới hạn có thể làm dependency đang phục hồi quá tải.
 
-```text
-POST /v1/orders
-Idempotency-Key: customer-opaque-key
+[PROPOSED DESIGN] Dùng dead-letter queue cho message không thể xử lý sau retry policy đã cấu hình. Operator nên kiểm tra và replay an toàn sau khi sửa nguyên nhân. Poison message không được chặn các work không liên quan trong main queue.
 
-201 Created
-{
-  "order_id": "uuid",
-  "state": "PENDING",
-  "status_url": "/v1/orders/uuid"
-}
+[ANALYSIS] Backpressure (điều tiết áp lực ngược) là một phần của design, không phải việc bổ sung sau cùng. Queue depth và message age cho biết worker có theo kịp hay không. Hệ thống nên giới hạn in-flight work và bảo vệ database connection pool, thay vì tăng concurrency không có giới hạn.
 
-GET /v1/orders/{order_id}
+[PROPOSED DESIGN] Circuit breaker (ngắt mạch) có thể dừng call đến external dependency đang lỗi trong một khoảng thời gian có kiểm soát. Tùy business contract, hệ thống có thể fail fast hoặc để work trong queue. Circuit breaker không thay thế timeout, bounded retry hay idempotency strategy.
 
-200 OK
-{
-  "order_id": "uuid",
-  "state": "FULFILLED",
-  "updated_at": "2026-08-16T03:00:00Z"
-}
-```
+## 7. Read path và vận hành
 
-[PROPOSED DESIGN] `202 Accepted` cũng hợp lệ nếu service cố ý tách admission bền vững khỏi việc tạo resource. Quy tắc quan trọng là phải ghi rõ response bảo đảm điều gì. `409 Conflict` biểu thị idempotency key được dùng lại với request khác. `429 Too Many Requests` truyền đạt áp lực admission, còn `503 Service Unavailable` phù hợp khi service không thể chấp nhận request mới một cách bền vững.
+[PROPOSED DESIGN] Status API đọc durable order state và trả về progress tách khỏi fulfillment completion. API không nên gọi fulfillment provider hoặc notification provider synchronously. Nếu read traffic tăng độc lập, có thể thêm read projection, nhưng projection phải công bố freshness hoặc lag.
 
-[ANALYSIS] Status endpoint tốt hơn việc buộc client poll queue hoặc phơi bày trạng thái worker nội bộ. Nó cũng cho phép đường đọc tiếp tục hoạt động khi có sự cố xử lý, tùy theo availability và hành vi consistency của cơ sở dữ liệu.
+[ANALYSIS] Các signal hữu ích gồm request error rate và latency, queue depth và message age, worker failure và retry rate, database connection-pool exhaustion, outbox backlog và external-provider timeout. Những signal này mô tả failure boundary của design, không phải measurement từ AWS source.
 
-## 7. Scaling Strategy
+[PROPOSED DESIGN] Hãy kiểm thử các failure mode mà topology tuyên bố xử lý được: dừng worker giữa lúc processing, restart relay sau khi publish, làm external provider phản hồi chậm, làm cạn connection pool và cô lập một availability zone. Xác minh retry không tạo duplicate order hoặc fulfillment, poison message được cô lập, và read path vẫn trả về durable state.
 
-[PROPOSED DESIGN] Scale API tier theo chiều ngang giữa các zone vì nó stateless. Giới hạn connection pool để database chậm không biến mọi API replica thành nguồn overload bổ sung. Scale worker theo queue depth và message age, không chỉ theo CPU: worker pool dùng ít CPU vẫn có thể không drain được công việc.
+## 8. Tóm tắt cho phỏng vấn
 
-[ANALYSIS] Chỉ queue depth là chưa đủ. Backlog gồm message cũ khẩn cấp hơn cùng số lượng message mới. Tín hiệu hữu ích gồm tuổi message lâu nhất, processing latency, retry rate, database saturation và tỷ lệ lỗi provider bên ngoài. Autoscaling cần có trần và admission control; nếu không backlog có thể gây load storm do retry.
+[ANALYSIS] Cách giải thích design này tốt nhất không phải là liệt kê AWS service. Hãy trình bày guarantee và failure boundary:
 
-[PROPOSED DESIGN] Partition work theo stable key khi cần ordering theo customer hoặc order. Dùng dead-letter queue cho message vượt chính sách retry. Chỉ re-drive dead letter sau khi hiểu defect nền. Giữ payload nhỏ và lưu tài liệu immutable lớn riêng, được tham chiếu bằng identifier.
+- Transaction làm accepted order và outbox event durable cùng nhau.
+- Relay và consumer giả định at-least-once delivery.
+- Idempotency key bảo vệ request retry và external side effect.
+- Queue tách admission latency khỏi fulfillment latency.
+- Lease cho phép phục hồi khi worker lỗi; bounded retry giới hạn áp lực lên dependency.
+- Multi-AZ placement giảm ảnh hưởng của zone failure nhưng không loại bỏ các failure mode khác.
 
-## 8. Failure Scenarios
-
-[PROPOSED DESIGN] Nếu một availability zone lỗi, traffic được chuyển tới API replica và worker khỏe mạnh. Request đang chạy có thể lỗi và được retry bằng cùng idempotency key. Hệ thống phải chịu được delivery trùng lặp và không được coi timeout của client là bằng chứng order chưa được tạo.
-
-[ANALYSIS] Nếu database chính không khả dụng, service nên fail closed với write thay vì acknowledge công việc mà nó không thể ghi bền vững. Đường status chỉ đọc có thể tiếp tục nếu các bảo đảm consistency và failover chấp nhận được. Bố trí đa AZ giảm dependency đơn zone nhưng tự nó không định nghĩa thời gian hay điểm khôi phục.
-
-[PROPOSED DESIGN] Nếu worker crash sau external call nhưng trước khi commit kết quả, lease hết hạn và worker khác retry. External call dùng cùng deterministic idempotency token. Nếu provider không có tính năng đó, reconciliation đối chiếu trạng thái provider với order record trước khi gọi lại.
-
-[PROPOSED DESIGN] Nếu poison message liên tục lỗi validation, retry có giới hạn sẽ chuyển nó vào dead-letter queue. Nếu provider ngoài chậm, circuit breaker và giới hạn concurrency ngăn worker pool dùng hết database connection. Notification có queue riêng để lỗi notification không chặn fulfillment.
-
-## 9. Capacity Estimation
-
-[PROPOSED DESIGN] Các con số sau là illustrative assumptions, không phải source facts: 1,000 order request mỗi giây lúc peak, order record 4 KB, 30 ngày dữ liệu hot và fulfillment trung bình 2 giây.
-
-[PROPOSED DESIGN] Với 1,000 request/giây, dòng order xấp xỉ 86.4 triệu request/ngày. Với 4 KB mỗi order trước index, đó là khoảng 346 GB/ngày payload logic. Fulfillment trung bình hai giây hàm ý khoảng 2,000 order đang xử lý đồng thời ở peak, trước khi cộng headroom cho variance và retry. Đây chỉ là input lập kế hoạch; sizing production cần payload đo được, index overhead, replication, queue retention và traffic lỗi.
-
-[ANALYSIS] Queue capacity nên được biểu diễn bằng mục tiêu time-to-drain, không chỉ số message. Nếu worker xử lý quá chậm, thêm replica chỉ có ích đến khi database hoặc provider ngoài trở thành bottleneck. Capacity test nên đưa vào zone loss, provider latency, message trùng lặp và database throttling, đồng thời đo tuổi message lâu nhất và tỷ lệ lỗi người dùng.
-
-## 10. Trade-offs
-
-[ANALYSIS] Outbox thêm storage, relay logic, cleanup và metric vận hành, nhưng loại bỏ khoảng trống dual-write nguy hiểm nhất giữa API và queue. Delivery at-least-once tạo công việc trùng lặp, nhưng idempotency thường dễ quan sát và khôi phục hơn việc giả vờ distributed exactly-once execution tồn tại.
-
-[ANALYSIS] Database quan hệ đơn giản hóa state change transaction và status query. Nó có thể thành bottleneck dùng chung cho API write, relay scan, worker update và reconciliation. Tách read model hoặc partition theo tenant có thể giúp về sau, nhưng thêm replication lag và độ phức tạp vận hành.
-
-[PROPOSED DESIGN] Dùng consistency mạnh cho create response và idempotency lookup; eventual consistency chấp nhận được cho projection phụ và notification. Đây là ranh giới có chủ ý, không phải quy tắc phổ quát. Nghiệp vụ phải quyết định status cũ có chấp nhận được không và notification được phép trễ bao lâu.
-
-## 11. What We Can Learn From This Architecture
-
-[SOURCE FACT] Nguồn được cung cấp là tài nguyên AWS Architecture Blog; tài liệu đã xác minh không cung cấp implementation hay measurement cụ thể. Nguồn: https://aws.amazon.com/blogs/architecture/.
-
-[ANALYSIS] Bài học có thể chuyển giao là biến reliability thành các contract rõ ràng: điều gì được ghi bền vững, điều gì retry được, điều gì idempotent, điều gì được phép stale, và điều gì xảy ra khi dependency không khả dụng. Bố trí đa AZ chỉ hữu ích khi state, failover và quy trình vận hành được thiết kế xoay quanh nó.
-
-[ANALYSIS] Decoupling cũng không đồng nghĩa với việc thêm queue ở mọi nơi. Queue xứng đáng khi hấp thụ burst, cô lập latency, cung cấp retry có kiểm soát hoặc tách ownership. Mỗi queue đều tạo lag, vấn đề visibility, xử lý poison message và một state machine vận hành khác.
-
-## 12. Proposed Interview-Style System Design
-
-[PROPOSED DESIGN] Trong phỏng vấn, trước hết tôi sẽ nêu phạm vi: tạo order, báo cáo status, xử lý fulfillment bất đồng bộ và chịu được zone failure. Tôi sẽ hỏi ordering, cancellation, data residency và provider idempotency có phải yêu cầu không. Sau đó tôi vẽ API, transactional store, outbox, queue, worker và status path trước khi bàn về product cụ thể.
-
-[PROPOSED DESIGN] Câu trả lời thiết kế nên gồm các invariant sau:
-
-- Request đã chấp nhận có order record bền vững.
-- Retry cùng key không thể tạo order thứ hai.
-- Message có thể được delivery nhiều lần mà không nhân đôi fulfillment.
-- Worker failure không làm mất vĩnh viễn order trong queue.
-- Notification failure không chặn fulfillment.
-- Zone failure đơn lẻ không buộc thay đổi contract với client.
-
-[ANALYSIS] Tôi sẽ kết thúc bằng observability và kiểm thử: trace order ID qua API, outbox, queue, worker và provider; cảnh báo tuổi message lâu nhất và retry tăng; chạy diễn tập failover và replay; xác minh quy trình khôi phục giữ nguyên invariant. Đây là thiết kế phỏng vấn được đề xuất, không phải khẳng định về hệ thống nội bộ AWS.
-
-## Original Sources
-
-- Company: AWS; Exact Article Title: AWS Architecture Blog; URL: https://aws.amazon.com/blogs/architecture/; What information from the source was used: Nhận diện nguồn và sự tồn tại của tài nguyên AWS Architecture Blog. Đoạn trích đã xác minh được cung cấp không có hệ thống, component kiến trúc, trích dẫn, số liệu hay dữ kiện triển khai cụ thể.
+[PROPOSED DESIGN] Chỉ chọn service cụ thể sau khi các contract này rõ ràng. Source hỗ trợ các chủ đề kiến trúc, còn order platform trong bài vẫn là proposed design.

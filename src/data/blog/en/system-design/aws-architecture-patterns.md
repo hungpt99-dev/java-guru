@@ -1,46 +1,46 @@
 ---
-title: "AWS Architecture Blog: Production System-Design Patterns"
-description: "A source-disciplined analysis of multi-AZ, decoupled, queue-backed production systems and an interview-ready extension."
+title: "Production Order Processing with AWS Architecture Patterns"
+description: "A source-disciplined design for a multi-AZ, queue-backed order-processing system, including its failure boundaries and delivery guarantees."
 pubDatetime: 2026-08-16T10:00:00+07:00
 tags: ["system-design", "big-tech", "architecture"]
 draft: false
 featured: false
 ---
 
-## 1. Original Engineering Problem
+## 1. Problem and Scope
 
-[SOURCE FACT] The supplied source is the AWS Architecture Blog, a collection published at [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/). The supplied verified excerpt contains no description of one named production system, traffic volume, database schema, or implementation.
+[SOURCE FACT] The supplied source is the [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/). The verified material supplied with this article does not describe one named production system, its traffic, database schema, or implementation details.
 
-[ANALYSIS] That limitation matters. A landing page about architecture is not evidence for a particular AWS internal topology. The defensible engineering question is instead: how should we turn the source's stated focus, well-architected design, multi-AZ deployment, decoupling, queues, and resilience, into a system that can survive partial failure without making synchronous callers wait for every downstream operation?
+[ANALYSIS] That distinction limits what can be claimed. An architecture-blog landing page is not evidence for a particular AWS internal topology. The useful engineering question is how to apply the stated themes, such as well-architected design, multi-AZ deployment, decoupling, queues, and resilience, to a system that can tolerate partial failure without making synchronous callers wait for every downstream operation.
 
-[PROPOSED DESIGN] We will design an order-processing platform. A client submits an order, receives a durable acceptance response, and later observes fulfillment progress. The platform must preserve an order's intent, avoid duplicate side effects during retries, isolate slow workers from the request path, and continue accepting work when one availability zone or one worker pool is impaired.
+[PROPOSED DESIGN] This article uses an order-processing platform as a concrete design exercise. A client submits an order, receives a response after the request has been durably recorded, and later reads fulfillment progress. The platform must preserve the order intent, avoid duplicate side effects during retries, keep slow workers out of the request path, and continue accepting work when an availability zone or worker pool is impaired.
 
-The core problem is not selecting a fashionable service. It is choosing failure boundaries and making the guarantees explicit:
+The central design work is defining failure boundaries and guarantees:
 
 - The synchronous path validates and durably records an order.
 - A queue absorbs bursts and separates admission from processing.
 - Workers perform idempotent fulfillment and publish state changes.
 - Read paths remain available while asynchronous processing is delayed.
 
-## 2. What the Original System Did
+## 2. Source Boundary and Proposed System
 
 [SOURCE FACT] No original runtime system is described in the verified material supplied for this article. The only verified source is the AWS Architecture Blog landing page: https://aws.amazon.com/blogs/architecture/.
 
-[ANALYSIS] Consequently, there is no responsible way to write that “AWS used” a particular queue, database, retry policy, or multi-AZ diagram based on this source. The patterns in this article should be read as engineering analysis of the requested focus, not as a reconstruction of an AWS production implementation.
+[ANALYSIS] It would be unsupported to state that AWS used a particular queue, database, retry policy, or multi-AZ diagram based on this source. The patterns below are engineering analysis and a proposed design, not a reconstruction of an AWS production implementation.
 
-[PROPOSED DESIGN] In the proposed platform, the request service writes an order and an outbox record in one database transaction. A relay publishes the outbox record to a durable queue. Fulfillment workers consume messages, update order state, and record an idempotency result. A separate notification consumer handles email or webhook delivery. These consumers can be scaled, paused, or repaired independently.
+[PROPOSED DESIGN] The request service writes an order and an outbox record in one database transaction. An outbox relay publishes the record to a durable queue. Fulfillment workers consume messages, update order state, and record an idempotency result. A separate notification consumer handles email or webhook delivery. These consumers can be scaled, paused, or repaired independently.
 
-This choice provides a useful contract: an accepted order means “the platform durably recorded the request,” not “every downstream action has completed.” That distinction prevents a slow notification provider from extending the customer's request latency.
+An accepted order therefore means that the platform durably recorded the request. It does not mean that every downstream action has completed. This contract prevents a slow notification provider from extending the customer's request latency.
 
-## 3. Architecture Diagram
+## 3. Architecture
 
-[ANALYSIS] The diagram has no source-backed runtime components because the supplied excerpt specifies none. The source context is shown separately so that a proposed topology cannot be mistaken for an AWS-described system.
+[ANALYSIS] The supplied source does not name runtime components, so none of the components in this diagram should be read as source-backed AWS claims.
 
-[PROPOSED DESIGN] All runtime nodes below are proposed components. The labels intentionally distinguish them from the source context.
+[PROPOSED DESIGN] The topology is intentionally explicit about the proposed components:
 
 ```mermaid
 flowchart LR
-    SRC["AWS Architecture Blog\n[Source-backed component]"]
+    SRC["AWS Architecture Blog\n[Source-backed context]"]
     C["Client"] --> G["API ingress\n[Proposed component]"]
     G --> R["Order API\n[Proposed component]"]
     R --> DB[("Orders + outbox\n[Proposed component]")]
@@ -57,142 +57,77 @@ flowchart LR
     SRC -. "focus only; not an implementation claim" .- R
 ```
 
-[ANALYSIS] A multi-AZ deployment is a placement property, not a magic availability guarantee. Each stateless API and worker pool should have instances in at least two zones; the database, queue, and load-balancing layer must have failure behavior that is understood and tested. Cross-zone redundancy also does not remove dependency failures, bad deployments, exhausted connection pools, or poison messages.
+[ANALYSIS] Multi-AZ deployment is a placement property, not an availability guarantee by itself. The stateless API and worker pools should be placed in at least two availability zones as a proposed deployment choice. The database, queue, and load-balancing layer need understood and tested failure behavior. Cross-zone redundancy does not remove dependency failures, bad deployments, exhausted connection pools, or poison messages.
 
-## 4. System Design Analysis
+## 4. Request Path and Delivery Guarantees
 
-[ANALYSIS] The design separates four concerns. Admission protects the user-facing path. Durability protects accepted intent. Asynchronous processing protects the system from variable downstream latency. Idempotency protects correctness when delivery is retried.
+[ANALYSIS] The design separates several concerns: admission protects the user-facing path; durability protects accepted intent; asynchronous processing isolates variable downstream latency; and idempotency protects correctness when delivery is retried.
 
-[PROPOSED DESIGN] The order API uses a client-supplied idempotency key scoped to the customer. It validates the request, checks the key, and inserts the order plus outbox event atomically. If the same key is retried with the same request hash, it returns the original result. If the key is reused with a different payload, it returns a conflict.
+[PROPOSED DESIGN] The Order API accepts a client-supplied idempotency key scoped to the customer. It validates the request, checks the key, and inserts the order and outbox event atomically. A retry with the same key and request hash returns the original result. Reusing the key with a different payload returns a conflict.
 
-[ANALYSIS] The outbox avoids a dual-write gap. Without it, the API could commit an order and fail before publishing its queue message, or publish a message and fail before committing the order. The relay may publish the same event more than once; therefore “exactly once” is not a safe assumption. Consumers must be idempotent.
+[ANALYSIS] The outbox closes the dual-write gap. Without it, the API could commit an order and fail before publishing its queue message, or publish a message and fail before committing the order. The relay may publish an event more than once, so exactly-once delivery is not a safe assumption. Consumers must be idempotent.
 
-[PROPOSED DESIGN] State transitions are monotonic and guarded: `PENDING -> PROCESSING -> FULFILLED`, with explicit `FAILED_RETRYABLE` and `FAILED_FINAL` states. A worker claims work with a lease, performs an external call using an idempotency token, and commits the result. An expired lease permits another worker to retry.
+[PROPOSED DESIGN] Use guarded, monotonic state transitions:
+
+`PENDING -> PROCESSING -> FULFILLED`
+
+Also model `FAILED_RETRYABLE` and `FAILED_FINAL` explicitly. A worker claims work with a lease, calls the external fulfillment system with an idempotency token, and commits the result. When the lease expires, another worker may retry the message. The external operation must tolerate that retry; a local database lock cannot make an external side effect exactly once.
 
 ## 5. Data Model
 
-[PROPOSED DESIGN] A relational model makes the order state transition and outbox insert atomic.
+[PROPOSED DESIGN] A relational model makes the order transition and outbox insert atomic. The uniqueness constraint on `(customer_id, idempotency_key)` enforces the request contract at the database boundary.
 
 ```sql
 CREATE TABLE orders (
   order_id          UUID PRIMARY KEY,
   customer_id       UUID NOT NULL,
-  request_key       VARCHAR(128) NOT NULL,
-  request_hash      CHAR(64) NOT NULL,
-  state             VARCHAR(32) NOT NULL,
-  version           BIGINT NOT NULL DEFAULT 0,
-  external_ref      VARCHAR(128),
+  idempotency_key   TEXT NOT NULL,
+  request_hash      TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  result_json       JSONB,
   created_at        TIMESTAMP NOT NULL,
   updated_at        TIMESTAMP NOT NULL,
-  UNIQUE (customer_id, request_key)
+  UNIQUE (customer_id, idempotency_key)
 );
 
-CREATE TABLE outbox_events (
+CREATE TABLE outbox (
   event_id          UUID PRIMARY KEY,
   aggregate_id      UUID NOT NULL,
-  event_type        VARCHAR(64) NOT NULL,
-  payload           JSON NOT NULL,
-  published_at      TIMESTAMP,
-  created_at        TIMESTAMP NOT NULL
-);
-
-CREATE TABLE idempotency_results (
-  consumer_name     VARCHAR(64) NOT NULL,
-  message_id        UUID NOT NULL,
-  result_hash       CHAR(64) NOT NULL,
-  completed_at      TIMESTAMP NOT NULL,
-  PRIMARY KEY (consumer_name, message_id)
+  event_type        TEXT NOT NULL,
+  payload_json      JSONB NOT NULL,
+  published_at      TIMESTAMP
 );
 ```
 
-[ANALYSIS] `version` supports optimistic concurrency, while the unique customer/key pair makes API retries observable. The idempotency table records consumer work, but it cannot undo a side effect at an external provider. The provider must accept an idempotency token, or the integration needs reconciliation and a business-specific compensating action.
+[ANALYSIS] The outbox relay should claim unpublished rows safely, publish them, and mark them published. A crash between publish and the update creates a duplicate, which is why the queue consumer needs a durable deduplication or idempotency record. Retaining outbox rows until the publication policy is satisfied also makes recovery diagnosable; the retention policy itself is an operational choice, not a source fact.
 
-## 6. API Design
+## 6. Failure Handling
 
-[PROPOSED DESIGN] The external contract is intentionally small:
+[PROPOSED DESIGN] Apply timeouts to database calls and external calls. Retry only transient failures, use bounded exponential backoff with jitter, and cap attempts or elapsed retry time. A retry without a timeout can occupy a worker indefinitely; an unbounded retry can overload a recovering dependency.
 
-```text
-POST /v1/orders
-Idempotency-Key: customer-opaque-key
+[PROPOSED DESIGN] Use a dead-letter queue for messages that cannot be processed after the configured retry policy. Operators should inspect and safely replay those messages after fixing the cause. A poison message must not block unrelated work in the main queue.
 
-201 Created
-{
-  "order_id": "uuid",
-  "state": "PENDING",
-  "status_url": "/v1/orders/uuid"
-}
+[ANALYSIS] Backpressure (điều tiết áp lực ngược) is part of the design, not an afterthought. If workers cannot keep up, queue depth and message age expose the problem. The system should limit in-flight work and protect database connection pools instead of increasing concurrency without a bound.
 
-GET /v1/orders/{order_id}
+[PROPOSED DESIGN] A circuit breaker (ngắt mạch) can stop calls to a failing external dependency for a controlled interval. It should fail fast or leave work queued, depending on the business contract. It does not replace timeouts, bounded retries, or an idempotency strategy.
 
-200 OK
-{
-  "order_id": "uuid",
-  "state": "FULFILLED",
-  "updated_at": "2026-08-16T03:00:00Z"
-}
-```
+## 7. Read Path and Operations
 
-[PROPOSED DESIGN] `202 Accepted` is also valid if the service intentionally separates durable admission from resource creation. The important rule is to document what the response guarantees. `409 Conflict` represents an idempotency key reused with a different request. `429 Too Many Requests` communicates admission pressure, and `503 Service Unavailable` is appropriate when the service cannot durably accept new work.
+[PROPOSED DESIGN] The status API reads the durable order state and returns progress separately from fulfillment completion. It should not call the fulfillment provider or notification provider synchronously. If read traffic grows independently, a read projection can be added, but that projection must expose its freshness or lag.
 
-[ANALYSIS] A status endpoint is preferable to making clients poll the queue or exposing internal worker state. It also lets read traffic be served during a processing outage, subject to the database's availability and consistency behavior.
+[ANALYSIS] Useful signals include request error rate and latency, queue depth and message age, worker failure and retry rates, database connection-pool exhaustion, outbox backlog, and external-provider timeouts. These signals describe the failure boundaries in this design; they are not measurements from the AWS source.
 
-## 7. Scaling Strategy
+[PROPOSED DESIGN] Test the failure modes that the topology claims to handle: stop a worker during processing, make the relay restart after publishing, delay the external provider, exhaust a connection pool, and isolate an availability zone. Verify that retries do not create duplicate orders or fulfillment, that poison messages are isolated, and that the read path still reports durable state.
 
-[PROPOSED DESIGN] Scale the API tier horizontally across zones because it is stateless. Keep connection pools bounded so a database slowdown does not turn every API replica into an additional source of overload. Scale workers from queue depth and message age rather than CPU alone: a low-CPU worker pool can still be failing to drain work.
+## 8. Interview Summary
 
-[ANALYSIS] Queue depth is not sufficient by itself. A backlog of old messages is more urgent than the same number of newly arrived messages. Useful control signals include oldest-message age, processing latency, retry rate, database saturation, and external-provider error rate. Autoscaling should have a ceiling and admission control; otherwise a backlog can trigger a retry-driven load storm.
+[ANALYSIS] The strongest explanation of this design is not a list of AWS services. It is the set of guarantees and their failure boundaries:
 
-[PROPOSED DESIGN] Partition work by a stable key when per-customer or per-order ordering matters. Use a dead-letter queue for messages that exceed the retry policy. Re-drive dead letters only after the underlying defect is understood. Keep payloads small and store large immutable documents separately, referenced by an identifier.
+- The transaction makes the accepted order and outbox event durable together.
+- The relay and consumers assume at-least-once delivery.
+- Idempotency keys protect request retries and external side effects.
+- The queue isolates admission latency from fulfillment latency.
+- Leases allow recovery from worker failure, while bounded retries limit dependency pressure.
+- Multi-AZ placement reduces the impact of a zone failure but does not eliminate other failure modes.
 
-## 8. Failure Scenarios
-
-[PROPOSED DESIGN] If one availability zone fails, traffic is routed to healthy API replicas and workers. In-flight requests may fail and be retried with the same idempotency key. The system must tolerate duplicate delivery and must not treat a client timeout as proof that no order was created.
-
-[ANALYSIS] If the primary database is unavailable, the service should fail closed for writes rather than acknowledge work it cannot durably record. A read-only status path may continue if its consistency and failover guarantees are acceptable. Multi-AZ placement reduces a single-zone dependency but does not define recovery time or recovery point by itself.
-
-[PROPOSED DESIGN] If a worker crashes after an external call but before committing its result, the lease expires and another worker retries. The external call uses the same deterministic idempotency token. If the provider lacks that feature, reconciliation compares provider state with the order record before issuing another call.
-
-[PROPOSED DESIGN] If a poison message repeatedly fails validation, bounded retries move it to the dead-letter queue. If the external provider slows down, circuit breaking and a concurrency limit prevent the worker pool from consuming all database connections. Notifications have their own queue so notification failure does not block fulfillment.
-
-## 9. Capacity Estimation
-
-[PROPOSED DESIGN] The following are illustrative assumptions, not source facts: 1,000 order requests per second at peak, a 4 KB order record, 30 days of hot data, and an average fulfillment time of 2 seconds.
-
-[PROPOSED DESIGN] At 1,000 requests/second, the order stream is approximately 86.4 million requests/day. At 4 KB per order before indexes, that is about 346 GB/day of logical order payload. A two-second average processing time implies roughly 2,000 concurrent in-flight orders at peak, before adding headroom for variance and retries. These figures are planning inputs only; production sizing requires measured payloads, index overhead, replication, queue retention, and failure traffic.
-
-[ANALYSIS] Queue capacity should be expressed as a time-to-drain objective, not only a message count. If workers process too slowly, adding replicas helps only until the database or external provider becomes the bottleneck. Capacity tests should inject zone loss, provider latency, duplicate messages, and database throttling while measuring oldest-message age and user-visible error rate.
-
-## 10. Trade-offs
-
-[ANALYSIS] The outbox adds storage, relay logic, cleanup, and operational metrics, but it removes the most dangerous API-to-queue dual-write gap. At-least-once delivery creates duplicate work, but idempotency is usually more observable and recoverable than pretending distributed exactly-once execution exists.
-
-[ANALYSIS] A relational database simplifies transactional state changes and status queries. It can become the shared bottleneck for API writes, relay scans, worker updates, and reconciliation. Separating read models or partitioning by tenant can help later, but adds replication lag and operational complexity.
-
-[PROPOSED DESIGN] Strong consistency is used for the create response and idempotency lookup; eventual consistency is acceptable for secondary projections and notifications. This is a deliberate boundary, not a universal rule. The business must decide whether a stale status is acceptable and how long a notification may be delayed.
-
-## 11. What We Can Learn From This Architecture
-
-[SOURCE FACT] The supplied source is the AWS Architecture Blog resource; it does not furnish a named implementation or measurements in the verified material. Source: https://aws.amazon.com/blogs/architecture/.
-
-[ANALYSIS] The transferable lesson is to make reliability a set of explicit contracts: what is durable, what is retryable, what is idempotent, what is allowed to be stale, and what happens when a dependency is unavailable. Multi-AZ placement is useful only when state, failover, and operational procedures are designed around it.
-
-[ANALYSIS] Decoupling is also not synonymous with adding queues everywhere. A queue earns its place when it absorbs a burst, isolates latency, provides controlled retry, or separates ownership. Every queue introduces lag, visibility problems, poison-message handling, and another operational state machine.
-
-## 12. Proposed Interview-Style System Design
-
-[PROPOSED DESIGN] In an interview, I would state the scope first: create orders, report status, process fulfillment asynchronously, and tolerate a zone failure. I would ask whether ordering, cancellation, data residency, and provider idempotency are requirements. I would then draw the API, transactional store, outbox, queue, workers, and status path before discussing service-specific products.
-
-[PROPOSED DESIGN] The design answer should include these invariants:
-
-- An accepted request has a durable order record.
-- A retry with the same key cannot create a second order.
-- A message can be delivered more than once without duplicating fulfillment.
-- A worker failure does not permanently lose a queued order.
-- Notification failure does not block fulfillment.
-- A single-zone failure does not require changing the client contract.
-
-[ANALYSIS] I would close with observability and tests: trace the order ID across API, outbox, queue, worker, and provider; alert on oldest-message age and retry growth; run failover and replay drills; and verify that recovery procedures preserve the invariants. This is a proposed interview design, not a claim about AWS's internal systems.
-
-## Original Sources
-
-- Company: AWS; Exact Article Title: AWS Architecture Blog; URL: https://aws.amazon.com/blogs/architecture/; What information from the source was used: The source identity and the existence of the AWS Architecture Blog resource. The supplied verified excerpt contained no named system, architecture components, quotes, statistics, or implementation facts.
+[PROPOSED DESIGN] Service names can be selected after these contracts are clear. The source supports the architectural themes, but the concrete order platform in this article remains a proposed design.
