@@ -1,6 +1,6 @@
 ---
-title: "LLM-Generated Notifications That Do Not Sound Like Robots"
-description: "notification-service của FinPay sử dụng LLM để tạo nội dung SMS, email và thông báo push được cá nhân hóa, tự nhiên về giọng điệu, kèm cơ chế dự phòng an toàn bằng template."
+title: "Thiết kế thông báo thanh toán sinh bằng LLM an toàn"
+description: "Thiết kế thực tế để dùng LLM viết nội dung thông báo mà không cho phép model thay đổi dữ kiện thanh toán, chặn việc gửi, hoặc làm lộ credential."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags:
   - java
@@ -13,90 +13,88 @@ featured: false
 
 > Repository: <https://github.com/finpay-lab/notification-service>
 
-## Lời mở đầu: lỗi thông báo ngớ ngẩn nhất chúng tôi từng đưa lên hệ thống
+## Bài toán
 
-Một khách hàng thanh toán khoản trả góp trước hạn. Hệ thống cũ gửi đi một thông báo:
+Thông báo thanh toán có hai yêu cầu khác nhau. Nội dung phải nêu đúng giao dịch, đồng thời phải dễ đọc trên SMS, email hoặc push. Template cố định đáng tin cậy nhưng thường tăng nhanh khi yêu cầu của sản phẩm và pháp lý tách ra. LLM có thể thay đổi cách diễn đạt, nhưng tạo ra rủi ro nghiêm trọng hơn: model có thể thay đổi dữ kiện trong lúc cố làm câu chữ tự nhiên.
 
-> "Khoản thanh toán 2.400.000 VND của quý khách đã được ghi nhận. Số dư nợ hiện tại: 0 VND."
+Bài viết này tách hai trách nhiệm đó. Domain sở hữu các dữ kiện thanh toán đã được kiểm tra và quyết định gửi. LLM chỉ được đề xuất câu chữ. Phần còn lại trình bày idempotency của sự kiện, structured output, timeout và retry, template fallback, khóa provider do tenant cung cấp, cùng audit record.
 
-Về mặt kỹ thuật thì chính xác, nhưng trong thực tế lại vô dụng. Lời văn này là một template cứng do một pipeline tạo ra, vốn chưa bao giờ hiểu sự kiện đó *có ý nghĩa gì*. Chúng tôi cứ mãi đối mặt với cùng một vấn đề: template ngày càng nhiều, bộ phận sản phẩm và pháp lý tranh luận từng dấu câu, còn không ai chịu trách nhiệm về câu chữ. Vì vậy, chúng tôi bỏ cách dùng template và bắt đầu *tạo* nội dung.
+> **[SOURCE FACT]** Ví dụ được cung cấp sử dụng `notification-service`, một Kafka consumer, Spring Boot, cấu trúc hexagonal, adapter cho LLM, adapter cho OpenSearch và repository ở URL trên. Sơ đồ và code bên dưới mô tả cấu trúc đó; các giá trị cấu hình là ví dụ từ bài gốc, không phải mặc định áp dụng cho mọi hệ thống.
 
-Đây là câu chuyện về `smart-notifications-llm`, tích hợp AI bên trong notification-service của FinPay: chúng tôi đã để LLM viết lời văn như thế nào và, quan trọng hơn, làm sao để việc để một LLM viết lời văn trong một hệ thống thanh toán trở nên *an toàn*.
+## Bắt đầu từ thiết kế không an toàn
 
-## Tại sao không dùng template? Trước hết, hãy xem cách làm SAI
-
-Cách tiếp cận ngây thơ: ném payload sự kiện vào model rồi cầu mong điều tốt đẹp nhất.
+Đưa raw event payload cho model rồi trả về một chuỗi không định kiểu khiến mọi ranh giới quan trọng đều không rõ ràng:
 
 ```java
-// SAI — đừng bao giờ phát hành thứ này
+// PROPOSED DESIGN: ví dụ cố ý không an toàn; không đưa vào production
 @Service
 public class CopyService {
-    private final OpenAiClient openAi; // nhà cung cấp nào cũng được
+    private final LlmClient llm;
 
     public String copyFor(NotificationEvent event) {
         String prompt = """
-            Hãy viết một thông báo push thân thiện bằng tiếng Việt về sự kiện này:
+            Write a friendly Vietnamese push notification about this event:
             %s
-            """.formatted(event.getRawPayload());
-        return openAi.complete(prompt); // không timeout, không retry, không hợp đồng
+            """.formatted(event.rawPayload());
+        return llm.complete(prompt); // không timeout, retry policy hoặc schema
     }
 }
 ```
 
-Đoạn code này thất bại theo năm cách riêng biệt, và tôi muốn bạn ghi nhớ từng cách:
+Có năm lỗi độc lập:
 
-1. **Model có thể thay đổi sự thật.** Không có gì ràng buộc lời văn phải khớp với các con số trong payload. Một LLM "tử tế" làm tròn 2.431.876 VND thành "2,4 triệu" là một sự cố tuân thủ đang chực chờ xảy ra.
-2. **Không có schema.** Bên tiêu thụ (bộ phận gửi push) mong đợi `{ title, body, tone }`. Thứ được trả về chỉ là một chuỗi ký tự không rõ cấu trúc.
-3. **Không retry, không timeout, không circuit breaker.** Bên gửi downstream sẽ bị treo vô thời hạn vì phải chờ một lời gọi model chậm, và một LLM provider suy giảm sẽ kéo sập toàn bộ hệ thống thông báo.
-4. **AI là người quyết định tiền.** Không có gì trong code này ngăn model bịa ra một "số dư nợ mới" hoặc một "hoàn tiền" mà không ai cho phép.
-5. **Không idempotent.** Hai bản sao của cùng một sự kiện sinh ra hai thông báo khác nhau, khiến khách hàng nhận cùng một sự thật nhưng được diễn đạt khác nhau — may thì khó hiểu, rủi thì tự mâu thuẫn.
+1. **Không bảo vệ dữ kiện.** Không có gì buộc output giữ nguyên số tiền. Ví dụ nguồn dùng `2,431,876 VND`; đổi thành `2.4M` sẽ làm mất tính chính xác và có thể tạo vấn đề tuân thủ.
+2. **Output không có contract.** Push sender có thể cần `{ title, body, tone }`, nhưng method này trả về một chuỗi tùy ý.
+3. **Dependency không có chính sách lỗi.** Không có timeout, provider chậm có thể giữ request. Không có retry có giới hạn và circuit breaker (cơ chế tạm dừng gọi dependency đang lỗi), sự suy giảm của provider có thể lan sang việc gửi thông báo.
+4. **Model được trao quá nhiều quyền.** Model có thể thêm số tiền phải trả, khoản hoàn tiền hoặc khoản thu không có trong event.
+5. **Operation không idempotent.** Xử lý lại một event có thể tạo câu chữ khác và gửi trùng nếu pipeline không có event key ổn định cùng chính sách khử trùng lặp.
 
-Mỗi điều trong số này đều vi phạm một guardrail. Hãy xem kiến trúc chúng tôi xây dựng để khiến những lỗi đó *không thể xảy ra ngay từ cấp độ cấu trúc*.
+Đây là lỗi thiết kế, không phải chỉ là vấn đề viết prompt. Chúng cần được enforce tại các boundary của ứng dụng.
 
-## Kiến trúc
+## Kiến trúc đề xuất
 
+```text
+                     +-------------------------------------------+
+Kafka topic -------->|          notification-service              |
+ event.payment       |                                             |
+                     |  +-----------+       +------------------+   |
+                     |  | domain/   |<----->| infrastructure/  |   |
+                     |  | (ports)   |       | (adapters)       |   |
+                     |  +-----+-----+       +--------+---------+   |
+                     |        |                     |             |
+                     | idempotency store            | LLM provider |
+                     | (eventId dedupe)              | (BYOK client)|
+                     |                               | OpenSearch   |
+                     +-------------------------------------------+
 ```
-                    ┌───────────────────────────────────────────┐
-Kafka topic ───────►│          notification-service            │
- event."payment"    │                                           │
-                    │  ┌───────────┐    ┌──────────────────┐    │
-                    │  │  domain/  │◄──►│ infrastructure/  │    │
-                    │  │  (ports)  │    │  (adapters)      │    │
-                    │  └─────┬─────┘    └────┬─────────────┘    │
-                    │        │               │                  │
-                    │  idempotency store     │  LLM provider    │
-                    │  (eventId dedupe)      │  (BYOK client)   │
-                    │                        │  OpenSearch sink  │
-                    └───────────────────────────────────────────┘
-```
 
-Spring Boot tiêu thụ một topic Kafka. Code tuân theo kiến trúc hexagonal: các quy tắc nghiệp vụ nằm trong `domain/` dưới dạng port (interface), còn mọi thành phần bên ngoài — Kafka, LLM provider, OpenSearch và lớp lưu trữ — nằm trong `infrastructure/` dưới dạng adapter. Domain không bao giờ import SDK. Bạn có thể suy luận về logic tiền bạc mà không cần truy cập mạng.
+Spring Boot tiêu thụ Kafka topic. Trong kiến trúc hexagonal đề xuất, code domain công bố các port (interface), còn Kafka, LLM provider, OpenSearch và persistence là các infrastructure adapter. Domain không import SDK của provider. Nhờ vậy, các quy tắc thanh toán có thể được kiểm thử mà không cần truy cập mạng.
 
-```
+```text
 src/main/java/dev/finpay/notifications/
-├── domain/
-│   ├── port/
-│   │   ├── CopyGenerator.java
-│   │   ├── DedupStore.java
-│   │   └── AuditLog.java
-│   ├── model/
-│   │   ├── NotificationEvent.java
-│   │   ├── GeneratedCopy.java
-│   │   └── Decision.java
-│   └── service/
-│       └── CopyPipeline.java
-└── infrastructure/
-    ├── kafka/
-    ├── llm/
-    ├── opensearch/
-    └── store/
+|- domain/
+|  |- port/
+|  |  |- CopyGenerator.java
+|  |  |- DedupStore.java
+|  |  `- AuditLog.java
+|  |- model/
+|  |  |- NotificationEvent.java
+|  |  |- GeneratedCopy.java
+|  |  `- Decision.java
+|  `- service/
+|     `- CopyPipeline.java
+`- infrastructure/
+   |- kafka/
+   |- llm/
+   |- opensearch/
+   `- store/
 ```
 
-Pipeline là trái tim của hệ thống. Nó mang tính *tất định* về *dữ kiện* và chỉ *bất định* về *lời văn*.
+Pipeline phải tất định về dữ kiện và trạng thái gửi. Chỉ phần câu chữ được phép thay đổi.
 
-## Bước 1 — Chuẩn hóa sự kiện thành các dữ kiện
+## Bước 1: chuẩn hóa event
 
-Trước khi bất kỳ thứ gì chạm vào LLM, sự kiện được biến thành một tập dữ kiện đã định kiểu và được kiểm tra hợp lệ. Domain model chính là hợp đồng mà model không bao giờ được phép phá vỡ.
+> **[PROPOSED DESIGN]** Chuyển wire event thành tập dữ kiện đã định kiểu và được validate trước khi gọi model. Object này là contract mà generated copy không được ghi đè.
 
 ```java
 public record PaymentSettled(
@@ -107,88 +105,84 @@ public record PaymentSettled(
     LocalDateTime settledAt
 ) {
     public PaymentSettled {
-        Objects.requireNonNull(eventId, "eventId là bắt buộc");
+        Objects.requireNonNull(eventId, "eventId is required");
         if (amountPaid == null || amountPaid.signum() <= 0)
-            throw new IllegalArgumentException("amountPaid phải lớn hơn 0");
+            throw new IllegalArgumentException("amountPaid must be positive");
         if (currency == null || currency.isBlank())
-            throw new IllegalArgumentException("currency là bắt buộc");
+            throw new IllegalArgumentException("currency is required");
     }
 }
 ```
 
-Một chi tiết của kiến trúc hexagonal: adapter Kafka ánh xạ JSON trên wire sang record này trong `infrastructure/kafka/`, còn pipeline trong domain chỉ nhìn thấy `PaymentSettled`. Nếu schema của topic thay đổi, adapter thay đổi — domain thì không.
+Kafka adapter ánh xạ wire JSON sang `PaymentSettled` trong `infrastructure/kafka/`. Domain pipeline chỉ thấy domain record. Nếu schema của topic thay đổi, adapter thay đổi; domain không cần biết wire format đó.
 
-## Bước 2 — Khử trùng lặp theo eventId (idempotency)
+## Bước 2: claim event một lần
 
-Ngữ nghĩa at-least-once của Kafka có nghĩa là cùng một sự kiện *chắc chắn* sẽ đến hai lần. Nếu sinh và gửi hai lần, khách hàng sẽ nhận thông báo trùng, hoặc tệ hơn, audit trail sẽ có hai quyết định mâu thuẫn nhau. Vì vậy, việc đầu tiên pipeline làm là *claim* sự kiện.
+Kafka có thể giao một event ít nhất một lần, vì vậy consumer phải sẵn sàng nhận lại cùng event. Pipeline nên claim `eventId` trước external call và release claim khi xử lý thất bại.
 
 ```java
 @Transactional
 public Decision decide(PaymentSettled event) {
-    if (dedupStore.alreadyProcessed(event.eventId())) {
-        return Decision.replay(event.eventId()); // idempotent: cùng một kết quả
-    }
-    dedupStore.claim(event.eventId(), leaseTtlMinutes); // duy nhất theo eventId
+    if (dedupStore.alreadyProcessed(event.eventId()))
+        return Decision.replay(event.eventId());
+
+    dedupStore.claim(event.eventId(), leaseTtlMinutes);
     try {
         GeneratedCopy copy = copyGenerator.generate(event);
-        auditLog.record(Decision.accepted(event.eventId(), copy, now()));
-        return Decision.accepted(event.eventId(), copy, now());
+        Decision decision = Decision.accepted(event.eventId(), copy, now());
+        auditLog.record(decision);
+        return decision;
     } catch (Throwable t) {
         dedupStore.release(event.eventId());
-        auditLog.record(Decision.failed(event.eventId(), reason(t), now()));
-        return Decision.failed(event.eventId(), reason(t), now());
+        Decision decision = Decision.failed(event.eventId(), reason(t), now());
+        auditLog.record(decision);
+        return decision;
     }
 }
 ```
 
-Các quy tắc rút ra từ những sự cố:
+Các thuộc tính quan trọng:
 
-- Claim chỉ được khóa bởi `eventId`. Replay được phát hiện trước khi *bất kỳ* lời gọi ra ngoài nào xảy ra.
-- Khi thất bại, chúng tôi giải phóng claim và để Kafka gửi lại — ngân sách retry nằm ở consumer, không nằm trong pipeline.
-- Quyết định luôn được ghi lại bất kể kết quả. **Ghi audit mọi quyết định** là bắt buộc, không phải tùy chọn.
+- Claim được khóa theo `eventId`, và replay được phát hiện trước external call.
+- Attempt thất bại sẽ release claim để Kafka consumer redeliver. Số lần retry và backoff thuộc boundary của consumer, không nằm trong một vòng lặp thứ hai trong pipeline.
+- Cả quyết định accepted, failed và replay đều có thể audit.
 
-## Bước 3 — Request ID idempotent cho LLM
+## Bước 3: dùng idempotency key cho provider request
 
-Ngay cả khi đã khử trùng lặp ở cấp độ sự kiện, lần thử đầu tiên vẫn có thể timeout ở tầng mạng dù provider *đã* trả lời. Khi đó, redelivery sẽ tạo ra bản copy thứ hai. Cách xử lý là truyền cho provider một khóa idempotency riêng cho từng sự kiện.
+Khử trùng lặp ở event không xử lý được tình huống mạng không rõ kết quả. Request có thể timeout ở phía local sau khi provider đã xử lý xong. Một provider request key ổn định cho phép retry tham chiếu cùng operation, nếu provider hỗ trợ request idempotency.
 
 ```java
-// ĐÚNG — idempotency ở tầng HTTP request
 String idempotencyKey = "copy:" + event.eventId();
 
-var req = CopyRequest.builder()
-    .idempotencyKey(idempotencyKey)   // provider khử trùng theo khóa này
-    .model("gpt-4o-mini")             // rẻ, nhanh, đủ dùng
-    .messages(List.of(
-        systemPrompt(),
-        userMessage(event)
-    ))
-    .responseFormat(JSON_OBJECT)      // ép buộc output có cấu trúc
+var request = CopyRequest.builder()
+    .idempotencyKey(idempotencyKey)
+    .model(providerModel)
+    .messages(List.of(systemPrompt(), userMessage(event)))
+    .responseFormat(JSON_OBJECT)
     .build();
 ```
 
-Cùng sự kiện → cùng khóa → cùng bản copy (hoặc một bản đã được cache). Kết hợp với dedup store, toàn bộ đường đi từ Kafka đến bản copy là idempotent từ đầu đến cuối.
+Cùng event tạo ra cùng key. Kết hợp với dedup store, đường đi tạo copy là idempotent từ đầu đến cuối. Hành vi idempotency cụ thể của provider vẫn là trách nhiệm của adapter và phải được kiểm tra theo API contract của provider đó.
 
-## Bước 4 — Hợp đồng: dữ kiện vào, JSON ra, tiền bị khóa
+## Bước 4: dữ kiện vào, JSON ra
 
-System prompt được viết như một *hợp đồng*, chứ không phải một lời gợi ý. Nó liệt kê chính xác các dữ kiện, cấm bịa giá trị và nói rõ với model rằng nó không được phép quyết định các khoản tiền.
+> **[PROPOSED DESIGN]** Xem system prompt là một phần của application contract, không phải lời đề nghị model làm đúng. Cung cấp dữ kiện chính xác, cấm bịa giá trị và nêu rõ model không được quyết định tiền.
 
 ```java
 String systemPrompt = """
-    Bạn viết lời văn thông báo push cho một ứng dụng fintech. Người dùng là khách hàng.
+    You write notification copy for a fintech app. The recipient is the customer.
 
-    QUY TẮC CỨNG — vi phạm bất kỳ quy tắc nào là một sự cố tuân thủ:
-    1. Chỉ dùng các dữ kiện được cung cấp trong user message. Không bao giờ bịa,
-       làm tròn, hay "sửa" con số. Không bao giờ ngụ ý số dư, hoàn tiền, hay khoản
-       thu không nằm trong dữ kiện.
-    2. Các con số tiền là chân lý gốc. Sao chép chúng y nguyên.
-    3. Chỉ trả về JSON hợp lệ khớp schema bên dưới. Không markdown.
-    4. Giọng văn: ấm áp, súc tích, tiếng Việt. Body tối đa 160 ký tự.
-    5. Nếu không thể thỏa mãn các quy tắc với dữ kiện đã cho, trả về
-       {"error": "unsatisfiable"} — không bao giờ tự ý sáng tạo.
+    HARD RULES:
+    1. Use only facts in the user message. Never invent, round, or correct numbers.
+       Never imply a balance, refund, or charge that is not in the facts.
+    2. Reproduce monetary values exactly.
+    3. Return valid JSON matching the schema. Do not return markdown.
+    4. Tone: warm and concise, in Vietnamese. Body limit: 160 characters.
+    5. If the facts are insufficient, return {"error":"unsatisfiable"}.
     """;
 ```
 
-Response cũng được ràng buộc bởi một schema, để code downstream có thể tin tưởng vào cấu trúc của nó:
+Adapter validate response trước khi response đến sender:
 
 ```java
 public record GeneratedCopy(
@@ -196,38 +190,35 @@ public record GeneratedCopy(
     String body,
     Tone tone,
     String model,
-    String rawModelOutput     // giữ để audit, không bao giờ hiển thị cho người dùng
+    String rawModelOutput
 ) {
     public enum Tone { NEUTRAL, URGENT, CELEBRATORY }
 }
 ```
 
-Hợp đồng JSON cùng với enum cho phép `infrastructure/` deserialize response bằng Jackson, và mọi vi phạm cấu trúc sẽ fail nhanh tại ranh giới adapter — trước khi bất cứ thứ gì đến tay khách hàng.
+Jackson có thể deserialize contract này trong `infrastructure/`. Vi phạm schema hoặc enum sẽ fail tại adapter boundary. `rawModelOutput` được giữ để audit và không bao giờ hiển thị cho khách hàng.
 
-## Bước 5 — Timeout, retry, circuit breaker
+## Bước 5: timeout, retry, circuit breaker, fallback
 
-Một lời gọi model thì chậm, không ổn định và tốn kém. Nó được đối xử như bất kỳ dependency bên ngoài mong manh nào khác:
+LLM là một downstream dependency. Hãy đặt timeout rõ ràng và cô lập nó bằng circuit breaker. Các giá trị dưới đây là giá trị nguồn trong bài gốc; trong service thật, chúng phải nằm trong configuration và được chọn dựa trên yêu cầu latency và delivery.
 
 ```java
-// ĐÚNG — lời gọi LLM có khả năng chống chịu
 @Bean
 public RestClient llmClient(LlmProperties props) {
     return RestClient.builder()
         .baseUrl(props.baseUrl())
-        .requestFactory(ClientHttpRequestFactories.get(ClientHttpRequestFactorySettings
-            .defaults()
-            .withConnectTimeout(props.connectTimeout())   // 2s
-            .withReadTimeout(props.readTimeout())))       // 10s
+        .requestFactory(ClientHttpRequestFactories.get(
+            ClientHttpRequestFactorySettings.defaults()
+                .withConnectTimeout(props.connectTimeout()) // source: 2s
+                .withReadTimeout(props.readTimeout())))     // source: 10s
         .build();
 }
 
 @Bean
 public CircuitBreaker llmBreaker(CircuitBreakerConfigProps props) {
-    return CircuitBreaker.of("llm", props.toConfig());    // 60% lỗi → mở
+    return CircuitBreaker.of("llm", props.toConfig()); // source example: 60%
 }
 ```
-
-Lời gọi được bọc lại để khi một provider gặp sự cố, nó chỉ làm suy giảm *tính năng*, chứ không ảnh hưởng đến cả nền tảng:
 
 ```java
 public Optional<GeneratedCopy> generate(PaymentSettled event) {
@@ -237,87 +228,78 @@ public Optional<GeneratedCopy> generate(PaymentSettled event) {
                 .uri("/chat/completions")
                 .body(requestFor(event))
                 .retrieve()
-                .body(OpenAiResponse.class)
-                .toGeneratedCopy()
-        )
-    )
-    .recover(TimeoutException.class, e -> fallbackCopy(event)) // template được con người duyệt
-    .recover(CallNotPermittedException.class, e -> fallbackCopy(event)) // breaker đang mở
-    .recover(e -> {
-        auditLog.record(Decision.failed(event.eventId(), describe(e), now()));
-        return null; // bỏ qua; Kafka redelivery + dedup sẽ retry sạch sẽ
-    })
-    .toJavaOptional();
+                .body(LlmResponse.class)
+                .toGeneratedCopy()))
+        .recover(TimeoutException.class, e -> fallbackCopy(event))
+        .recover(CallNotPermittedException.class, e -> fallbackCopy(event))
+        .recover(e -> {
+            auditLog.record(Decision.failed(event.eventId(), describe(e), now()));
+            return null;
+        })
+        .toJavaOptional();
 }
 ```
 
-Ba hành vi cần chú ý:
+Các trách nhiệm được tách riêng:
 
-- **Timeout**: read timeout cứng; thread gửi không bao giờ bị provider bắt làm con tin.
-- **Retry**: diễn ra ở tầng Kafka consumer với số lần giới hạn và backoff. Bản thân pipeline copy không tự lặp lại.
-- **Circuit breaker**: khi LLM suy giảm, chúng tôi fallback về template do con người duyệt, điền *cùng một dữ kiện*. Khách hàng vẫn nhận thông báo đúng; chỉ là kém phần cá nhân hóa thôi.
+- **Timeout:** sender thread không bị provider giữ vô thời hạn.
+- **Retry:** Kafka consumer áp dụng số lần thử có giới hạn và backoff. Copy pipeline không tự lặp.
+- **Circuit breaker:** khi provider lỗi, dùng template đã được con người duyệt và điền bằng cùng dữ kiện đã validate.
 
-Fallback tồn tại vì guardrail **"AI không phải là người quyết định tiền."** Một template không thể bao quát mọi trường hợp, nhưng fallback luôn chính xác về dữ kiện — đó mới là đặc tính thực sự quan trọng.
+Fallback không phải là nguồn sự thật thứ hai về thanh toán. Đây là đường hiển thị có ít biến động hơn. Nếu không tạo được copy an toàn, hãy ghi nhận failure và để delivery policy của consumer xử lý.
 
-## Bước 6 — BYOK: mang khóa của bạn, không phải trách nhiệm của chúng tôi
+## Bước 6: BYOK không làm lộ credential
 
-Khóa provider do tenant cung cấp. Khóa đến dưới dạng đã mã hóa, chỉ được giải mã tại ranh giới adapter, và **không bao giờ bị hardcode, ghi log hoặc xuất hiện trong stack trace**.
+> **[PROPOSED DESIGN]** Provider key do tenant cung cấp nên đến dưới dạng mã hóa, được giải mã tại adapter boundary và không bao giờ hardcode, ghi log hoặc đưa vào stack trace.
 
 ```java
-// ĐÚNG — vật liệu khóa không nằm trong code và log
 @Service
 public class ByokVault {
     public SecretKey keyFor(String tenantId) {
-        // lấy từ Vault (Kubernetes Secret mount, hoặc Vault API)
-        // không bao giờ cache vượt quá scope của một request
         return vault.readSecret(Path.of("byok", tenantId));
     }
 }
-
-private void maskKey(String key) {
-    log.debug("dùng provider key {}", key.substring(0, 4) + "…"); // không bao giờ log cả khóa
-}
 ```
 
-Client adapter gắn khóa vào header `Authorization: ***` trong mỗi request rồi loại bỏ khóa. Nếu một khóa lọt vào prompt, dòng log hoặc exception, đó là một test thất bại, chứ không phải cú sốc sáng thứ Hai. Khi body của request được log, khóa sẽ bị loại bỏ nhờ một Jackson filter đăng ký cho các DTO LLM.
+Adapter gắn key vào authorization header của request rồi loại bỏ sau đó. Request logging phải loại credential bằng filter cho các LLM DTO. Test nên khẳng định key không xuất hiện trong prompt, log hoặc exception. Không cần log cả một phần key; hãy log tenant identifier hoặc request identifier.
 
-## Bước 7 — OpenSearch: audit trail là một sản phẩm
+## Bước 7: audit mọi quyết định
 
-Mọi quyết định — accepted, failed hoặc replay — đều được ghi vào OpenSearch bởi một adapter đứng sau port `AuditLog`.
+Port `AuditLog` có thể ghi các quyết định accepted, failed và replay vào OpenSearch thông qua infrastructure adapter.
 
 ```java
 public record AuditRecord(
     String eventId,
     String userId,
     String decision,       // ACCEPTED | FAILED | REPLAY
-    String copyTitle,      // cho ACCEPTED
-    String copyBody,       // cho ACCEPTED
+    String copyTitle,
+    String copyBody,
     String model,
-    String rawModelOutput, // output nguyên văn của model
+    String rawModelOutput,
     Instant occurredAt
 ) {}
 ```
 
-Vì sao là OpenSearch chứ không phải một bảng? Vì câu hỏi mang tính *điều tra*: "cho tôi xem mọi bản copy mà model đã sinh ra vào thứ Ba tuần trước cho các khoản trên 10 triệu VND, kèm output nguyên văn." Đó là một bài toán tìm kiếm, và OpenSearch xử lý tốt ở quy mô lớn bằng phân trang `search_after` và xoay vòng index theo ngày. Đây cũng là cách nhanh nhất để bộ phận sản phẩm và compliance kiểm tra xem model có đang đi chệch hướng hay không.
+> **[SOURCE FACT]** Bài gốc chỉ định OpenSearch, phân trang `search_after`, xoay vòng index theo ngày và giữ hot storage trong 90 ngày rồi chuyển sang cold storage. Đây là lựa chọn triển khai, không phải yêu cầu chung. Các lựa chọn này hỗ trợ truy vấn điều tra theo khoảng thời gian và khoảng số tiền, kèm output nguyên văn của model.
 
-Quy tắc lưu giữ là 90 ngày ở lớp lưu trữ nóng trong OpenSearch, sau đó chuyển sang cold storage. Nếu compliance hỏi, câu trả lời là "truy vấn đi" — không bao giờ là "chúng tôi không lưu."
+Dữ liệu audit cũng cần access control, chính sách retention và quyết định rõ liệu raw output có thể chứa dữ liệu cá nhân hay không. Audit trail chỉ hữu ích khi có thể tìm kiếm và được bảo vệ khi truy cập.
 
-## Guardrails trên một trang
+## Guardrail tóm tắt
 
 | Guardrail | Cơ chế |
 | --- | --- |
-| AI không phải là người quyết định tiền | Prompt chỉ chứa dữ kiện, quy tắc cứng, template fallback, JSON khóa schema |
-| Idempotent theo eventId | Dedup store + claim/release + khóa idempotency request theo từng sự kiện |
-| Timeout, retry, circuit breaker | Read timeout, retry ở consumer, breaker `Resilience4j` + fallback template |
-| BYOK khóa không bao giờ hardcode/log | Secret đặt trong Vault, log che khóa, Jackson filter loại khóa |
-| Audit mọi quyết định | OpenSearch `AuditRecord` cho accepted/failed/replay, giữ nóng 90 ngày |
+| Model không quyết định tiền | Dữ kiện đã validate, prompt có ràng buộc, schema validation, template fallback |
+| Idempotency theo `eventId` | Dedup store, claim/release, provider request key |
+| Downstream failure có giới hạn | Connect/read timeout, consumer retry, circuit breaker |
+| Không để lộ BYOK key | Secret store, chỉ adapter được truy cập, filter credential |
+| Audit mọi quyết định | OpenSearch `AuditRecord` hoặc search-oriented store tương đương |
 
-## Điều chúng tôi học được
+## Kết luận kỹ thuật
 
-1. **Prompt là code; hãy review nó như code.** Chúng tôi version hóa các prompt trong repo cùng với các test khẳng định đường "unsatisfiable" và quy tắc "không bịa con số". Prompt của model cũng là một bề mặt cần bảo trì, giống hệt một chữ ký phương thức.
-2. **Tính tất định là sản phẩm.** Lời văn hiển thị cho khách hàng có thể thay đổi, nhưng *dữ kiện* thì không bao giờ. Từng chữ số trong một khoản tiền đều do domain ghi ra, không bao giờ do model.
-3. **Fallback không phải là giải pháp chắp vá.** Template fallback là quyết định về khả năng chống chịu quan trọng nhất mà chúng tôi từng đưa ra. Khi LLM ngừng hoạt động, thông báo vẫn được gửi đi chính xác và đúng giờ.
-4. **Audit quan trọng hơn dự đoán.** Chúng tôi không thể dự đoán model sẽ nói gì, nhưng có thể ghi lại mọi thứ nó đã nói và tìm kiếm lại sau này. Sự bất đối xứng đó chính là lý do OpenSearch có mặt trong kiến trúc.
-5. **`eventId` là bạn của bạn.** Cùng một kỷ luật khiến thanh toán idempotent cũng khiến copy của LLM idempotent. Không có dedup store thì không gì trong số này vận hành được, và đó là đoạn code rẻ nhất chúng tôi từng viết.
+1. **Coi prompt là code.** Version hóa, review và test đường `unsatisfiable` cùng quy tắc không bịa số.
+2. **Giữ dữ kiện tất định.** Câu chữ có thể thay đổi; mọi chữ số tiền phải đến từ domain.
+3. **Luôn có fallback thực sự.** Template do con người duyệt là cơ chế reliability, không phải giải pháp tạm bợ.
+4. **Audit hành vi thay vì đoán trước.** Output được ghi lại giúp điều tra khi behavior của model hoặc prompt thay đổi.
+5. **Dùng một event key ổn định.** `eventId` nối deduplication của consumer, request idempotency của provider và audit record.
 
-Repository nằm tại <https://github.com/finpay-lab/notification-service>. Code trong bài này là code thật, được lược bớt phần rườm rà để dễ đọc. Nếu bạn sắp thêm một LLM vào hệ thống có luân chuyển tiền, hãy sao chép các guardrail trước — rồi mới đến tính năng.
+Repository nằm tại <https://github.com/finpay-lab/notification-service>. Quy tắc cốt lõi là: LLM có thể chọn câu chữ, nhưng không sở hữu dữ kiện, tiền, trạng thái gửi hoặc credential.

@@ -1,33 +1,39 @@
 ---
-title: "Building a Shared AI Core Library for a Microservice Fleet"
-description: "Đội ngũ platform của FinPay phát hành thư viện AI dùng chung với client BYOK, cơ chế retry và circuit breaker, cùng tính năng ghi audit được mọi tính năng AI sử dụng."
+title: "Thư viện AI core dùng chung cho hệ thống microservice"
+description: "Thiết kế thực tế cho tích hợp LLM dùng chung với credential BYOK, cơ chế chống lỗi, idempotency và kết quả có audit."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
 featured: false
 ---
 
-Repo: <https://github.com/finpay-lab/platform>
+Repo được nhắc đến trong tài liệu nguồn: <https://github.com/finpay-lab/platform>
 
-## Vì Sao Cần Một Thư Viện AI Dùng Chung
+## Bài toán
 
-Mỗi đội ngũ của FinPay đều tự xây dựng một cách tích hợp LLM riêng: đội này gọi OpenAI trực tiếp từ controller, đội kia nhét API key vào `application.yml`, còn đội nọ xử lý lỗi bằng cách gửi event trở lại dead-letter queue mà không có timeout. Ba service, ba cách parse `JsonObject` khác nhau, không có telemetry dùng chung, và audit trail gần như chỉ là một dòng `logger.info("done")`.
+Thêm một lời gọi LLM vào một service khá đơn giản. Vận hành lời gọi đó nhất quán trên cả một fleet microservice thì không. Tích hợp cần cô lập credential, xử lý lỗi có giới hạn, chống xử lý trùng event và tạo audit record hữu ích khi cần điều tra.
 
-Chúng tôi đã phát hành `platform-ai-core-library` để việc sử dụng AI trở nên nhàm chán, an toàn và có thể quan sát trên toàn nền tảng. Đây là một module Spring Boot được xây dựng theo kiến trúc hexagonal: `domain/` chứa các port và use case, còn `infrastructure/` chứa các adapter (Kafka, nhà cung cấp model, OpenSearch và Vault). Link repository cũng xuất hiện ở cuối bài: <https://github.com/finpay-lab/platform>.
+**[THÔNG TIN NGUỒN]** Tài liệu nguồn mô tả ba service với ba cách tích hợp khác nhau: gọi trực tiếp provider từ controller, đặt API key trong `application.yml`, và xử lý lỗi bằng cách gửi event lỗi trở lại dead-letter queue mà không có timeout. Tài liệu cũng mô tả việc parse `JsonObject` không nhất quán, không có telemetry dùng chung, và audit trail chỉ còn một thông báo `logger.info("done")`.
 
-## Guardrails Không Thể Thỏa Hiệp
+**[PHÂN TÍCH]** Đây không phải là ba vấn đề LLM độc lập. Đây là các mối quan tâm của platform. Một module Spring Boot dùng chung có thể cung cấp cùng một contract cho việc gọi provider, tra credential, xử lý lỗi, deduplication và audit quyết định, trong khi policy nghiệp vụ vẫn nằm ở service gọi nó.
 
-Trước khi viết bất kỳ dòng code nào, đây là những quy tắc định hình mọi thứ:
+Bài viết này tập trung vào ranh giới đó. LLM không được xem là bên có quyền quyết định việc chuyển tiền, và phần code dưới đây không được trình bày như một thư viện production hoàn chỉnh.
 
-1. **AI không phải là bên quyết định việc chuyển tiền.** Output của LLM chỉ *bổ sung thông tin* cho một quyết định — điểm số gian lận, hạn mức đề xuất hoặc nhãn rủi ro — nhưng quyết định chuyển hoặc chặn tiền do các luật xác định (deterministic rules) và con người đưa ra. Thư viện không bao giờ trả về "approve/reject"; nó trả về một kết quả có điểm số, nhãn và có thể audit.
-2. **Idempotent theo `eventId`.** Mọi lời gọi AI đều được định danh bằng `eventId` do bên gọi cung cấp. Dù event được gửi lại (redelivery), retry hay người dùng nhấp đúp, một event vẫn chỉ tạo ra đúng một quyết định.
-3. **Timeout, retry, circuit breaker.** Không lời gọi HTTP nào được phép chờ vô hạn. Timeout, retry có giới hạn kèm backoff và circuit breaker giúp hệ thống hạ cấp một cách êm thấm thay vì liên tục gọi một provider đang gặp sự cố.
-4. **BYOK — key không bao giờ nằm trong code hay log của chúng ta.** Mỗi tenant mang key riêng của mình (BYOK), được giữ trong Vault/secret manager, được tra cứu theo reference, có thể xoay vòng, và *không bao giờ* bị serialize vào log, trace hay bản ghi audit.
-5. **Audit mọi quyết định.** Hash của prompt, model, latency, chi phí, ID của key và verdict được lưu vào OpenSearch để có thể truy vấn phục vụ điều tra.
+## Guardrails
 
-## Kiến trúc trong một hình
+Đây là các quy tắc không thể bỏ qua trong thiết kế đề xuất:
 
-```
+1. **AI không quyết định việc chuyển tiền.** LLM có thể bổ sung thông tin cho quyết định của rule xác định (deterministic) hoặc con người, chẳng hạn fraud score, hạn mức đề xuất hoặc risk label. Rule engine hoặc người có thẩm quyền mới quyết định chuyển hay chặn tiền. Vì vậy thư viện trả về một observation có score, label và audit, thay vì một lệnh `approve`/`reject`.
+2. **Dùng `eventId` do bên gọi cung cấp để bảo đảm idempotency.** Redelivery, retry hoặc double-click không được tạo thêm outcome cho cùng một event. Thư viện nên biến đây thành contract rõ ràng, được bảo vệ bằng thao tác claim atomic trong outcome store.
+3. **Giới hạn mọi lời gọi provider.** Timeout, retry có giới hạn kèm backoff và circuit breaker ngăn provider lỗi chiếm tài nguyên của bên gọi vô thời hạn. Ba cơ chế có vai trò khác nhau: timeout giới hạn một attempt, retry xử lý một số lỗi tạm thời, còn circuit breaker ngắt lời gọi khi lỗi kéo dài.
+4. **Dùng BYOK nhưng không để lộ secret.** Mỗi tenant cung cấp key riêng. Key được giữ trong Vault hoặc secret manager khác, được tra cứu bằng reference, xoay vòng tại đó, và không xuất hiện trong log, trace hay audit record.
+5. **Audit kết quả, không audit secret.** Lưu prompt hash, model, latency, cost, key ID và verdict vào OpenSearch để truy vấn phục vụ forensic analysis, nhưng không lưu prompt hoặc API key.
+
+## Kiến trúc
+
+**[THIẾT KẾ ĐỀ XUẤT]** Giữ use case trong `domain/` và chỉ cho nó phụ thuộc vào các port. Đặt tích hợp Kafka, model provider, Redis, OpenSearch và Vault vào các adapter trong `infrastructure/`.
+
+```text
                  ┌────────────────────────── domain/ (ports) ──────────────────────────┐
   Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
   tx.risk      │            │              ▲                   ▲                ▲
@@ -41,32 +47,33 @@ Trước khi viết bất kỳ dòng code nào, đây là những quy tắc đ�
                  └── VaultCredentialResolver      (BYOK theo reference)
 ```
 
-Use case trong `domain/` chỉ phụ thuộc vào các port. Đổi OpenAI sang Bedrock chỉ cần thay đổi một file adapter.
+Use case chỉ biết các port. Vì vậy, thay một model provider bằng provider khác nên chỉ cần thay adapter, không phải thay policy trong domain. Đây là mục tiêu thiết kế, không phải khẳng định về một implementation cụ thể trong repository.
 
-## WRONG, rồi RIGHT: credentials (BYOK)
+## Credential: sai và đúng
 
-### WRONG
+### Sai
 
 ```java
-// Key cứng trong code — commit vào git, rò rỉ khắp nơi, tồn tại mãi mãi.
+// Key hardcode: có thể bị commit, copy vào ticket và ghi vào log.
 public class MoneyFairyService {
     private static final String OPENAI_KEY = "«redacted:sk-…»...";
 
     public String label(String text) {
         OpenAIClient client = new OpenAIClient(OPENAI_KEY);
-        // Tệ hơn: log cả key "để debug cho dễ"
         log.info("Calling provider with key={}", OPENAI_KEY);
         return client.complete(systemPrompt + text);
     }
 }
 ```
 
-Sai ở đâu: key nằm trong repository, xuất hiện trong quá trình quét classpath và trong từng dòng log, không thể xoay vòng nếu không deploy, đồng thời xuất hiện trong kết quả secret scanner của GitHub để cả Internet nhìn thấy.
+Key lúc này nằm trong repository và cấu hình của process, không thể xoay vòng độc lập với việc deploy, đồng thời bị lộ qua câu lệnh log. Secret scanner cũng có thể giữ lại finding sau khi key đã bị xóa khỏi working tree. Cách xử lý thực tế là xoay vòng key và loại bỏ khỏi history, không chỉ xóa một dòng code.
 
-### RIGHT
+### Đúng
 
-```java
-// application.yml  (chỉ là một reference, không bao giờ là secret)
+**[THIẾT KẾ ĐỀ XUẤT]** Lưu reference trong configuration. Chỉ resolve secret ở ranh giới provider.
+
+```yaml
+# application.yml: reference, không phải secret
 ai:
   provider: anthropic
   key-ref: vault://finpay/ai/tenant-42/anthropic-key
@@ -88,7 +95,7 @@ public record AiProperties(
 ```
 
 ```java
-// domain/ — port. Use case không bao giờ thấy key.
+// domain/: use case không bao giờ nhận key.
 public interface CredentialResolver {
     KeyCredentials resolve(String keyRef);
 }
@@ -97,7 +104,7 @@ public record KeyCredentials(String id, char[] secret) { }
 ```
 
 ```java
-// infrastructure/ — adapter nói chuyện với Vault.
+// infrastructure/: adapter giao tiếp với Vault.
 @Component
 public class VaultCredentialResolver implements CredentialResolver {
     private final VaultTemplate vault;
@@ -111,8 +118,7 @@ public class VaultCredentialResolver implements CredentialResolver {
 ```
 
 ```java
-// infrastructure/ — adapter provider resolve key trong bộ nhớ theo từng lần gọi
-// và không bao giờ để lộ. char[] và masking toString() giữ key khỏi log.
+// infrastructure/: resolve trong bộ nhớ cho một lần gọi và không để lộ key.
 @Component
 public class AnthropicModelAdapter implements ModelProvider {
     private final CredentialResolver credentials;
@@ -123,170 +129,77 @@ public class AnthropicModelAdapter implements ModelProvider {
         try (AnthropicClient client = new AnthropicClient(creds)) {
             return client.complete(props.model(), request);
         } finally {
-            Arrays.fill(creds.secret(), 'x');  // xoá sạch khỏi bộ nhớ
+            Arrays.fill(creds.secret(), 'x');
         }
     }
 }
 ```
 
-Key chỉ tồn tại trong phạm vi của adapter, dưới dạng `char[]` được xoá sạch sau lời gọi. Không gì log nó, không gì lưu trữ nó.
+Ví dụ giữ secret trong phạm vi adapter dưới dạng `char[]` và xóa nội dung mảng sau lời gọi. Cách này giảm nguy cơ lộ do vô tình, nhưng không bảo đảm chống mọi cơ chế làm lộ memory. Có thể audit key ID, nhưng không được audit key material.
 
-## WRONG, rồi RIGHT: timeout, retry, circuit breaker
+## Resilience: sai và đúng
 
-### WRONG
+### Sai
 
 ```java
 public String callLlm(String prompt) throws IOException, InterruptedException {
     HttpClient client = HttpClient.newHttpClient();
     HttpRequest req = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofMinutes(30))   // thực chất là vô hạn
+            .timeout(Duration.ofMinutes(30))
             .POST(...)
             .build();
     HttpResponse<String> res = client.send(req, BodyHandlers.ofString());
     if (res.statusCode() == 500) {
-        // "retry": chỉ block tiếp, hy vọng nó qua
         return callLlm(prompt);
     }
     return res.body();
 }
 ```
 
-Sai ở đâu: mỗi lời gọi chiếm giữ một thread tới 30 phút, retry đệ quy khiến latency tăng gấp đôi sau mỗi lần lỗi, và không có trạng thái circuit. Khi provider ngừng hoạt động, toàn bộ thread pool bị tiêu tốn để chờ một endpoint đã chết.
+Đoạn code giữ một thread tối đa 30 phút, retry đệ quy không giới hạn và không có circuit state. Khi provider tiếp tục không khả dụng, caller vẫn tiêu tốn tài nguyên cho cùng một endpoint đang lỗi.
 
-### RIGHT
+### Đúng
+
+**[THIẾT KẾ ĐỀ XUẤT]** Đặt resilience tại provider port. Cấu hình cụ thể phụ thuộc thư viện được chọn, nhưng behavior phải rõ ràng:
 
 ```java
 @Component
 public class ResilientModelPort {
     private final Retry retry;
     private final CircuitBreaker circuitBreaker;
-    private final TimeLimiter timeLimiter;
+    private final ModelProvider delegate;
 
-    // Resilience4j: cap 4s, 3 lần retry kèm backoff, ngắt ở 50% lỗi / 10 cuộc gọi
-    public ResilientModelPort() {
-        this.retry = Retry.ofDefaults("ai-retry");
-        this.circuitBreaker = CircuitBreaker.ofDefaults("ai-cb");
-        this.timeLimiter = TimeLimiter.of(Duration.ofSeconds(4));
-    }
-
-    public ModelResult call(AiRequest request, Supplier<ModelResult> delegate) {
-        Supplier<ModelResult> guarded =
-                timeLimiter.decorateFutureSupplier(() ->
-                        CompletableFuture.supplyAsync(() -> delegate.get()));
-        return circuitBreaker.decorateSupplier(
-                retry.decorateSupplier(guarded::get)).get();
+    public ModelResult complete(AiRequest request) {
+        return circuitBreaker.executeSupplier(() ->
+                retry.executeSupplier(() -> delegate.complete(request)));
     }
 }
 ```
 
-```java
-// resilience4j.yml
-ai-retry:
-  maxAttempts: 3
-  waitDuration: 500ms
-  exponentialBackoffMultiplier: 2.0
-ai-cb:
-  slidingWindowSize: 10
-  failureRateThreshold: 50
-  waitDurationInOpenState: 30s
+Cấu hình HTTP client với timeout hữu hạn, chẳng hạn giá trị `4s` ở trên. Chỉ retry những lỗi an toàn và có khả năng là tạm thời; giới hạn số lần retry và dùng backoff. Không retry lỗi validation, lỗi authentication hoặc request có side effect nhưng không bảo đảm idempotency. Circuit breaker nên fail fast khi provider không khỏe; caller có thể chọn fallback, trì hoãn event hoặc ghi nhận outcome `UNAVAILABLE`.
+
+Fallback là một phần của contract use case, không phải lý do để tự tạo ra kết quả AI. Fallback an toàn có thể giữ event để xử lý sau hoặc trả về trạng thái `UNAVAILABLE` rõ ràng cho business logic xác định.
+
+## Idempotency và ranh giới audit
+
+**[THIẾT KẾ ĐỀ XUẤT]** Consumer truyền `eventId` vào use case. Trước khi gọi provider, use case thử claim atomic trong `RedisOutcomeStore`. Nếu event đã hoàn tất, trả về outcome đã lưu. Nếu event đang được xử lý, áp dụng behavior redelivery đã định nghĩa cho consumer thay vì bắt đầu lời gọi provider thứ hai.
+
+Redis được dùng để deduplication với TTL ngắn. Record dài hạn thuộc về `OpenSearchDecisionAudit`. Audit document có thể chứa các field:
+
+```text
+eventId, promptHash, model, latency, cost, keyId, verdict
 ```
 
-Khi breaker mở, thư viện trả về một `ModelResult.unavailable()` có cấu trúc thay vì treo. Bên gọi có thể hạ cấp (fallback về một heuristic đơn giản hơn) vì chính timeout, chứ không phải thread, mới giới hạn lời gọi.
+Đây là audit contract được mô tả trong tài liệu nguồn. Retention, index mapping, cách tính cost và vocabulary chính xác của verdict vẫn phải do platform team quy định. Đặc biệt, cần xác định rõ phạm vi uniqueness của `eventId` nếu nhiều tenant hoặc event domain có thể dùng lại cùng giá trị.
 
-## WRONG, rồi RIGHT: idempotency theo `eventId`
+## Kết quả đạt được
 
-### WRONG
+Giá trị của thư viện core dùng chung là tạo một ranh giới hẹp và có thể kiểm soát:
 
-```java
-@KafkaListener(topics = "tx.risk", groupId = "ai-classifier")
-public void on(TxEvent event) {
-    // Redelivery ⇒ lời gọi LLM trùng lặp, chi phí trùng lặp, audit trùng lặp.
-    Verdict verdict = ai.classify(event);          // bị gọi lại khi redelivery
-    outcomeRepository.save(verdict);               // dòng trùng lặp, không dedup
-    audit.log("classified", event.id(), verdict);  // ồn ào, không idempotent
-}
-```
+- business service gửi AI request qua một use-case API ổn định;
+- credential của provider nằm sau resolver và adapter;
+- timeout và retry có giới hạn được áp dụng nhất quán;
+- event trùng có thể được nhận diện trước khi gọi provider lần nữa;
+- audit record mô tả điều đã xảy ra mà không chứa secret.
 
-### RIGHT
-
-```java
-@KafkaListener(topics = "tx.risk", groupId = "ai-classifier")
-public void on(TxEvent event) {
-    if (outcomeStore.exists(event.eventId())) {
-        log.info("Duplicate event, skipping. eventId={}", event.eventId());
-        return;
-    }
-    Verdict verdict = resilientAi.classify(event.eventId(), event.toPrompt());
-    outcomeStore.save(new Outcome(event.eventId(), verdict));
-    decisionAudit.record(AuditRecord.from(event.eventId(), verdict, aiContext));
-}
-```
-
-`OutcomeStore` giữ cặp `eventId → verdict` trong Redis với TTL đủ bao phủ cửa sổ redelivery của Kafka. `DecisionAudit` ghi bản ghi dài hạn vào OpenSearch một lần, dùng `eventId` làm `_id`, nên một lần ghi trùng chỉ là no-op trên cùng một shard.
-
-## WRONG, rồi RIGHT: audit quyết định
-
-### WRONG
-
-```java
-log.info("AI said: " + prompt + " -> " + rawResponse);
-```
-
-Prompt thô (PII) và response chưa được che nằm trong stdout, không thể truy vấn, đồng thời không có ID key, phiên bản model hay thông tin chi phí.
-
-### RIGHT
-
-```java
-public record AuditRecord(
-        String eventId,
-        Instant decidedAt,
-        String tenantId,
-        String model,
-        String promptSha256,     // hash — không bao giờ là chính prompt
-        String verdict,
-        String providerKeyId,    // chỉ id — reference BYOK, không bao giờ là secret
-        long latencyMillis,
-        BigDecimal costUsd,
-        String correlationId) {
-
-    public static AuditRecord from(String eventId, Verdict v, AiContext ctx) {
-        return new AuditRecord(eventId, Instant.now(), ctx.tenantId(), ctx.model(),
-                sha256(v.prompt()), v.label(), ctx.keyId(), v.latencyMillis(),
-                v.costUsd(), ctx.correlationId());
-    }
-}
-```
-
-```java
-@Component
-public class OpenSearchDecisionAudit implements DecisionAudit {
-    @Override
-    public void record(AuditRecord r) {
-        // eventId làm _id ⇒ các lần ghi khi redelivery là idempotent
-        IndexRequest req = new IndexRequest("ai-decisions").id(r.eventId())
-                .source(toJson(r), XContentType.JSON);
-        opensearchClient.index(req, RequestOptions.DEFAULT);
-    }
-}
-```
-
-Mọi quyết định đều có thể truy vấn: "toàn bộ lời gọi dùng key của tenant-42 trên model `claude-sonnet-4-5` trong khoảng thời gian giữa hai mốc", cùng với latency p95 và chi phí theo từng provider. Nếu khách hàng khiếu nại một lệnh chặn, ta có thể replay chính xác model, hash prompt và verdict đã tạo ra quyết định đó.
-
-## Luồng Kafka từ đầu đến cuối
-
-1. `tx.risk` phát ra `TxEvent` với `eventId` do platform sinh ra.
-2. Consumer (trong `infrastructure/kafka`) chuyển nó vào `AiUseCase` trong `domain/`.
-3. `AiUseCase` kiểm tra `OutcomeStore` theo `eventId` (dedup) và gọi `AiClassifier` qua resilient port.
-4. `AnthropicModelAdapter` (hoặc OpenAI/Bedrock — thay đổi theo `AiProperties.provider`) lấy key BYOK từ Vault cho tenant đó.
-5. Verdict được lưu trong `OutcomeStore` (TTL ngắn) và `OpenSearchDecisionAudit` (dài hạn).
-6. Kết quả đã làm giàu đi tới `tx.decisions`, nơi các luật xác định và sự rà soát của con người — *không phải model* — quyết định hành động liên quan đến tiền.
-
-## Những Phần Vẫn Còn Khó
-
-- **Cố định prompt template.** Chỉ một chút prompt drift cũng có thể làm thay đổi verdict; chúng tôi quản lý phiên bản prompt và ghi hash vào bản ghi audit để có thể tái hiện verdict.
-- **Chi phí bùng nổ.** Các lời gọi ngữ cảnh dài và retry khiến số token tăng vọt; thư viện giới hạn `maxTokens` và theo dõi chi phí theo từng `eventId` trong OpenSearch.
-- **Xoay vòng BYOK.** Tenant xoay key qua Vault; vì key chỉ là reference, việc xoay vòng không bao giờ đòi hỏi deploy hay thay đổi code.
-
-Thư viện nằm trong <https://github.com/finpay-lab/platform> — cả các port ở domain lẫn các adapter ở infrastructure đều nằm đó, nên mọi service đều có thể sử dụng các guardrails này chỉ với một dependency.
-
-Repo: <https://github.com/finpay-lab/platform>
+Ranh giới này làm cho tích hợp AI ít phụ thuộc hơn vào quy ước riêng của từng service. Nó không loại bỏ nhu cầu test theo từng provider, access control, retention policy hoặc quy trình ra quyết định xác định ở bên ngoài thư viện.
