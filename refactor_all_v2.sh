@@ -4,7 +4,7 @@
 set -uo pipefail
 cd /root/java-guru
 git checkout main 2>&1 | tail -1
-MODEL="opencode/deepseek-v4-flash-free"
+MODEL="opencode-go/gpt-5.6-luna"
 TASKDIR="/root/java-guru/tasks_refactor"
 
 total=53
