@@ -1,6 +1,6 @@
 ---
-title: 'AI-4 AI Ops Incident Triage from Alerts and Traces'
-description: 'FinPay observability AI integration: ai-ops-incident-triage.'
+title: "AI Ops: Turning Alerts and Traces into Root-Cause Hypotheses"
+description: "How FinPay's observability stack uses an LLM to summarize Prometheus alerts and OpenTelemetry traces into a root-cause hypothesis with a runbook link."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -81,7 +81,7 @@ These are not optional decorations. They are the contract that lets us run an LL
 ```java
 // WRONG — the key is in code, therefore in git history and everyone's IDE.
 public class OpenAiClient {
-    private static final String BYOK_KEY = "sk-live-fintech-2f8a...";
+    private static final String BYOK_KEY = "«redacted:sk-…»...";
     private static final String MODEL = "gpt-4o";
 
     public String triage(String prompt) {

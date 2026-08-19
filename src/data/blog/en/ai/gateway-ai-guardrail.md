@@ -1,6 +1,6 @@
 ---
-title: 'AI-7 Gateway AI Guardrail (injection and anomaly filter)'
-description: 'FinPay gateway AI integration: gateway-ai-guardrail.'
+title: "An AI Guardrail at the API Gateway"
+description: "How FinPay's gateway adds a lightweight AI filter that scores inbound requests for prompt injection and anomalous patterns after JWT auth and before routing."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -130,7 +130,7 @@ A vendor outage becomes a checkout outage becomes a settlement outage. The gatew
 
 ```java
 // WRONG: the key is a static constant, and it leaks on any exception path.
-private static final String API_KEY = "sk-finpay-prod-7f3a...";
+private static final String API_KEY = "«redacted:sk-…»...";
 String raw = llm.chat(prompt);
 // some framework logs prompt + headers on 5xx → key is now in OpenSearch,
 // in the log aggregator, and in the incident post-mortem.

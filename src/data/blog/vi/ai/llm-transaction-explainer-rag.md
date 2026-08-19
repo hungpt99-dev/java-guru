@@ -1,6 +1,6 @@
 ---
-title: "AI-1 LLM Transaction Explainer with RAG over Kafka events"
-description: "How FinPay uses an LLM plus RAG over Kafka ledger and transfer events to explain a customer's transactions in plain language."
+title: "Explaining Any Transaction in Plain Language: LLM + RAG over Kafka"
+description: "FinPay sử dụng LLM với truy xuất tăng cường (RAG) trên các sự kiện ledger và transfer từ Kafka để giải thích giao dịch của khách hàng bằng ngôn ngữ tự nhiên."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: ["java", "ai", "fintech", "architecture"]
 draft: false
@@ -64,7 +64,7 @@ Lần tích hợp thực sự đầu tiên của chúng tôi thêm một lời g
 @RestController
 public class ExplainController {
 
-    private static final String API_KEY = "sk-prod-f1npay-8f3b..."; // in git. it will leak.
+    private static final String API_KEY = "«redacted:sk-…»..."; // in git. it will leak.
 
     @GetMapping("/explain/{customerId}/{ref}")
     public String explain(@PathVariable String customerId, @PathVariable String ref) {

@@ -1,6 +1,6 @@
 ---
-title: "AI-8 Shared ai-core Library (BYOK, retry, audit)"
-description: "Tích hợp AI cho nền tảng FinPay: platform-ai-core-library."
+title: "Building a Shared AI Core Library for a Microservice Fleet"
+description: "đội platform của FinPay phát hành thư viện common-ai với client BYOK, retry và circuit breaker, cùng ghi nhận audit mà mọi tính năng AI cùng dùng."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -50,7 +50,7 @@ Use case trong `domain/` chỉ phụ thuộc vào các port. Đổi OpenAI sang 
 ```java
 // Key cứng trong code — commit vào git, rò rỉ khắp nơi, tồn tại mãi mãi.
 public class MoneyFairyService {
-    private static final String OPENAI_KEY = "sk-proj-abc123...";
+    private static final String OPENAI_KEY = "«redacted:sk-…»...";
 
     public String label(String text) {
         OpenAIClient client = new OpenAIClient(OPENAI_KEY);

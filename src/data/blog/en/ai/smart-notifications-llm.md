@@ -1,6 +1,6 @@
 ---
-title: 'AI-2 Smart Notifications with LLM-generated copy'
-description: 'FinPay notification-service AI integration: smart-notifications-llm.'
+title: "LLM-Generated Notifications That Do Not Sound Like Robots"
+description: "How FinPay's notification-service uses an LLM to generate personalized, tone-aware SMS, email, and push copy with a safe template fallback."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags:
   - java
@@ -279,7 +279,7 @@ private void maskKey(String key) {
 }
 ```
 
-The client adapter attaches the key as an `Authorization: Bearer` header on each request and discards it. If a key leaks into a prompt, a log line, or an exception, that is a failing test, not a Monday-morning surprise. When the request body is logged, the key is stripped out by a Jackson filter registered for the LLM DTOs.
+The client adapter attaches the key as an `Authorization: *** header on each request and discards it. If a key leaks into a prompt, a log line, or an exception, that is a failing test, not a Monday-morning surprise. When the request body is logged, the key is stripped out by a Jackson filter registered for the LLM DTOs.
 
 ## Step 7 — OpenSearch: the audit trail is a product
 

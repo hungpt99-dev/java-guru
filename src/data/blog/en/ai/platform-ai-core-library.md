@@ -1,6 +1,6 @@
 ---
-title: "AI-8 Shared ai-core Library (BYOK, retry, audit)"
-description: "AI integration for the FinPay platform: platform-ai-core-library."
+title: "Building a Shared AI Core Library for a Microservice Fleet"
+description: "How FinPay's platform team ships a common-ai library with BYOK clients, retry and circuit breakers, and audit logging that every AI feature consumes."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -50,7 +50,7 @@ The use case in `domain/` depends only on ports. Swapping OpenAI for Bedrock is 
 ```java
 // Hardcoded key — committed to git, copied into tickets, forever.
 public class MoneyFairyService {
-    private static final String OPENAI_KEY = "sk-proj-abc123...";
+    private static final String OPENAI_KEY = "«redacted:sk-…»...";
 
     public String label(String text) {
         OpenAIClient client = new OpenAIClient(OPENAI_KEY);

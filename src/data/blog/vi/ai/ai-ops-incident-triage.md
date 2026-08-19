@@ -1,6 +1,6 @@
 ---
-title: 'AI-4 AI Ops Incident Triage from Alerts and Traces'
-description: 'FinPay observability AI integration: ai-ops-incident-triage.'
+title: "AI Ops: Turning Alerts and Traces into Root-Cause Hypotheses"
+description: "tầng observability của FinPay dùng LLM để tóm tắt cảnh báo Prometheus và trace OpenTelemetry thành giả thuyết nguyên nhân gốc kèm liên kết runbook."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -81,7 +81,7 @@ Mô hình domain là những record bất biến, nhàm chán — chính xác th
 ```java
 // WRONG — khóa nằm trong code, nên nằm trong lịch sử git và IDE của mọi người.
 public class OpenAiClient {
-    private static final String BYOK_KEY = "sk-live-fintech-2f8a...";
+    private static final String BYOK_KEY = "«redacted:sk-…»...";
     private static final String MODEL = "gpt-4o";
 
     public String triage(String prompt) {

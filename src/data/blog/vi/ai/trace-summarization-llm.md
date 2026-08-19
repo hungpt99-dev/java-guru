@@ -1,6 +1,6 @@
 ---
-title: 'AI-5 LLM Trace Summarization cho một traceId'
-description: 'Tích hợp AI vào nền tảng quan sát FinPay: trace-summarization-llm.'
+title: "Summarizing Distributed Traces with an LLM"
+description: "dịch vụ observability của FinPay chuyển một traceId OpenTelemetry thành bản tóm tắt ngôn ngữ tự nhiên: chuyện gì đã xảy ra, span chậm nhất và span lỗi."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -34,7 +34,7 @@ Những quy tắc bất khả nhượng mà chúng tôi chốt trước khi vi�
 @Service
 public class TraceSummarizer {
 
-    private static final String API_KEY = "sk-live-xxxxxxxxxxxxxxxxxxxx"; // 1: secret trong source
+    private static final String API_KEY = "«redacted:sk-…»"; // 1: secret trong source
 
     private final RestTemplate rest = new RestTemplate();
     private final SpanRepo spans;

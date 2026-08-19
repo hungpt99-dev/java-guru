@@ -1,6 +1,6 @@
 ---
-title: 'AI-5 LLM Trace Summarization for a traceId'
-description: 'FinPay observability AI integration: trace-summarization-llm.'
+title: "Summarizing Distributed Traces with an LLM"
+description: "How FinPay's observability service turns an OpenTelemetry traceId into a plain-language narrative of what happened, the slowest span, and the error span."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -34,7 +34,7 @@ Here is the first implementation, and it reads exactly like something a junior t
 @Service
 public class TraceSummarizer {
 
-    private static final String API_KEY = "sk-live-xxxxxxxxxxxxxxxxxxxx"; // 1: secret in source
+    private static final String API_KEY = "«redacted:sk-…»"; // 1: secret in source
 
     private final RestTemplate rest = new RestTemplate();
     private final SpanRepo spans;

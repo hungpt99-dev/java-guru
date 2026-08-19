@@ -1,6 +1,6 @@
 ---
-title: 'AI-7 Gateway AI Guardrail (bộ lọc chèn lệnh và bất thường)'
-description: 'FinPay gateway AI integration: gateway-ai-guardrail.'
+title: "An AI Guardrail at the API Gateway"
+description: "gateway của FinPay thêm một bộ lọc AI nhẹ để chấm điểm yêu cầu vào về tiêm prompt và dấu hiệu bất thường, sau xác thực JWT và trước khi định tuyến."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -130,7 +130,7 @@ Một sự cố vendor biến thành sự cố checkout rồi thành sự cố s
 
 ```java
 // SAI: khóa là hằng số tĩnh, và nó rò rỉ trên mọi đường exception.
-private static final String API_KEY = "sk-finpay-prod-7f3a...";
+private static final String API_KEY = "«redacted:sk-…»...";
 String raw = llm.chat(prompt);
 // một số framework log prompt + headers khi 5xx → khóa giờ nằm trong OpenSearch,
 // trong log aggregator, và trong báo cáo điều tra sự cố.

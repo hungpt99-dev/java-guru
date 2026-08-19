@@ -1,6 +1,6 @@
 ---
-title: 'AI-3 Ledger and Kafka Anomaly Detection to Prometheus'
-description: 'FinPay ledger-service AI integration: ledger-anomaly-detection.'
+title: "Catching Ledger Anomalies in Real Time with ML and Prometheus"
+description: "ledger-service của FinPay đưa luồng sự kiện Kafka qua mô hình phát hiện bất thường và phơi một metric Prometheus để Grafana cảnh báo."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -11,17 +11,17 @@ featured: false
 
 # AI-3: Ledger and Kafka Anomaly Detection to Prometheus
 
-Sổ cái (ledger) là nơi cuối cùng bạn muốn để một LLM ra quyết định. Bài viết này nói về cách `ledger-service` của FinPay tích hợp AI mà không trao cho nó chìa khóa của "phòng tiền": chúng tôi đưa các sự kiện ledger từ Kafka vào một bộ chấm điểm bất thường (anomaly scorer), xuất các phán quyết ra Prometheus, và giữ mọi điểm chạm AI phía sau guardrail, cổng (port) và một dấu vết giấy tờ (paper trail) đầy đủ.
+Sổ cái (ledger) là nơi cuối cùng bạn muốn một LLM ra quyết định. Bài viết này nói về cách `ledger-service` của FinPay tích hợp AI mà không trao cho nó chìa khóa của "phòng tiền": chúng tôi đưa các sự kiện ledger từ Kafka vào một bộ chấm điểm bất thường (anomaly scorer), xuất các phán quyết ra Prometheus, và giữ mọi điểm chạm AI sau guardrail, cổng (port) và một dấu vết giấy tờ (paper trail) đầy đủ.
 
 ## 1. Vấn đề
 
-`ledger-service` là một dịch vụ Spring Boot ghi kép (double-entry) mọi giao dịch thanh toán (`debit`/`credit`) trong một transaction duy nhất của DB, stream các sự kiện đó ra Kafka (`ledger.events`), và phục vụ tìm kiếm qua OpenSearch. Nghiệp vụ yêu cầu một hệ thống cảnh báo sớm: *"hãy gắn cờ các pattern ledger đáng ngờ ngay khi chúng xuất hiện, trước khi đối soát, trước khi batch job lúc 2 giờ sáng."*
+`ledger-service` là một dịch vụ Spring Boot ghi kép (double-entry) mọi giao dịch thanh toán (`debit`/`credit`) trong một transaction DB duy nhất, stream các sự kiện đó ra Kafka (`ledger.events`), và phục vụ cho việc tìm kiếm qua OpenSearch. Nghiệp vụ yêu cầu một hệ thống cảnh báo sớm: *"hãy gắn cờ các pattern ledger đáng ngờ ngay khi chúng xuất hiện, trước khi đối soát, trước khi batch job lúc 2 giờ sáng."*
 
-Chúng tôi đã đánh giá vài nguồn tín hiệu — trước tiên là luật xác định (deterministic rules), sau đó là một baseline thống kê, và cuối cùng là một bộ chấm điểm LLM nằm trên cùng. Quyết định sản phẩm là:
+Chúng tôi đã đánh giá vài nguồn tín hiệu — trước tiên là luật xác định (deterministic rules), sau đó là một baseline thống kê, và cuối cùng là một bộ chấm điểm LLM ở lớp trên cùng. Quyết định sản phẩm là:
 
-> AI không bao giờ được quyết định kết quả về tiền. AI tạo ra *tín hiệu*; con người và chính sách xác định mới ra *quyết định*.
+> AI không bao giờ được quyết định kết quả về tiền. AI tạo ra *tín hiệu*; con người và chính sách xác định mới là bên ra *quyết định*.
 
-Tất cả những gì bên dưới là kiến trúc khiến câu nói đó trở thành sự thật trong sản xuất.
+Tất cả những gì trình bày bên dưới là kiến trúc khiến câu nói đó thành hiện thực trong sản xuất.
 
 ## 2. Luồng tiền là thiêng liêng
 
@@ -36,7 +36,7 @@ public void post(LedgerCommand cmd) {
 }
 ```
 
-Bất kỳ công việc nào chúng ta thêm lên luồng này đều tranh giành cùng một transaction DB, cùng một connection, cùng các row lock. Bản tích hợp AI đầu tiên (ngây thơ) mà chúng tôi viết — hiển thị bên dưới, chỉ để minh họa điều *không nên* làm — đã vi phạm mọi ràng buộc đó.
+Bất kỳ công việc nào chúng ta thêm vào luồng này đều phải cạnh tranh giành cùng một transaction DB, cùng một connection, cùng những row lock. Bản tích hợp AI đầu tiên (ngây thơ) mà chúng tôi viết — được trình bày bên dưới, chỉ nhằm minh họa điều *không nên* làm — đã vi phạm mọi ràng buộc đó.
 
 ## 3. WRONG: tích hợp đồng bộ ngây thơ
 
@@ -71,29 +71,29 @@ public class PaymentProcessor {
 }
 ```
 
-Vấn đề ở đây là gì, theo thứ tự mức độ nghiêm trọng:
+Điều gì sai ở đây, theo thứ tự mức độ nghiêm trọng:
 
-- **LLM nằm trên luồng tiền.** Transaction DB vẫn mở trong khi chúng ta chờ một API bên thứ ba. Một p95 của LLM là 2 giây trở thành 2 giây giữ nguyên row lock, cạn kiệt connection pool, và một ledger chậm hơn cho tất cả mọi người.
+- **LLM nằm trên luồng tiền.** Transaction DB vẫn mở trong khi chúng ta chờ một API bên thứ ba. Một LLM có p95 là 2 giây sẽ khiến row lock bị giữ trong 2 giây, cạn kiệt connection pool và làm chậm ledger của tất cả mọi người.
 - **Không timeout, không circuit breaker, không suy giảm (degradation).** Khi OpenAI sập, ledger cũng sập theo. Một AI giám sát không bao giờ được trở thành điểm lỗi thứ hai.
-- **Key bị hardcode.** Nó sẽ bị commit, bị quét bởi secret scanner, bị rotate, và bị lộ. Nó cũng có nghĩa mọi lần deploy đều mang theo cùng một credential tĩnh — ngược hẳn với BYOK (Bring Your Own Key).
-- **AI âm thầm quyết định tiền.** `fundsService.hold(...)` được gọi mà không có override xác định và không có bước con người. Không có sự tách biệt giữa "tín hiệu" và "quyết định".
-- **Không idempotent.** Kafka là at-least-once; một lần gửi lại sẽ ghi entry hai lần và gọi `hold` hai lần. Replay trở thành lỗi tài chính.
-- **Audit bám theo transaction tiền.** Nếu LLM treo, audit không bao giờ được ghi. Dấu vết giấy tờ biến mất đúng lúc có sự cố.
+- **Key bị hardcode.** Nó sẽ bị commit, bị quét bởi secret scanner, bị rotate và bị lộ. Nó cũng có nghĩa là mọi lần deploy đều mang theo cùng một credential tĩnh — ngược hẳn với BYOK (Bring Your Own Key).
+- **AI âm thầm quyết định tiền.** `fundsService.hold(...)` được gọi mà không có cơ chế ghi đè xác định và không có bước can thiệp nào của con người. Không có sự tách biệt giữa "tín hiệu" và "quyết định".
+- **Thiếu tính idempotent.** Kafka đảm bảo at-least-once; khi một sự kiện được gửi lại, entry sẽ được ghi hai lần và `hold` được gọi hai lần. Replay trở thành lỗi tài chính.
+- **Audit bám theo transaction tiền.** Nếu LLM treo, audit sẽ không bao giờ được ghi. Dấu vết giấy tờ biến mất đúng lúc có sự cố.
 
 ## 4. Các guardrail chúng tôi cam kết
 
-Trước khi viết bất kỳ code "RIGHT" nào, chúng tôi viết ra các quy tắc định hình nó. Đây là quy tắc cấp sản phẩm, không phải cấp code:
+Trước khi viết bất kỳ code "RIGHT" nào, chúng tôi viết ra các quy tắc định hình nó. Đây là những quy tắc ở cấp sản phẩm, không phải cấp code:
 
-1. **AI không phải là người quyết định tiền.** AI phát ra tín hiệu; một chính sách xác định riêng và một luồng duyệt của con người sở hữu kết quả về tiền.
-2. **Idempotent theo `eventId`.** Mọi consumer, mọi store, mọi side effect bên ngoài phải an toàn khi replay.
+1. **AI không phải là người quyết định tiền.** AI phát ra tín hiệu; một chính sách xác định riêng và một quy trình phê duyệt của con người nắm quyền quyết định kết quả về tiền.
+2. **Idempotent theo `eventId`.** Mọi consumer, mọi store, mọi side effect bên ngoài đều phải an toàn khi replay.
 3. **Timeout -> retry -> circuit breaker**, theo đúng thứ tự đó, kèm một fallback xác định để khi AI sập thì hệ thống suy giảm, không bao giờ block.
-4. **BYOK, key không bao giờ hardcode hay bị log.** Key được tiêm vào lúc chạy từ một secret store; mọi output log tình cờ đều bị redact.
-5. **Audit mọi quyết định.** Mỗi điểm số là một bản ghi bất biến, chỉ ghi thêm (append-only), kèm bằng chứng đầu vào, model, phán quyết và timestamp.
-6. **Đường AI được đo đạc đầy đủ.** Độ trễ, lỗi và tỷ lệ bất thường được đưa lên Prometheus để chúng ta có thể alert chính kẻ giám sát.
+4. **BYOK, key không bao giờ hardcode hay bị log.** Key được tiêm vào lúc chạy từ một secret store; bất kỳ output log tình cờ nào cũng đều bị redact.
+5. **Audit mọi quyết định.** Mỗi điểm số là một bản ghi có phiên bản (versioned), chỉ ghi thêm (append-only), kèm theo bằng chứng đầu vào, model, phán quyết và timestamp.
+6. **Đường AI được đo lường đầy đủ.** Độ trễ, lỗi và tỷ lệ bất thường được đưa lên Prometheus để chúng ta có thể đặt cảnh báo (alert) cho chính kẻ giám sát.
 
 ## 5. RIGHT: các cổng hexagonal, adapter nằm trong infrastructure
 
-Chúng tôi tách codebase theo ranh giới hexagonal. `domain/` sở hữu các model và **ports** (interface). `infrastructure/` sở hữu các **adapters** (Kafka, OpenAI, OpenSearch, Micrometer). Lõi domain không biết gì về HTTP, JSON, Kafka hay AI SDK — chính điều đó khiến chuyện fallback, test và thay thế trở nên tầm thường.
+Chúng tôi tách codebase theo ranh giới hexagonal. `domain/` sở hữu các model và **ports** (interface). `infrastructure/` sở hữu các **adapters** (Kafka, OpenAI, OpenSearch, Micrometer). Lõi domain không biết gì về HTTP, JSON, Kafka hay AI SDK — chính điều đó khiến việc fallback, việc test và việc thay thế trở nên dễ dàng.
 
 ```
 com.finpay.ledger
@@ -142,7 +142,7 @@ public interface AuditTrail {
 }
 ```
 
-Và các model mà domain trả về — chú ý `UNKNOWN` là một phán quyết hạng nhất:
+Và các model mà domain trả về — chú ý rằng `UNKNOWN` là một phán quyết hạng nhất:
 
 ```java
 // domain/model/AnomalyScore.java
@@ -172,7 +172,7 @@ public record AnomalyRecord(String eventId, LedgerEvent event, AnomalyScore scor
 
 ## 6. RIGHT: consume Kafka, tránh xa luồng tiền
 
-Tính năng AI không bao giờ nằm trong transaction của `PostingService`. Một consumer group riêng đọc `ledger.events`, chấm điểm bất đồng bộ, và chỉ chạm vào các sink *metric và audit*. Luồng tiền vẫn giữ 3-15 ms và không biết gì về AI.
+Tính năng AI không bao giờ nằm trong transaction của `PostingService`. Một consumer group riêng đọc `ledger.events`, chấm điểm bất đồng bộ và chỉ chạm vào các sink *metric và audit*. Luồng tiền vẫn giữ ở mức 3-15 ms và không biết gì về AI.
 
 ```java
 // infrastructure/kafka/LedgerEventListener.java
@@ -245,11 +245,11 @@ public class LedgerEventListener {
 }
 ```
 
-Consumer nằm trong một consumer group, nên ta mở rộng theo chiều ngang được. Vì Kafka đảm bảo at-least-once, việc kiểm tra `eventId` là bắt buộc, không thể tùy chọn.
+Consumer nằm trong một consumer group nên có thể mở rộng theo chiều ngang. Vì Kafka đảm bảo at-least-once, việc kiểm tra `eventId` là bắt buộc, không phải tùy chọn.
 
 ## 7. Idempotency theo eventId
 
-Idempotency được áp đặt ở ba nơi: bước kiểm tra trùng lặp, một document id xác định trong store, và một Kafka dead-letter topic cho các sự kiện độc (poison).
+Tính idempotency được thực thi ở ba nơi: bước kiểm tra trùng lặp, document id xác định trong store và một Kafka dead-letter topic cho các sự kiện độc (poison).
 
 ```java
 // infrastructure/opensearch/OpenSearchAnomalyStore.java
@@ -290,7 +290,7 @@ public class OpenSearchAnomalyStore implements AnomalyStore {
 }
 ```
 
-Khi xử lý thất bại lặp lại, bản ghi được chuyển sang dead-letter topic thay vì chặn cả group:
+Khi xử lý một sự kiện thất bại nhiều lần, bản ghi được chuyển sang dead-letter topic thay vì chặn cả group:
 
 ```java
 // infrastructure/kafka/LedgerEventListener.java (phần mở rộng)
@@ -303,7 +303,7 @@ public void onDlt(LedgerEvent event, @Header(KafkaHeaders.RECEIVED_TOPIC) String
 
 ## 8. Timeout, retry, circuit breaker
 
-Resilience4j cho chúng ta chuỗi timeout -> retry -> circuit-breaker, cấu hình khai báo và giữ ngoài code domain.
+Resilience4j cung cấp cho chúng ta chuỗi timeout -> retry -> circuit-breaker, được cấu hình khai báo (declarative) và giữ ngoài code domain.
 
 ```yaml
 # application.yml
@@ -326,7 +326,7 @@ resilience4j:
         wait-duration-in-open-state: 10s
 ```
 
-Adapter kết hợp chúng và khi lỗi, suy giảm xuống một rule scorer xác định — không bao giờ ném exception lên thread consumer, không bao giờ chặn pipeline:
+Adapter kết hợp chúng lại và khi gặp lỗi, nó suy giảm xuống một rule scorer xác định — không bao giờ ném exception lên thread consumer, không bao giờ chặn pipeline:
 
 ```java
 // infrastructure/ai/OpenAiAnomalyScorer.java
@@ -414,15 +414,15 @@ public class OpenAiAnomalyScorer implements AnomalyScorer {
 }
 ```
 
-Guard timeout là quan trọng nhất: nếu thiếu `TimeLimiter`, một socket OpenAI bị treo sẽ khóa thread consumer vô hạn định và làm tăng Kafka consumer lag.
+Guard timeout là quan trọng nhất: nếu thiếu `TimeLimiter`, một socket OpenAI bị treo sẽ giữ các thread consumer vô thời hạn và làm Kafka consumer lag tăng vọt.
 
 ## 9. BYOK — key không bao giờ hardcode, không bao giờ bị log
 
-Key do *người vận hành mang tới*, không phải do chúng tôi đóng gói:
+Key do *người vận hành mang đến*, không phải do chúng tôi đóng gói:
 
-- Đặt lúc chạy qua `AI_PROVIDER_API_KEY` (từ Vault / AWS Secrets Manager / K8s Secret), không bao giờ trong `application.yml`, không bao giờ trong git.
-- Đọc theo nhu cầu trong adapter (xem `apiKey()` ở trên); không bao giờ lưu trên field nơi stack trace có thể in ra nó.
-- Được redact trong log. Mọi câu in ra tình cờ đều đi qua một redactor:
+- Được đặt lúc chạy qua `AI_PROVIDER_API_KEY` (từ Vault / AWS Secrets Manager / K8s Secret), không bao giờ trong `application.yml`, không bao giờ trong git.
+- Được đọc theo nhu cầu trong adapter (xem `apiKey()` ở trên); không bao giờ được lưu trên một field mà stack trace có thể in ra nó.
+- Được redact trong log. Mọi dòng in ra tình cờ đều đi qua một redactor:
 
 ```java
 // infrastructure/util/Redactor.java
@@ -438,13 +438,13 @@ public final class Redactor {
 }
 ```
 
-Và một regression test chứng minh key không bao giờ rơi vào file log:
+Và một regression test chứng minh key không bao giờ lọt vào file log:
 
 ```java
 // infrastructure/ai/OpenAiAnomalyScorerTest.java
 @Test
 void apiKeyIsNeverLogged() {
-    String key = "sk-proj-TOP-SECRET-1234";
+    String key = "«redacted:sk-…»";
     OpenAiAnomalyScorer scorer = new OpenAiAnomalyScorer(/* mocks */);
 
     scorer.score(sampleEvent());
@@ -458,7 +458,7 @@ void apiKeyIsNeverLogged() {
 
 ## 10. Audit mọi quyết định
 
-Mọi điểm số — gồm cả mọi lần suy giảm và mọi lần bỏ qua trùng lặp — là một bản ghi append-only, kèm bằng chứng trong OpenSearch (`ledger-ai-audit`). Audit **không** tùy chọn và **không** gắn với transaction tiền:
+Mọi điểm số — gồm cả mọi lần suy giảm và mọi lần bỏ qua trùng lặp — là một bản ghi append-only, kèm theo bằng chứng, được lưu trong OpenSearch (`ledger-ai-audit`). Audit **không** phải là tùy chọn và **không** gắn liền với transaction tiền:
 
 ```java
 // infrastructure/audit/AuditTrailImpl.java
@@ -497,7 +497,7 @@ public class AuditTrailImpl implements AuditTrail {
 }
 ```
 
-Audit entry mang đầu vào, model và phán quyết để một con người có thể trả lời "tại sao hệ thống gắn cờ cái này?" nhiều tuần sau:
+Audit entry mang theo cả đầu vào, model và phán quyết để một con người có thể trả lời "tại sao hệ thống gắn cờ cái này?" nhiều tuần sau đó:
 
 ```java
 public record AuditEntry(
@@ -510,7 +510,7 @@ public record AuditEntry(
 
 ## 11. AI không phải là người quyết định tiền
 
-Pipeline phát hiện chỉ *phát tín hiệu*. Kết quả về tiền (hold, block, reject) thuộc về một dịch vụ chính sách xác định riêng biệt với bước duyệt của con người. Chúng tôi nói rõ điều này trong code để không ai "giúp một tay sau này":
+Pipeline phát hiện chỉ *phát tín hiệu*. Kết quả về tiền (hold, block, reject) do một dịch vụ chính sách xác định riêng biệt, có bước phê duyệt của con người, nắm quyền quyết định. Chúng tôi nói rõ điều này trong code để không ai "giúp một tay sau này":
 
 ```java
 // application/DetectAnomalyService.java — kết quả của AI là tín hiệu, không bao giờ là hành động.
@@ -527,7 +527,7 @@ public AnomalySignal analyze(LedgerEvent event) {
 
 ## 12. Prometheus và cảnh báo
 
-Micrometer + Spring Boot Actuator phơi bày mọi thứ ra Prometheus:
+Micrometer + Spring Boot Actuator hiển thị mọi thứ ra Prometheus:
 
 ```yaml
 # application.yml
@@ -551,7 +551,7 @@ Chúng tôi giám sát gì, và vì sao:
 | `ledger_anomaly_score_duration_seconds` | Timer | Độ trễ LLM p50/p95/p99 |
 | `kafka_consumer_lag` (Kafka exporter) | Gauge | Sức khỏe consumer group |
 
-Các rule alert kích hoạt khi chính *kẻ giám sát* không khỏe:
+Các alert rule được kích hoạt khi chính *kẻ giám sát* không khỏe:
 
 ```yaml
 # prometheus/alerts/ledger-anomaly.yml
@@ -567,11 +567,11 @@ groups:
         labels: { severity: critical }
 ```
 
-Nếu `AIScorerDegraded` bùng lên, rule scorer dự phòng đang gánh việc — đúng như guardrails thiết kế, và đúng thứ người trực cần biết.
+Nếu `AIScorerDegraded` kích hoạt, rule scorer dự phòng đang gánh khối lượng công việc — đúng như guardrails đã thiết kế, và đúng là điều người trực cần biết.
 
-## 13. Các test giữ chúng tôi ngay thẳng
+## 13. Các test giữ chúng tôi trung thực
 
-Nhờ trừu tượng hóa port, "AI" chỉ là một implementation cắm vào được, nên test không bao giờ chạm vào model thật:
+Nhờ trừu tượng hóa port, "AI" chỉ là một implementation có thể cắm vào (pluggable), nên các test không bao giờ chạm vào model thật:
 
 ```java
 // application/DetectAnomalyServiceTest.java
@@ -603,8 +603,8 @@ void openAiOutageDegradesToRuleScorer() {
 
 ## 14. Những gì chúng tôi đã ship
 
-Hình dạng sản xuất là: sự kiện Kafka -> async consumer (hexagonal, có guardrail) -> OpenAI scorer với timeout/retry/circuit breaker -> fallback xác định -> tín hiệu OpenSearch + audit append-only -> counter/timer Prometheus -> alert trên chính kẻ giám sát. Luồng tiền không bao giờ chờ AI, quyết định không bao giờ do AI đưa ra, và mọi quyết định đều có thể replay và kiểm toán.
+Hình dạng khi đưa vào sản xuất là: sự kiện Kafka -> async consumer (hexagonal, có guardrail) -> OpenAI scorer với timeout/retry/circuit breaker -> fallback xác định -> tín hiệu OpenSearch + audit append-only -> counter/timer Prometheus -> alert trên chính kẻ giám sát. Luồng tiền không bao giờ chờ AI, một quyết định không bao giờ do AI đưa ra, và mọi quyết định đều có thể replay và kiểm toán.
 
-Nếu bạn đang nối một LLM vào sổ cái, hãy bắt đầu từ guardrails, chứ không phải từ prompt.
+Nếu bạn đang tích hợp một LLM vào sổ cái, hãy bắt đầu từ guardrails, chứ không phải từ prompt.
 
 > **Repository:** https://github.com/finpay-lab/ledger-service

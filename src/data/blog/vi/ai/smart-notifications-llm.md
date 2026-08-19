@@ -1,6 +1,6 @@
 ---
-title: 'AI-2 Smart Notifications with LLM-generated copy'
-description: 'FinPay notification-service AI integration: smart-notifications-llm.'
+title: "LLM-Generated Notifications That Do Not Sound Like Robots"
+description: "notification-service của FinPay dùng LLM để tạo nội dung SMS, email và push cá nhân hóa, tự nhiên về giọng điệu, kèm cơ chế dự phòng an toàn bằng template."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags:
   - java
@@ -279,7 +279,7 @@ private void maskKey(String key) {
 }
 ```
 
-Client adapter gắn khóa vào header `Authorization: Bearer` cho từng request rồi vứt đi. Nếu một khóa lọt vào prompt, vào dòng log, hay vào exception, đó là một test thất bại, chứ không phải cú sốc sáng thứ Hai. Khi body request được log, khóa sẽ bị loại bỏ nhờ một Jackson filter đăng ký cho các DTO LLM.
+Client adapter gắn khóa vào header `Authorization: *** cho từng request rồi vứt đi. Nếu một khóa lọt vào prompt, vào dòng log, hay vào exception, đó là một test thất bại, chứ không phải cú sốc sáng thứ Hai. Khi body request được log, khóa sẽ bị loại bỏ nhờ một Jackson filter đăng ký cho các DTO LLM.
 
 ## Bước 7 — OpenSearch: audit trail là một sản phẩm
 

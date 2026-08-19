@@ -1,6 +1,6 @@
 ---
-title: "AI-1 LLM Transaction Explainer with RAG over Kafka events"
-description: "How FinPay uses an LLM plus RAG over Kafka ledger and transfer events to explain a customer's transactions in plain language."
+title: "Explaining Any Transaction in Plain Language: LLM + RAG over Kafka"
+description: "How FinPay uses an LLM with retrieval-augmented generation over Kafka ledger and transfer events to explain a customer's transactions in plain language."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: ["java", "ai", "fintech", "architecture"]
 draft: false
@@ -64,7 +64,7 @@ Our first real integration added a retry-less, timeout-less HTTP call straight i
 @RestController
 public class ExplainController {
 
-    private static final String API_KEY = "sk-prod-f1npay-8f3b..."; // in git. it will leak.
+    private static final String API_KEY = "«redacted:sk-…»..."; // in git. it will leak.
 
     @GetMapping("/explain/{customerId}/{ref}")
     public String explain(@PathVariable String customerId, @PathVariable String ref) {

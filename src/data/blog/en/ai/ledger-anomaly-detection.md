@@ -1,6 +1,6 @@
 ---
-title: 'AI-3 Ledger and Kafka Anomaly Detection to Prometheus'
-description: 'FinPay ledger-service AI integration: ledger-anomaly-detection.'
+title: "Catching Ledger Anomalies in Real Time with ML and Prometheus"
+description: "How FinPay's ledger-service streams Kafka events through an anomaly model and exposes a Prometheus metric for Grafana alerting."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -17,7 +17,7 @@ A ledger is the last place you want an LLM to make decisions. This post is about
 
 `ledger-service` is a Spring Boot service that double-posts every payment (`debit`/`credit`) in a single database transaction, streams those events to Kafka (`ledger.events`), and exposes them for search in OpenSearch. The business asked for an early-warning system: *"flag suspicious ledger patterns the moment they land, before reconciliation, before the batch job at 2 AM."*
 
-We evaluated a few signal sources — deterministic rules first, then a statistical baseline, and finally an LLM scorer on top. The product decision was:
+We evaluated a few signal sources — deterministic rules first, then a statistical baseline, and finally an LLM scorer on top of that. The product decision was:
 
 > AI should never decide a money outcome. It produces a *signal*; humans and deterministic policy make the *decision*.
 
@@ -142,7 +142,7 @@ public interface AuditTrail {
 }
 ```
 
-And the models the domain returns — notice `UNKNOWN` is a first-class verdict:
+And the models the domain returns — notice that `UNKNOWN` is a first-class verdict:
 
 ```java
 // domain/model/AnomalyScore.java
@@ -245,7 +245,7 @@ public class LedgerEventListener {
 }
 ```
 
-The consumer is in a consumer group, so we scale horizontally. Because Kafka gives at-least-once, the `eventId` check is not optional.
+The consumer is in a consumer group, so we scale horizontally. Because Kafka provides at-least-once delivery, the `eventId` check is not optional.
 
 ## 7. Idempotency by eventId
 
@@ -326,7 +326,7 @@ resilience4j:
         wait-duration-in-open-state: 10s
 ```
 
-The adapter composes them and, on failure, degrades to a deterministic rule scorer — never throws onto the consumer thread, never blocks the pipeline:
+The adapter composes them and, on failure, degrades to a deterministic rule scorer — never throwing onto the consumer thread, never blocking the pipeline:
 
 ```java
 // infrastructure/ai/OpenAiAnomalyScorer.java
@@ -444,7 +444,7 @@ And a regression test proving the key never hits the log file:
 // infrastructure/ai/OpenAiAnomalyScorerTest.java
 @Test
 void apiKeyIsNeverLogged() {
-    String key = "sk-proj-TOP-SECRET-1234";
+    String key = "«redacted:sk-…»";
     OpenAiAnomalyScorer scorer = new OpenAiAnomalyScorer(/* mocks */);
 
     scorer.score(sampleEvent());
@@ -567,7 +567,7 @@ groups:
         labels: { severity: critical }
 ```
 
-If `AIScorerDegraded` fires, the fallback rule scorer is carrying the load — exactly what the guardrails designed, and exactly what the on-call needs to know.
+If `AIScorerDegraded` fires, the fallback rule scorer is carrying the load — exactly what the guardrails were designed for, and exactly what the on-call needs to know.
 
 ## 13. Tests that keep us honest
 
