@@ -1,5 +1,5 @@
 ---
-title: "Thiết kế thông báo thanh toán sinh bằng LLM an toàn"
+title: "Thiết kế thông báo thanh toán có LLM hỗ trợ một cách an toàn"
 description: "Thiết kế thực tế để dùng LLM viết nội dung thông báo mà không cho phép model thay đổi dữ kiện thanh toán, chặn việc gửi, hoặc làm lộ credential."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags:
@@ -15,291 +15,159 @@ featured: false
 
 ## Bài toán
 
-Thông báo thanh toán có hai yêu cầu khác nhau. Nội dung phải nêu đúng giao dịch, đồng thời phải dễ đọc trên SMS, email hoặc push. Template cố định đáng tin cậy nhưng thường tăng nhanh khi yêu cầu của sản phẩm và pháp lý tách ra. LLM có thể thay đổi cách diễn đạt, nhưng tạo ra rủi ro nghiêm trọng hơn: model có thể thay đổi dữ kiện trong lúc cố làm câu chữ tự nhiên.
+Một thông báo thanh toán có hai nhiệm vụ khác nhau: nêu chính xác giao dịch và trình bày dễ đọc trên SMS, email hoặc push. Template cố định đáng tin cậy, nhưng số lượng template tăng nhanh khi yêu cầu sản phẩm, ngôn ngữ, kênh và pháp lý phân nhánh. LLM có thể đề xuất câu chữ tự nhiên, nhưng cũng có thể đổi dữ kiện trong lúc cố cải thiện câu văn.
 
-Bài viết này tách hai trách nhiệm đó. Domain sở hữu các dữ kiện thanh toán đã được kiểm tra và quyết định gửi. LLM chỉ được đề xuất câu chữ. Phần còn lại trình bày idempotency của sự kiện, structured output, timeout và retry, template fallback, khóa provider do tenant cung cấp, cùng audit record.
+Ranh giới quan trọng không phải là “template hay AI”, mà là quyền hạn. Domain thanh toán sở hữu dữ kiện đã kiểm tra và quyết định gửi. LLM chỉ được đề xuất nội dung.
 
-> **[SOURCE FACT]** Ví dụ được cung cấp sử dụng `notification-service`, một Kafka consumer, Spring Boot, cấu trúc hexagonal, adapter cho LLM, adapter cho OpenSearch và repository ở URL trên. Sơ đồ và code bên dưới mô tả cấu trúc đó; các giá trị cấu hình là ví dụ từ bài gốc, không phải mặc định áp dụng cho mọi hệ thống.
+Đây là thiết kế tham chiếu cho FinPay. Một thiết kế hướng production cần kiểm chứng các giả định với yêu cầu pháp lý, provider và vận hành thực tế; bài viết không tuyên bố đã triển khai.
 
-## Bắt đầu từ thiết kế không an toàn
+## Vì sao khó
 
-Đưa raw event payload cho model rồi trả về một chuỗi không định kiểu khiến mọi ranh giới quan trọng đều không rõ ràng:
+Hệ thống phải kết hợp event bất đồng bộ, dependency có tính xác suất và side effect khó hoàn tác. Model có thể tạo false positive, false negative hoặc sinh câu chữ khác nhau cho cùng input. Provider có thể timeout, giới hạn tốc độ, trả output sai cấu trúc hoặc ngừng hoạt động. Retry có thể khôi phục response, nhưng cũng có thể lặp lại việc gửi ra bên ngoài.
+
+Các contract độc lập cần được giữ vững:
+
+- Event phải được consume ít nhất một lần mà không tạo duplicate business work.
+- Các dữ kiện như amount, currency, status và recipient không được suy ra từ text sinh bởi model.
+- Chất lượng AI không được quyết định việc gửi một thông báo bắt buộc về mặt pháp lý.
+- Credential của provider và dữ liệu giao dịch phải nằm trong ranh giới đã được phê duyệt.
+- Mọi quyết định phải giải thích được sau khi model, prompt hoặc policy thay đổi.
+
+## Thiết kế ngây thơ
+
+Đưa raw event cho model rồi trả về một chuỗi không định kiểu khiến các contract này không được thể hiện:
 
 ```java
-// PROPOSED DESIGN: ví dụ cố ý không an toàn; không đưa vào production
-@Service
-public class CopyService {
-    private final LlmClient llm;
-
-    public String copyFor(NotificationEvent event) {
-        String prompt = """
-            Write a friendly Vietnamese push notification about this event:
-            %s
-            """.formatted(event.rawPayload());
-        return llm.complete(prompt); // không timeout, retry policy hoặc schema
-    }
+// WRONG: ví dụ cố ý không an toàn; không đưa vào production
+public String copyFor(NotificationEvent event) {
+    return llm.complete("Write a friendly notification: " + event.rawPayload());
 }
 ```
 
-Có năm lỗi độc lập:
+Model thấy nhiều dữ liệu hơn cần thiết, kết quả không có schema, và không có timeout, retry có giới hạn hay fallback. Quan trọng nhất, caller không thể biết câu nào là dữ kiện, câu nào là đề xuất của model, và câu nào là quyết định gửi.
 
-1. **Không bảo vệ dữ kiện.** Không có gì buộc output giữ nguyên số tiền. Ví dụ nguồn dùng `2,431,876 VND`; đổi thành `2.4M` sẽ làm mất tính chính xác và có thể tạo vấn đề tuân thủ.
-2. **Output không có contract.** Push sender có thể cần `{ title, body, tone }`, nhưng method này trả về một chuỗi tùy ý.
-3. **Dependency không có chính sách lỗi.** Không có timeout, provider chậm có thể giữ request. Không có retry có giới hạn và circuit breaker (cơ chế tạm dừng gọi dependency đang lỗi), sự suy giảm của provider có thể lan sang việc gửi thông báo.
-4. **Model được trao quá nhiều quyền.** Model có thể thêm số tiền phải trả, khoản hoàn tiền hoặc khoản thu không có trong event.
-5. **Operation không idempotent.** Xử lý lại một event có thể tạo câu chữ khác và gửi trùng nếu pipeline không có event key ổn định cùng chính sách khử trùng lặp.
+## Vì sao sẽ hỏng
 
-Đây là lỗi thiết kế, không phải chỉ là vấn đề viết prompt. Chúng cần được enforce tại các boundary của ứng dụng.
+Giả sử event nguồn chứa `2,431,876 VND`, còn model trả về “khoảng 2.4M VND”. Đây không chỉ là khác biệt về văn phong. Nó có thể sai, gây hiểu nhầm hoặc không tuân thủ quy định. Chuỗi tự do cũng có thể thiếu title bắt buộc, vượt giới hạn SMS, thêm claim không được hỗ trợ hoặc chứa prompt injection từ một field vốn chỉ là dữ liệu.
 
-## Kiến trúc đề xuất
+Dependency cũng hỏng theo cách nguy hiểm. Call không có giới hạn giữ việc consumer vô thời hạn. Retry mù làm khuếch đại rate limit. Xử lý lại event có thể sinh nội dung khác và gửi hai lần. Timeout không chứng minh provider chưa hoàn thành request, nên retry việc gửi không có idempotency key có thể tạo duplicate side effect.
+
+## Các bài toán khó
+
+### AI là signal, không phải quyết định
+
+Pipeline nên làm rõ quyền hạn:
 
 ```text
-                     +-------------------------------------------+
-Kafka topic -------->|          notification-service              |
- event.payment       |                                             |
-                     |  +-----------+       +------------------+   |
-                     |  | domain/   |<----->| infrastructure/  |   |
-                     |  | (ports)   |       | (adapters)       |   |
-                     |  +-----+-----+       +--------+---------+   |
-                     |        |                     |             |
-                     | idempotency store            | LLM provider |
-                     | (eventId dedupe)              | (BYOK client)|
-                     |                               | OpenSearch   |
-                     +-------------------------------------------+
+facts đã kiểm tra -> AI signal -> policy -> business decision -> delivery
+                       (style/risk)  (luật)    (gửi/fallback/bỏ qua)
 ```
 
-Spring Boot tiêu thụ Kafka topic. Trong kiến trúc hexagonal đề xuất, code domain công bố các port (interface), còn Kafka, LLM provider, OpenSearch và persistence là các infrastructure adapter. Domain không import SDK của provider. Nhờ vậy, các quy tắc thanh toán có thể được kiểm thử mà không cần truy cập mạng.
+Ví dụ AI signal có thể là `tone=concise`, `risk=low`, `confidence=0.91`. Policy có thể từ chối confidence thấp, claim không có trong facts hoặc body vượt giới hạn kênh. Business decision vẫn đến từ luật domain: cảnh báo gian lận bắt buộc vẫn được gửi bằng template an toàn khi AI không hoạt động. Một thông báo bị cấm không trở nên hợp lệ chỉ vì model có confidence cao.
+
+### Idempotency không chỉ là `exists()`
+
+Đây là một race, không phải cơ chế idempotency:
+
+```java
+// WRONG: hai consumer có thể cùng thấy false
+if (!repository.exists(event.eventId())) {
+    repository.save(event.eventId());
+    sender.send(message);
+}
+```
+
+Hai consumer có thể cùng vượt qua bước kiểm tra trước khi một bên insert. Thiết kế thật cần unique constraint trên `(tenant_id, event_id, purpose, channel)` cùng atomic insert, hoặc `SETNX` có điều kiện và expiry khi cache phù hợp. Kafka consumer cũng có thể dùng inbox table: insert event key trong cùng transaction với notification được tạo, rồi chỉ acknowledge Kafka sau commit. Outbox giúp publish work một cách đáng tin cậy từ database.
+
+Idempotent storage và idempotent side effect là hai việc khác nhau. Unique insert ngăn duplicate processing record, nhưng không thể hủy hai call đã gửi tới email, SMS hoặc push provider. Delivery request cần idempotency key ổn định hoặc cơ chế deduplication riêng của provider. Nếu provider không hỗ trợ, hãy ghi nhận trạng thái không chắc chắn và reconciliation, thay vì retry mù không có key.
+
+### Version và structured output
+
+LLM adapter nên nhận một fact object tối thiểu, canonical và trả về schema như `{ title, body, tone, claims }`. Validator kiểm tra mọi claim có trong facts, field bắt buộc, giới hạn độ dài kênh và việc output có chứa credential hoặc secret hay không. Lưu `model_version` và `prompt_version`, vì thay đổi một trong hai có thể đổi hành vi. Policy thay đổi cũng phải có `policy_version`.
+
+### Timeout, retry và fallback
+
+Dùng deadline ngắn, exponential backoff có giới hạn và jitter cho lỗi có thể retry, cùng circuit breaker để ngừng gọi dependency đang outage. Không retry lỗi validation hoặc authentication. Fallback template phải deterministic và được policy chọn, không phụ thuộc exception xảy ra sau cùng. Đưa poison event vào dead-letter, còn work đã hết retry vào reconciliation.
+
+## Trade-off
+
+Cho AI viết nội dung giúp tăng sự đa dạng và có thể giảm số template phải bảo trì, nhưng thêm latency, token cost, dependency provider và độ phức tạp audit. Chỉ gửi canonical facts giúp giảm lộ dữ liệu nhưng ít ngữ cảnh văn phong hơn. Sinh nội dung synchronous cho response mới nhất nhưng gắn latency gửi với model; asynchronous cô lập tốt hơn nhưng cần state bền vững và trạng thái pending rõ ràng.
+
+Với message rủi ro cao hoặc cần chính xác pháp lý, template deterministic là mặc định an toàn hơn. Có thể tắt AI theo tenant, locale, channel hoặc policy version mà không thay đổi payment facts.
+
+## Thiết kế tốt hơn
+
+Giữ domain và port nhỏ. Một flow hướng production có thể như sau:
 
 ```text
-src/main/java/dev/finpay/notifications/
-|- domain/
-|  |- port/
-|  |  |- CopyGenerator.java
-|  |  |- DedupStore.java
-|  |  `- AuditLog.java
-|  |- model/
-|  |  |- NotificationEvent.java
-|  |  |- GeneratedCopy.java
-|  |  `- Decision.java
-|  `- service/
-|     `- CopyPipeline.java
-`- infrastructure/
-   |- kafka/
-   |- llm/
-   |- opensearch/
-   `- store/
+Kafka event -> consumer -> inbox/unique insert -> fact mapper
+                                      |
+                         policy -> LLM adapter (optional)
+                                      |
+                         validator -> template fallback
+                                      |
+                         outbox -> delivery adapter -> provider
+                                      |
+                         audit + OpenSearch read model
 ```
 
-Pipeline phải tất định về dữ kiện và trạng thái gửi. Chỉ phần câu chữ được phép thay đổi.
-
-## Bước 1: chuẩn hóa event
-
-> **[PROPOSED DESIGN]** Chuyển wire event thành tập dữ kiện đã định kiểu và được validate trước khi gọi model. Object này là contract mà generated copy không được ghi đè.
-
 ```java
-public record PaymentSettled(
-    String eventId,
-    String userId,
-    BigDecimal amountPaid,
-    String currency,
-    LocalDateTime settledAt
-) {
-    public PaymentSettled {
-        Objects.requireNonNull(eventId, "eventId is required");
-        if (amountPaid == null || amountPaid.signum() <= 0)
-            throw new IllegalArgumentException("amountPaid must be positive");
-        if (currency == null || currency.isBlank())
-            throw new IllegalArgumentException("currency is required");
-    }
+// RIGHT: facts và quyền gửi nằm ngoài model
+NotificationDecision decide(PaymentFacts facts, Policy policy) {
+    AiDraft draft = policy.aiEnabled()
+        ? llm.generate(facts.minimalView(), policy.promptVersion(), policy.deadline())
+        : null;
+    ValidatedCopy copy = policy.validateOrFallback(draft, facts);
+    return policy.authorize(facts, copy); // send, suppress hoặc retry
 }
 ```
 
-Kafka adapter ánh xạ wire JSON sang `PaymentSettled` trong `infrastructure/kafka/`. Domain pipeline chỉ thấy domain record. Nếu schema của topic thay đổi, adapter thay đổi; domain không cần biết wire format đó.
+Database là system of record cho facts, processing state và audit entry. Kafka là replay source, không phải payment ledger canonical. OpenSearch là read model để tìm lịch sử notification, không phải authority để quyết định payment có xảy ra hay không. Outbox mang theo delivery idempotency key ổn định. Tenant provider key được lấy từ secret manager, không bao giờ đặt trong prompt hoặc log.
 
-## Bước 2: claim event một lần
+Audit record tối thiểu nên có `transaction_id`, `event_id`, `model_version`, `prompt_version`, `policy_version`, `decision` và `reason`, cùng timestamp, channel, template hoặc output hash và provider outcome. Chỉ lưu generated content khi retention và access policy cho phép.
 
-Kafka có thể giao một event ít nhất một lần, vì vậy consumer phải sẵn sàng nhận lại cùng event. Pipeline nên claim `eventId` trước external call và release claim khi xử lý thất bại.
+## Kịch bản lỗi
 
-```java
-@Transactional
-public Decision decide(PaymentSettled event) {
-    if (dedupStore.alreadyProcessed(event.eventId()))
-        return Decision.replay(event.eventId());
+- **Kafka giao lại duplicate:** inbox unique key trả về kết quả đã có; consumer acknowledge mà không tạo notification khác.
+- **Model timeout hoặc rate limit:** retry có giới hạn có thể chạy với lỗi tạm thời; sau deadline, policy chọn template deterministic.
+- **Output sai cấu trúc hoặc không an toàn:** schema và claim validation từ chối, ghi reason và không gửi.
+- **Provider timeout sau khi đã nhận:** đánh dấu delivery không chắc chắn, giữ nguyên idempotency key và reconcile trạng thái provider thay vì retry không key.
+- **Database outage:** không acknowledge event; Kafka sẽ replay sau khi phục hồi.
+- **OpenSearch outage:** delivery và audit persistence vẫn tiếp tục; indexing retry từ durable record.
+- **Prompt injection trong mô tả giao dịch:** coi mọi field event là untrusted data, không cho chúng ghi đè system instruction hoặc policy.
 
-    dedupStore.claim(event.eventId(), leaseTtlMinutes);
-    try {
-        GeneratedCopy copy = copyGenerator.generate(event);
-        Decision decision = Decision.accepted(event.eventId(), copy, now());
-        auditLog.record(decision);
-        return decision;
-    } catch (Throwable t) {
-        dedupStore.release(event.eventId());
-        Decision decision = Decision.failed(event.eventId(), reason(t), now());
-        auditLog.record(decision);
-        return decision;
-    }
-}
+## Capacity
+
+Capacity phải tính từ traffic, latency và hành vi retry, không chỉ từ số partition. Quan hệ cơ bản là:
+
+```text
+Concurrency = Throughput x Latency
 ```
 
-Các thuộc tính quan trọng:
+Với 200 notification/giây và model path 400 ms, số request model đang xử lý danh nghĩa là `200 x 0.4 = 80`. Retry và fallback làm tăng tải, nên quota provider, consumer concurrency, connection pool và database write phải được dimension cho cả failure case. Rate limiter và quota theo tenant ngăn một tenant chiếm toàn bộ model capacity. Kafka partition tạo parallelism và replay; chúng không làm database hay provider nhanh hơn.
 
-- Claim được khóa theo `eventId`, và replay được phát hiện trước external call.
-- Attempt thất bại sẽ release claim để Kafka consumer redeliver. Số lần retry và backoff thuộc boundary của consumer, không nằm trong một vòng lặp thứ hai trong pipeline.
-- Cả quyết định accepted, failed và replay đều có thể audit.
+Giữ payload nhỏ, giới hạn output token và ưu tiên template khi model queue tăng. Tách batch indexing vào OpenSearch khỏi critical path gửi. Backpressure nên làm chậm hoặc tạm dừng consumption trước khi memory và provider queue tăng không giới hạn.
 
-## Bước 3: dùng idempotency key cho provider request
+## Security/Privacy
 
-Khử trùng lặp ở event không xử lý được tình huống mạng không rõ kết quả. Request có thể timeout ở phía local sau khi provider đã xử lý xong. Một provider request key ổn định cho phép retry tham chiếu cùng operation, nếu provider hỗ trợ request idempotency.
+Payment event có thể chứa PII, account identifier, thông tin merchant và mô tả nhạy cảm. Minimize model input còn đúng những facts cần cho việc viết. Tokenize hoặc redact identifier, phân loại field và dùng provider nằm trong boundary đã phê duyệt. Không tùy tiện gửi toàn bộ transaction tới external AI service. Credential của tenant nằm trong secret manager, được scope theo tenant và không xuất hiện trong prompt, trace hay log thông thường.
 
-```java
-String idempotencyKey = "copy:" + event.eventId();
+Phân quyền audit và search view, mã hóa khi truyền và khi lưu, đặt retention và deletion rule, đồng thời coi model output là untrusted content. Cần output encoding và escaping theo channel để ngăn lạm dụng markup hoặc link. Security policy có thể buộc dùng template deterministic cho nhóm dữ liệu nhạy cảm.
 
-var request = CopyRequest.builder()
-    .idempotencyKey(idempotencyKey)
-    .model(providerModel)
-    .messages(List.of(systemPrompt(), userMessage(event)))
-    .responseFormat(JSON_OBJECT)
-    .build();
-```
+## Observability
 
-Cùng event tạo ra cùng key. Kết hợp với dedup store, đường đi tạo copy là idempotent từ đầu đến cuối. Hành vi idempotency cụ thể của provider vẫn là trách nhiệm của adapter và phải được kiểm tra theo API contract của provider đó.
+Đo cả hành vi hệ thống và kết quả nghiệp vụ:
 
-## Bước 4: dữ kiện vào, JSON ra
+- System: consumer lag, processing latency, model latency, số timeout và rate limit, retry attempt, circuit state, validation failure, outbox age, provider latency và delivery không chắc chắn.
+- Business: notification được accept, sent, chọn fallback, bị policy suppress, fail theo channel và số duplicate attempt được ngăn.
 
-> **[PROPOSED DESIGN]** Xem system prompt là một phần của application contract, không phải lời đề nghị model làm đúng. Cung cấp dữ kiện chính xác, cấm bịa giá trị và nêu rõ model không được quyết định tiền.
+Prometheus label phải có cardinality bị giới hạn. Không bao giờ dùng `transaction_id` hoặc `account_id` làm label; đặt identifier liên quan trong structured log hoặc trace context với access control. Audit record giữ version và reason cần thiết để tái dựng. Dashboard phải phân biệt model rejection, provider failure và business-policy suppression.
 
-```java
-String systemPrompt = """
-    You write notification copy for a fintech app. The recipient is the customer.
+## Bài học
 
-    HARD RULES:
-    1. Use only facts in the user message. Never invent, round, or correct numbers.
-       Never imply a balance, refund, or charge that is not in the facts.
-    2. Reproduce monetary values exactly.
-    3. Return valid JSON matching the schema. Do not return markdown.
-    4. Tone: warm and concise, in Vietnamese. Body limit: 160 characters.
-    5. If the facts are insufficient, return {"error":"unsatisfiable"}.
-    """;
-```
-
-Adapter validate response trước khi response đến sender:
-
-```java
-public record GeneratedCopy(
-    String title,
-    String body,
-    Tone tone,
-    String model,
-    String rawModelOutput
-) {
-    public enum Tone { NEUTRAL, URGENT, CELEBRATORY }
-}
-```
-
-Jackson có thể deserialize contract này trong `infrastructure/`. Vi phạm schema hoặc enum sẽ fail tại adapter boundary. `rawModelOutput` được giữ để audit và không bao giờ hiển thị cho khách hàng.
-
-## Bước 5: timeout, retry, circuit breaker, fallback
-
-LLM là một downstream dependency. Hãy đặt timeout rõ ràng và cô lập nó bằng circuit breaker. Các giá trị dưới đây là giá trị nguồn trong bài gốc; trong service thật, chúng phải nằm trong configuration và được chọn dựa trên yêu cầu latency và delivery.
-
-```java
-@Bean
-public RestClient llmClient(LlmProperties props) {
-    return RestClient.builder()
-        .baseUrl(props.baseUrl())
-        .requestFactory(ClientHttpRequestFactories.get(
-            ClientHttpRequestFactorySettings.defaults()
-                .withConnectTimeout(props.connectTimeout()) // source: 2s
-                .withReadTimeout(props.readTimeout())))     // source: 10s
-        .build();
-}
-
-@Bean
-public CircuitBreaker llmBreaker(CircuitBreakerConfigProps props) {
-    return CircuitBreaker.of("llm", props.toConfig()); // source example: 60%
-}
-```
-
-```java
-public Optional<GeneratedCopy> generate(PaymentSettled event) {
-    return Try.ofSupplier(() ->
-        circuitBreaker.executeSupplier(() ->
-            llmClient.post()
-                .uri("/chat/completions")
-                .body(requestFor(event))
-                .retrieve()
-                .body(LlmResponse.class)
-                .toGeneratedCopy()))
-        .recover(TimeoutException.class, e -> fallbackCopy(event))
-        .recover(CallNotPermittedException.class, e -> fallbackCopy(event))
-        .recover(e -> {
-            auditLog.record(Decision.failed(event.eventId(), describe(e), now()));
-            return null;
-        })
-        .toJavaOptional();
-}
-```
-
-Các trách nhiệm được tách riêng:
-
-- **Timeout:** sender thread không bị provider giữ vô thời hạn.
-- **Retry:** Kafka consumer áp dụng số lần thử có giới hạn và backoff. Copy pipeline không tự lặp.
-- **Circuit breaker:** khi provider lỗi, dùng template đã được con người duyệt và điền bằng cùng dữ kiện đã validate.
-
-Fallback không phải là nguồn sự thật thứ hai về thanh toán. Đây là đường hiển thị có ít biến động hơn. Nếu không tạo được copy an toàn, hãy ghi nhận failure và để delivery policy của consumer xử lý.
-
-## Bước 6: BYOK không làm lộ credential
-
-> **[PROPOSED DESIGN]** Provider key do tenant cung cấp nên đến dưới dạng mã hóa, được giải mã tại adapter boundary và không bao giờ hardcode, ghi log hoặc đưa vào stack trace.
-
-```java
-@Service
-public class ByokVault {
-    public SecretKey keyFor(String tenantId) {
-        return vault.readSecret(Path.of("byok", tenantId));
-    }
-}
-```
-
-Adapter gắn key vào authorization header của request rồi loại bỏ sau đó. Request logging phải loại credential bằng filter cho các LLM DTO. Test nên khẳng định key không xuất hiện trong prompt, log hoặc exception. Không cần log cả một phần key; hãy log tenant identifier hoặc request identifier.
-
-## Bước 7: audit mọi quyết định
-
-Port `AuditLog` có thể ghi các quyết định accepted, failed và replay vào OpenSearch thông qua infrastructure adapter.
-
-```java
-public record AuditRecord(
-    String eventId,
-    String userId,
-    String decision,       // ACCEPTED | FAILED | REPLAY
-    String copyTitle,
-    String copyBody,
-    String model,
-    String rawModelOutput,
-    Instant occurredAt
-) {}
-```
-
-> **[SOURCE FACT]** Bài gốc chỉ định OpenSearch, phân trang `search_after`, xoay vòng index theo ngày và giữ hot storage trong 90 ngày rồi chuyển sang cold storage. Đây là lựa chọn triển khai, không phải yêu cầu chung. Các lựa chọn này hỗ trợ truy vấn điều tra theo khoảng thời gian và khoảng số tiền, kèm output nguyên văn của model.
-
-Dữ liệu audit cũng cần access control, chính sách retention và quyết định rõ liệu raw output có thể chứa dữ liệu cá nhân hay không. Audit trail chỉ hữu ích khi có thể tìm kiếm và được bảo vệ khi truy cập.
-
-## Guardrail tóm tắt
-
-| Guardrail | Cơ chế |
-| --- | --- |
-| Model không quyết định tiền | Dữ kiện đã validate, prompt có ràng buộc, schema validation, template fallback |
-| Idempotency theo `eventId` | Dedup store, claim/release, provider request key |
-| Downstream failure có giới hạn | Connect/read timeout, consumer retry, circuit breaker |
-| Không để lộ BYOK key | Secret store, chỉ adapter được truy cập, filter credential |
-| Audit mọi quyết định | OpenSearch `AuditRecord` hoặc search-oriented store tương đương |
-
-## Kết luận kỹ thuật
-
-1. **Coi prompt là code.** Version hóa, review và test đường `unsatisfiable` cùng quy tắc không bịa số.
-2. **Giữ dữ kiện tất định.** Câu chữ có thể thay đổi; mọi chữ số tiền phải đến từ domain.
-3. **Luôn có fallback thực sự.** Template do con người duyệt là cơ chế reliability, không phải giải pháp tạm bợ.
-4. **Audit hành vi thay vì đoán trước.** Output được ghi lại giúp điều tra khi behavior của model hoặc prompt thay đổi.
-5. **Dùng một event key ổn định.** `eventId` nối deduplication của consumer, request idempotency của provider và audit record.
-
-Repository nằm tại <https://github.com/finpay-lab/notification-service>. Quy tắc cốt lõi là: LLM có thể chọn câu chữ, nhưng không sở hữu dữ kiện, tiền, trạng thái gửi hoặc credential.
+1. Đặt payment facts và quyền gửi trong domain; AI chỉ tạo signal hoặc draft có giới hạn.
+2. Chứng minh idempotency bằng atomic storage operation và làm external side effect deduplicable một cách riêng biệt.
+3. Coi model, prompt, policy, provider, timeout, retry và fallback là các operational contract có version.
+4. Dùng Kafka để replay, database làm system of record và OpenSearch làm read model.
+5. Minimize PII trước khi gọi model bên ngoài và không coi credential của tenant là prompt data.
+6. Quan sát business decision và failure mode mà không biến identifier cardinality cao thành metric label.

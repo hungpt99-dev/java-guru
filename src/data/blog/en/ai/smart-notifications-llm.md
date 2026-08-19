@@ -1,5 +1,5 @@
 ---
-title: "Designing Safe LLM-Generated Payment Notifications"
+title: "Designing Safe LLM-Assisted Payment Notifications"
 description: "A practical design for using an LLM to write notification copy without letting it change payment facts, block delivery, or leak credentials."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags:
@@ -13,293 +13,161 @@ featured: false
 
 > Repository: <https://github.com/finpay-lab/notification-service>
 
-## The problem
+## Problem
 
-Payment notifications have two different requirements. They must state the transaction accurately, and they must be readable in SMS, email, or push form. A fixed template is reliable but tends to multiply as product and legal requirements diverge. An LLM can vary the wording, but it introduces a more serious risk: the model may change a fact while trying to make the message sound natural.
+A payment notification has two different jobs: state the transaction accurately and make that information readable in SMS, email, or push. A fixed template is dependable, but templates multiply as product, locale, channel, and legal requirements diverge. An LLM can propose natural wording, but it can also change a fact while trying to improve the sentence.
 
-This article separates those responsibilities. The domain owns validated payment facts and delivery decisions. The LLM may propose wording only. The design also covers event idempotency, structured output, timeout and retry behavior, fallback templates, tenant-supplied provider keys, and audit records.
+The important boundary is therefore not “template versus AI.” It is authority. The payment domain owns validated facts and the decision to deliver. The LLM may propose copy only.
 
-> **[SOURCE FACT]** The supplied example uses `notification-service`, a Kafka consumer, Spring Boot, a hexagonal layout, an LLM adapter, an OpenSearch adapter, and a repository at the URL above. The diagrams and code below describe that shape; configuration values are examples from the source article, not universal defaults.
+This is a reference design for FinPay. A production-oriented design would need to validate these assumptions against its own regulatory, provider, and operational requirements; no deployment claim is implied.
 
-## Start with the unsafe design
+## Why Hard
 
-Passing a raw event payload to a model and returning an untyped string leaves every important boundary implicit:
+The system must combine an asynchronous event, a probabilistic dependency, and an irreversible side effect. A model can produce false positives, false negatives, or different wording for the same input. Providers can time out, rate-limit, return malformed output, or become unavailable. A retry can recover a response, but can also repeat an external send.
+
+There are several independent contracts:
+
+- The event must be consumed at least once without creating duplicate business work.
+- Facts such as amount, currency, status, and recipient must not be inferred from generated text.
+- AI quality must not decide whether a legally required notification is sent.
+- Provider credentials and transaction data must remain within approved boundaries.
+- Every decision must be explainable after model, prompt, or policy versions change.
+
+## Naive Design
+
+Passing a raw event to a model and returning an untyped string leaves those contracts implicit:
 
 ```java
-// PROPOSED DESIGN: deliberately unsafe example; do not ship it
-@Service
-public class CopyService {
-    private final LlmClient llm;
-
-    public String copyFor(NotificationEvent event) {
-        String prompt = """
-            Write a friendly Vietnamese push notification about this event:
-            %s
-            """.formatted(event.rawPayload());
-        return llm.complete(prompt); // no timeout, retry policy, or schema
-    }
+// WRONG: deliberately unsafe; do not ship
+public String copyFor(NotificationEvent event) {
+    return llm.complete("Write a friendly notification: " + event.rawPayload());
 }
 ```
 
-There are five independent failures:
+The model sees more data than it needs, the result has no schema, and there is no timeout, bounded retry, or fallback. Most importantly, a caller cannot tell whether a sentence is a fact, a model suggestion, or a delivery decision.
 
-1. **Facts are not protected.** Nothing requires the output to preserve the exact amount. The source example uses `2,431,876 VND`; changing that to `2.4M` would be a correctness and potentially a compliance problem.
-2. **The output has no contract.** A push sender may require `{ title, body, tone }`, but this method returns an arbitrary string.
-3. **The dependency has no failure policy.** Without a timeout, a slow provider can hold a request. Without bounded retry and a circuit breaker (a mechanism that temporarily stops calls to a failing dependency), provider degradation can spread to notification delivery.
-4. **The model is given too much authority.** It could introduce an amount due, refund, or charge that is absent from the event.
-5. **The operation is not idempotent.** Reprocessing one event can create different copy and duplicate delivery unless the pipeline has a stable event key and a deduplication policy.
+## Why It Breaks
 
-These are design failures, not prompt-quality problems. They need enforcement at the application boundaries.
+Suppose the source event contains `2,431,876 VND`, while the model returns “about 2.4M VND.” That is not a cosmetic difference. It can be incorrect, misleading, or non-compliant. A free-form string may also omit a required title, exceed an SMS limit, include an unsupported claim, or contain prompt-injected text from a field that was supposed to be data.
 
-## Proposed architecture
+The dependency failure is just as serious. An unbounded call holds consumer work indefinitely. Blind retries amplify rate limits. Reprocessing an event can generate different copy and send it twice. A timeout does not prove that the provider did not complete the request, so retrying a send without an idempotency key can duplicate the side effect.
+
+## Hard Problems
+
+### AI is a signal, not a decision
+
+The pipeline should make the authority explicit:
 
 ```text
-                     +-------------------------------------------+
-Kafka topic -------->|          notification-service              |
- event.payment       |                                             |
-                     |  +-----------+       +------------------+   |
-                     |  | domain/   |<----->| infrastructure/  |   |
-                     |  | (ports)   |       | (adapters)       |   |
-                     |  +-----+-----+       +--------+---------+   |
-                     |        |                     |             |
-                     | idempotency store            | LLM provider |
-                     | (eventId dedupe)              | (BYOK client)|
-                     |                               | OpenSearch   |
-                     +-------------------------------------------+
+validated facts -> AI signal -> policy -> business decision -> delivery
+                    (style/risk)   (rules)     (send/fallback/suppress)
 ```
 
-Spring Boot consumes the Kafka topic. In the proposed hexagonal architecture, domain code exposes ports (interfaces), while Kafka, the LLM provider, OpenSearch, and persistence are infrastructure adapters. The domain does not import a provider SDK. That keeps payment rules testable without network access.
+For example, the AI signal can be `tone=concise`, `risk=low`, and `confidence=0.91`. Policy can reject low confidence, unsupported claims, or a body over the channel limit. The business decision still comes from domain rules: a required fraud alert is delivered with a safe template even when AI is unavailable. A prohibited notification is not enabled by a confident model.
+
+### Idempotency is more than `exists()`
+
+This is a race, not an idempotency mechanism:
+
+```java
+// WRONG: two consumers can both observe false
+if (!repository.exists(event.eventId())) {
+    repository.save(event.eventId());
+    sender.send(message);
+}
+```
+
+Two consumers can pass the check before either inserts. A real design uses a unique constraint on `(tenant_id, event_id, purpose, channel)` and an atomic insert, or a conditional `SETNX` with an expiry when a cache is appropriate. A Kafka consumer can also use an inbox table: insert the event key in the same transaction as the derived notification, then acknowledge Kafka only after commit. An outbox publishes the resulting work reliably from the database.
+
+Storage idempotency and side-effect idempotency are different. The unique insert prevents duplicate processing records; it cannot undo two calls already made to an email, SMS, or push provider. The delivery request needs a stable idempotency key, or a provider-specific deduplication strategy. If the provider has neither, record the uncertain outcome and use reconciliation rather than blindly retrying.
+
+### Versions and structured output
+
+The model adapter should receive a minimal, canonical fact object and return a schema such as `{ title, body, tone, claims }`. The validator checks that every claim is present in the facts, that required fields and channel limits are satisfied, and that no credential or secret appears. Store `model_version` and `prompt_version`; changing either can change behavior. Policy changes require `policy_version` as well.
+
+### Timeouts, retries, and fallback
+
+Use a short deadline, bounded exponential backoff with jitter for retryable errors, and a circuit breaker to stop calls during an outage. Do not retry validation errors or authentication failures. A fallback template is deterministic and should be selected by policy, not by whichever exception happened last. Dead-letter poison events, and route exhausted work to reconciliation.
+
+## Trade-offs
+
+Allowing AI to write copy improves variation and can reduce template maintenance, but adds latency, token cost, provider dependency, and audit complexity. Sending only canonical facts lowers privacy exposure but reduces stylistic context. Synchronous generation gives a fresh response but couples delivery latency to the model; asynchronous generation improves isolation but requires durable state and a visible pending state.
+
+For high-risk or legally exact messages, deterministic templates are the safer default. AI can be disabled per tenant, locale, channel, or policy version without changing payment facts.
+
+## Better Design
+
+Keep the domain and ports small. A production-oriented flow would look like this:
 
 ```text
-src/main/java/dev/finpay/notifications/
-|- domain/
-|  |- port/
-|  |  |- CopyGenerator.java
-|  |  |- DedupStore.java
-|  |  `- AuditLog.java
-|  |- model/
-|  |  |- NotificationEvent.java
-|  |  |- GeneratedCopy.java
-|  |  `- Decision.java
-|  `- service/
-|     `- CopyPipeline.java
-`- infrastructure/
-   |- kafka/
-   |- llm/
-   |- opensearch/
-   `- store/
+Kafka event -> consumer -> inbox/unique insert -> fact mapper
+                                      |
+                         policy -> LLM adapter (optional)
+                                      |
+                         validator -> template fallback
+                                      |
+                         outbox -> delivery adapter -> provider
+                                      |
+                         audit + OpenSearch read model
 ```
 
-The pipeline should be deterministic about facts and delivery state. Only the wording is allowed to vary.
-
-## Step 1: canonicalize the event
-
-> **[PROPOSED DESIGN]** Convert the wire event into a typed, validated fact set before calling the model. This object is the contract that generated copy cannot override.
-
 ```java
-public record PaymentSettled(
-    String eventId,
-    String userId,
-    BigDecimal amountPaid,
-    String currency,
-    LocalDateTime settledAt
-) {
-    public PaymentSettled {
-        Objects.requireNonNull(eventId, "eventId is required");
-        if (amountPaid == null || amountPaid.signum() <= 0)
-            throw new IllegalArgumentException("amountPaid must be positive");
-        if (currency == null || currency.isBlank())
-            throw new IllegalArgumentException("currency is required");
-    }
+// RIGHT: facts and delivery authority stay outside the model
+NotificationDecision decide(PaymentFacts facts, Policy policy) {
+    AiDraft draft = policy.aiEnabled()
+        ? llm.generate(facts.minimalView(), policy.promptVersion(), policy.deadline())
+        : null;
+    ValidatedCopy copy = policy.validateOrFallback(draft, facts);
+    return policy.authorize(facts, copy); // send, suppress, or retry
 }
 ```
 
-The Kafka adapter maps wire JSON to `PaymentSettled` in `infrastructure/kafka/`. The domain pipeline sees only the domain record. If the topic schema changes, the adapter changes; the domain does not have to know about that wire format.
+The database is the system of record for facts, processing state, and audit entries. Kafka is the replay source, not the canonical payment ledger. OpenSearch is a read model for searching notification history, not an authority for deciding whether a payment happened. The outbox carries a stable delivery idempotency key. Tenant-supplied provider keys are resolved from a secret manager, never placed in prompts or logs.
 
-## Step 2: claim the event once
+An audit record should include at least `transaction_id`, `event_id`, `model_version`, `prompt_version`, `policy_version`, `decision`, and `reason`, plus timestamps, channel, template or output hash, and provider outcome. Store generated content only where retention and access policy permit.
 
-Kafka delivery is at least once, so a consumer must be prepared to see the same event again. The pipeline should claim `eventId` before making an external call and release the claim when processing fails.
+## Failure Scenarios
 
-```java
-@Transactional
-public Decision decide(PaymentSettled event) {
-    if (dedupStore.alreadyProcessed(event.eventId()))
-        return Decision.replay(event.eventId());
+- **Duplicate Kafka delivery:** the inbox unique key returns the existing result; the consumer acknowledges without creating another notification.
+- **Model timeout or rate limit:** bounded retries may run for transient errors; policy selects the deterministic template after the deadline.
+- **Malformed or unsafe output:** schema and claim validation reject it and record the reason; they do not send it.
+- **Provider timeout after acceptance:** mark delivery as uncertain, keep the idempotency key, and reconcile provider status rather than issuing an unkeyed retry.
+- **Database outage:** do not acknowledge the event; Kafka can replay it after recovery.
+- **OpenSearch outage:** delivery and audit persistence continue; indexing retries from the durable record.
+- **Prompt injection in a transaction description:** treat all event fields as untrusted data and never let them override system instructions or policy.
 
-    dedupStore.claim(event.eventId(), leaseTtlMinutes);
-    try {
-        GeneratedCopy copy = copyGenerator.generate(event);
-        Decision decision = Decision.accepted(event.eventId(), copy, now());
-        auditLog.record(decision);
-        return decision;
-    } catch (Throwable t) {
-        dedupStore.release(event.eventId());
-        Decision decision = Decision.failed(event.eventId(), reason(t), now());
-        auditLog.record(decision);
-        return decision;
-    }
-}
+## Capacity
+
+Capacity must be calculated from traffic, latency, and retry behavior, not from a topic partition count alone. The basic relationship is:
+
+```text
+Concurrency = Throughput x Latency
 ```
 
-The important properties are:
+At 200 notifications/second and a 400 ms model path, the nominal in-flight model work is `200 x 0.4 = 80` requests. Retries and a fallback path add load, so size provider quotas, consumer concurrency, connection pools, and database writes for the failure case too. A rate limiter and per-tenant quotas prevent one tenant from consuming all model capacity. Kafka partitions provide parallelism and replay; they do not make the database or provider faster.
 
-- The claim is keyed by `eventId`, and replay detection happens before the external call.
-- A failed attempt releases the claim so the Kafka consumer can redeliver it. Retry count and backoff belong at the consumer boundary, not in a second loop inside this pipeline.
-- Accepted, failed, and replay decisions are all auditable.
+Keep payloads small, bound output tokens, and prefer templates when the model queue grows. Batch indexing to OpenSearch separately from the delivery critical path. Backpressure should pause or slow consumption before memory and provider queues become unbounded.
 
-## Step 3: use an idempotency key for the provider request
+## Security/Privacy
 
-Event deduplication does not cover a network ambiguity. A request can time out locally after the provider has completed it. A stable provider request key lets a retry refer to the same operation, when the provider supports request idempotency.
+Payment events can contain PII, account identifiers, merchant details, and sensitive descriptions. Minimize the model input to the facts needed for wording. Tokenize or redact identifiers, classify fields, and use an approved provider boundary. Do not casually send the full transaction to an external AI service. A tenant's provider credential belongs in a secret manager, is scoped to that tenant, and is excluded from prompts, traces, and ordinary logs.
 
-```java
-String idempotencyKey = "copy:" + event.eventId();
+Authorize access to audit and search views, encrypt data in transit and at rest, define retention and deletion rules, and treat model output as untrusted content. Output encoding and channel-specific escaping are required to prevent markup or link abuse. Security policy can force deterministic templates for sensitive categories.
 
-var request = CopyRequest.builder()
-    .idempotencyKey(idempotencyKey)
-    .model(providerModel)
-    .messages(List.of(systemPrompt(), userMessage(event)))
-    .responseFormat(JSON_OBJECT)
-    .build();
-```
+## Observability
 
-The same event produces the same key. Together with the deduplication store, this makes the copy-generation path idempotent end to end. The provider's exact idempotency behavior remains an adapter concern and must be verified against its API contract.
+Measure both system behavior and business outcomes:
 
-## Step 4: facts in, JSON out
+- System: consumer lag, processing latency, model latency, timeout and rate-limit counts, retry attempts, circuit state, validation failures, outbox age, provider latency, and uncertain deliveries.
+- Business: notifications accepted, sent, fallback-selected, suppressed by policy, failed by channel, and duplicate attempts prevented.
 
-> **[PROPOSED DESIGN]** Treat the system prompt as part of the application contract, not as a request for good intentions. Supply the exact facts, prohibit invented values, and make clear that the model cannot decide money.
+Prometheus labels must remain bounded. Never use `transaction_id` or `account_id` as labels; put correlated identifiers in structured logs or the trace context with access controls. Audit records carry the versions and reason needed for reconstruction. Dashboards should distinguish model rejection from provider failure and from a business-policy suppression.
 
-```java
-String systemPrompt = """
-    You write notification copy for a fintech app. The recipient is the customer.
+## Lessons
 
-    HARD RULES:
-    1. Use only facts in the user message. Never invent, round, or correct numbers.
-       Never imply a balance, refund, or charge that is not in the facts.
-    2. Reproduce monetary values exactly.
-    3. Return valid JSON matching the schema. Do not return markdown.
-    4. Tone: warm and concise, in Vietnamese. Body limit: 160 characters.
-    5. If the facts are insufficient, return {"error":"unsatisfiable"}.
-    """;
-```
-
-The adapter validates the response before it can reach a sender:
-
-```java
-public record GeneratedCopy(
-    String title,
-    String body,
-    Tone tone,
-    String model,
-    String rawModelOutput
-) {
-    public enum Tone { NEUTRAL, URGENT, CELEBRATORY }
-}
-```
-
-Jackson can deserialize this contract in `infrastructure/`. A schema or enum violation fails at the adapter boundary. `rawModelOutput` is retained for audit and is never shown to the customer.
-
-## Step 5: timeout, retry, circuit breaker, fallback
-
-An LLM is a downstream dependency. Give it an explicit timeout and isolate it with a circuit breaker. The values below are source values from the original article; in a real service they belong in configuration and must be chosen from latency and delivery requirements.
-
-```java
-@Bean
-public RestClient llmClient(LlmProperties props) {
-    return RestClient.builder()
-        .baseUrl(props.baseUrl())
-        .requestFactory(ClientHttpRequestFactories.get(
-            ClientHttpRequestFactorySettings.defaults()
-                .withConnectTimeout(props.connectTimeout()) // source: 2s
-                .withReadTimeout(props.readTimeout())))     // source: 10s
-        .build();
-}
-
-@Bean
-public CircuitBreaker llmBreaker(CircuitBreakerConfigProps props) {
-    return CircuitBreaker.of("llm", props.toConfig()); // source example: 60%
-}
-```
-
-```java
-public Optional<GeneratedCopy> generate(PaymentSettled event) {
-    return Try.ofSupplier(() ->
-        circuitBreaker.executeSupplier(() ->
-            llmClient.post()
-                .uri("/chat/completions")
-                .body(requestFor(event))
-                .retrieve()
-                .body(LlmResponse.class)
-                .toGeneratedCopy()))
-        .recover(TimeoutException.class, e -> fallbackCopy(event))
-        .recover(CallNotPermittedException.class, e -> fallbackCopy(event))
-        .recover(e -> {
-            auditLog.record(Decision.failed(event.eventId(), describe(e), now()));
-            return null;
-        })
-        .toJavaOptional();
-}
-```
-
-The responsibilities are intentionally separate:
-
-- **Timeout:** the sender thread is not held indefinitely by the provider.
-- **Retry:** the Kafka consumer applies bounded attempts and backoff. The copy pipeline does not loop.
-- **Circuit breaker:** when the provider is failing, use a human-approved template populated from the same validated facts.
-
-The fallback is not a second source of payment truth. It is a lower-variance presentation path. If no safe copy can be produced, record the failure and let the consumer's delivery policy handle it.
-
-## Step 6: BYOK without credential leakage
-
-> **[PROPOSED DESIGN]** A tenant-supplied provider key should arrive encrypted, be decrypted at the adapter boundary, and never be hardcoded, logged, or placed in a stack trace.
-
-```java
-@Service
-public class ByokVault {
-    public SecretKey keyFor(String tenantId) {
-        return vault.readSecret(Path.of("byok", tenantId));
-    }
-}
-```
-
-The adapter attaches the key to the authorization header for the request and discards it afterward. Request logging must remove credential fields through a filter for the LLM DTOs. Tests should assert that keys do not appear in prompts, logs, or exceptions. Logging even a partial key is unnecessary; log a tenant identifier or request identifier instead.
-
-## Step 7: audit every decision
-
-The `AuditLog` port can write accepted, failed, and replay decisions to OpenSearch through an infrastructure adapter.
-
-```java
-public record AuditRecord(
-    String eventId,
-    String userId,
-    String decision,       // ACCEPTED | FAILED | REPLAY
-    String copyTitle,
-    String copyBody,
-    String model,
-    String rawModelOutput,
-    Instant occurredAt
-) {}
-```
-
-> **[SOURCE FACT]** The original article specifies OpenSearch, `search_after` pagination, per-index date rollover, and 90 days of hot retention followed by cold storage. Those are implementation choices, not general requirements. They support forensic queries such as finding generated copy for a given time range and amount range, together with the verbatim model output.
-
-Audit data also needs access control, retention controls, and a decision about whether raw output may contain personal data. The audit trail is useful only if it is searchable and safe to inspect.
-
-## Guardrails at a glance
-
-| Guardrail | Mechanism |
-| --- | --- |
-| The model does not decide money | Validated facts, constrained prompt, schema validation, fallback templates |
-| Idempotency by `eventId` | Dedup store, claim/release, provider request key |
-| Bounded downstream failure | Connect/read timeout, consumer retry, circuit breaker |
-| BYOK key is not exposed | Secret store, adapter-only access, credential filtering |
-| Every decision is auditable | OpenSearch `AuditRecord` or an equivalent search-oriented store |
-
-## Engineering takeaways
-
-1. **Treat the prompt as code.** Version it, review it, and test the `unsatisfiable` path and the no-invented-numbers rule.
-2. **Make facts deterministic.** Customer-facing wording may vary; every monetary digit comes from the domain.
-3. **Keep a real fallback.** A human-approved template is a reliability mechanism, not an embarrassing concession.
-4. **Audit behavior instead of predicting it.** Recorded output supports investigation when model behavior or prompts change.
-5. **Use one stable event key.** `eventId` connects consumer deduplication, provider request idempotency, and audit records.
-
-The repository is <https://github.com/finpay-lab/notification-service>. The central design rule is simple: the LLM may choose words, but it does not own facts, money, delivery state, or credentials.
+1. Put payment facts and delivery authority in the domain; let AI produce only a constrained signal or draft.
+2. Prove idempotency with atomic storage operations and separately make external side effects deduplicable.
+3. Treat model, prompt, policy, provider, timeout, retry, and fallback behavior as versioned operational contracts.
+4. Use Kafka for replay, the database as system of record, and OpenSearch as a read model.
+5. Minimize PII before an external model call and never treat tenant credentials as prompt data.
+6. Observe business decisions and failure modes without turning high-cardinality identifiers into metric labels.
