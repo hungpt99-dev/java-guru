@@ -9,7 +9,6 @@ featured: false
 
 > **Repository:** https://github.com/finpay-lab/ledger-service
 
-# Ledger anomaly detection with Kafka and Prometheus
 
 Anomaly detection is useful only if it does not make ledger posting less reliable. The difficult part is not calling a model. It is keeping model latency, provider failures, duplicate messages, secrets, and audit requirements out of the transaction that moves money.
 

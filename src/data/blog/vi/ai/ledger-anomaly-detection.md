@@ -9,7 +9,6 @@ featured: false
 
 > **Repository:** https://github.com/finpay-lab/ledger-service
 
-# Phát hiện bất thường trong ledger với Kafka và Prometheus
 
 Phát hiện bất thường chỉ có ích khi nó không làm giảm độ tin cậy của việc ghi ledger. Khó khăn không nằm ở việc gọi một model, mà ở việc giữ latency của model, lỗi từ provider, message trùng lặp, secret và yêu cầu audit ra khỏi transaction đang di chuyển tiền.
 
