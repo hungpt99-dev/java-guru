@@ -9,25 +9,113 @@ featured: false
 
 > **Repository:** https://github.com/finpay-lab/ledger-service
 
+# Phát hiện bất thường trong ledger: từ rủi ro đến thiết kế có giới hạn
 
-Phát hiện bất thường chỉ có ích khi nó không làm giảm độ tin cậy của việc ghi ledger. Khó khăn không nằm ở việc gọi một model, mà ở việc giữ latency của model, lỗi từ provider, message trùng lặp, secret và yêu cầu audit ra khỏi transaction đang di chuyển tiền.
+Phát hiện bất thường nghe như một bài toán tích hợp model. Với ledger, trước hết đây là bài toán reliability và accountability: hệ thống cần phát hiện sớm hoạt động đáng ngờ, nhưng provider AI chậm, sai, không khả dụng hoặc không lặp lại được không được làm hỏng việc posting hay âm thầm di chuyển tiền.
 
-Bài viết này mô tả thiết kế `ledger-service` được cung cấp và một ranh giới tích hợp an toàn hơn: ghi ledger trước, publish event, chấm điểm bất đồng bộ, rồi xuất trạng thái của luồng chấm điểm qua Prometheus. AI tạo ra một tín hiệu. Chính sách xác định và, khi cần, quy trình phê duyệt của con người mới đưa ra quyết định tài chính.
+Bài viết tách dữ kiện của repository được cung cấp khỏi đề xuất thiết kế hướng production. FinPay được xem là ngữ cảnh tham chiếu/giả tưởng; đây không phải tuyên bố rằng thiết kế đã được triển khai.
 
-## Phân biệt dữ kiện và thiết kế
+## 1. Vấn đề
 
-**[SOURCE FACT]** Mô tả service được cung cấp xác định `ledger-service` là một Spring Boot service. Service ghi mỗi payment thành một cặp `debit`/`credit` theo mô hình double-entry trong một database transaction, publish ledger event lên Kafka với topic `ledger.events`, và cung cấp dữ liệu để tìm kiếm trong OpenSearch. Mục tiêu nghiệp vụ được nêu là gắn cờ các mẫu ledger đáng ngờ trước khi đối soát và trước batch job lúc 2 giờ sáng.
+**[SOURCE FACT]** Mô tả được cung cấp xác định `ledger-service` là Spring Boot service. Mỗi payment được ghi thành cặp `debit`/`credit` theo double-entry trong một database transaction. Ledger event được publish lên Kafka, topic `ledger.events`, và có thể tìm kiếm trong OpenSearch. Mục tiêu được nêu là gắn cờ mẫu đáng ngờ trước đối soát và batch job lúc 2 giờ sáng.
 
-**[SOURCE FACT]** Tài liệu được cung cấp gắn repository với FinPay. Link repository được giữ ở đầu bài; bài viết không thêm tuyên bố cụ thể nào khác về công ty hoặc nền tảng.
+Kết quả hữu ích không phải là “model nói yes”. Pipeline cần có thể giải thích:
 
-**[ANALYSIS]** Model phải quan sát luồng tiền, không phải là dependency của luồng tiền. Các phần còn lại là ranh giới được đề xuất để đáp ứng yêu cầu đó. Những đoạn được đánh dấu là thiết kế đề xuất chỉ mang tính minh họa và cần được điều chỉnh theo service thực tế.
+```text
+ledger event -> AI signal -> deterministic policy -> business decision
+```
 
-## 1. Giữ luồng tiền nhỏ
+Signal có thể yêu cầu điều tra. Policy có thể chọn `ALLOW`, `REVIEW` hoặc `HOLD`, dựa trên bằng chứng và có thể cần human approval. AI không được trực tiếp gọi `hold`, `block` hay `reject`.
 
-Bất biến cốt lõi là một database transaction chứa hai ledger entry:
+## 2. Vì sao khó
+
+Có nhiều nguồn failure độc lập:
+
+- **False positive:** payment hợp lệ nhưng lớn bất thường có thể bị gắn cờ, gây hại cho khách hàng hoặc vận hành.
+- **False negative:** kẻ tấn công có thể lọt qua detector; “không đáng ngờ” không phải bằng chứng an toàn.
+- **Nondeterminism:** cùng input có thể cho output khác sau sampling, thay đổi provider hoặc prompt. Verdict cần đi kèm version của model, prompt và policy.
+- **Latency và cost:** inference từ xa có latency biến động và chi phí theo request. Rate limit, quota, outage, timeout và response một phần là các case bình thường.
+- **Delivery semantics:** Kafka thường giao at-least-once. Timeout sau một side effect có thể bị tiếp nối bằng retry, nên không thể lấy “chỉ gọi một lần” làm mô hình correctness.
+- **Privacy:** full transaction có thể chứa PII hoặc thông tin counterparty nhạy cảm. Gửi tùy tiện sang provider AI bên ngoài sẽ mở rộng ranh giới dữ liệu.
+
+## 3. Thiết kế ngây thơ
+
+Thiết kế dễ nghĩ đến là gọi model sau posting rồi để câu trả lời kích hoạt hold:
 
 ```java
-// application/PostingService.java
+// WRONG: AI đồng bộ, quyết định tiền và dùng secret hardcode.
+@Transactional
+public void postLedger(PaymentEvent event) {
+    ledger.post(debit(event), credit(event));
+    String answer = openAi.ask(prompt(event), "sk-proj-...");
+    if ("YES".equals(answer)) fundsService.hold(event.eventId());
+    audit.save(new AuditRow(event.eventId(), answer));
+}
+```
+
+## 4. Vì sao nó hỏng
+
+Database transaction vẫn mở trong lúc chạy network call không kiểm soát được. Nếu p95 của model là 2 giây, thời gian chờ đó có thể giữ lock và connection 2 giây; retry sẽ nhân tác động. Provider failure biến thành ledger failure, còn socket bị treo có thể làm cạn worker của request hoặc consumer.
+
+Chuỗi `YES` không có ý nghĩa được calibrate, schema validation, confidence policy hay ranh giới human review. Provider update có thể đổi behavior mà không cần code deploy. Secret có thể bị commit hoặc log. Audit gắn với money transaction nên có thể mất khi rollback hoặc không được ghi sau timeout.
+
+Cuối cùng, Kafka redelivery có thể chạy lại `post` và `hold`. Check `exists()` không phải idempotency:
+
+```java
+// WRONG: hai consumer có thể cùng thấy false trước khi một bên save.
+if (!store.exists(event.eventId())) {
+    store.save(record); // race kiểu check-then-act
+}
+```
+
+## 5. Các bài toán khó
+
+### Storage idempotent không đồng nghĩa side effect idempotent
+
+Với detector record, cần cơ chế uniqueness bền vững. Tùy system of record, có thể dùng unique constraint trên `(event_id, processing_kind)`, atomic insert/upsert, Kafka inbox table, hoặc `SETNX` kèm expiry và outcome bền vững. Outbox có thể stage việc publish một cách atomic cùng ledger commit; idempotency key có thể bảo vệ API command.
+
+Ranh giới đúng phải là atomic, ví dụ:
+
+```sql
+-- RIGHT: database phân xử các delivery đồng thời.
+INSERT INTO anomaly_results(event_id, model_version, decision, reason)
+VALUES (:event_id, :model, :decision, :reason)
+ON CONFLICT (event_id, processing_kind) DO NOTHING;
+```
+
+Chỉ transaction thắng insert mới tạo result. Nếu lưu ở OpenSearch, deterministic document ID cùng create-only semantics có thể làm document write an toàn khi replay, nhưng không làm cho external `hold` an toàn. Side effect đó cần idempotency key riêng, idempotency do provider hỗ trợ, hoặc transactional command/outbox cùng status machine. Storage idempotency và side-effect idempotency là hai guarantee khác nhau.
+
+### Capacity và backpressure
+
+Detector phải được sizing từ throughput và latency đã đo hoặc giả định rõ:
+
+```text
+Concurrency = Throughput x Latency
+```
+
+Với 100 event/giây và latency scoring end-to-end 2 giây, cần khoảng 200 worker đang chạy trước khi tính retry, batching và headroom. Pool cố định 4 worker không đáp ứng được tải đó nếu không làm Kafka lag tăng; tăng worker mù quáng lại có thể chạm rate limit và tăng cost. Cần giới hạn concurrency, quota, pause hoặc làm chậm consumption, đồng thời định nghĩa cách xử lý khi lag vượt review SLA.
+
+Kafka là replay source, không phải system of record tài chính. Database vẫn là system of record của ledger. OpenSearch là read model để điều tra và search, có thể rebuild từ event Kafka hoặc dữ liệu suy ra từ database, và không được là authority để posting.
+
+### Version, privacy và policy
+
+Lưu `model_version` và `prompt_version` với mọi signal. Đồng thời lưu `policy_version`, vì thay đổi policy có thể đổi business decision mà không đổi model. Dùng input schema ổn định và validate structured output; output unknown, malformed hoặc confidence thấp phải là outcome chính thức.
+
+Giảm thiểu dữ liệu đi ra ngoài trust boundary: ưu tiên feature đã derive, identifier đã token hóa, amount band và time window tối thiểu. Không gửi full transaction đến external AI một cách tùy tiện. Áp dụng retention, access control, encryption, điều khoản provider và redaction cho PII. Không đưa prompt, account identifier hay secret vào log thông thường.
+
+## 6. Trade-off
+
+- **Scoring đồng bộ** cho signal ngay lập tức nhưng gắn việc cung cấp tiền với latency và availability của provider. Scoring bất đồng bộ thêm lag và cần workflow review/hold.
+- **Chỉ dùng rule** rẻ, dễ giải thích và predictable nhưng bỏ sót pattern mới. AI thêm signal hữu ích nhưng đắt hơn và khó reproduce hơn.
+- **Fail open** giữ posting khi detector không khả dụng nhưng có thể tăng missed detection. **Fail closed** bảo vệ mạnh hơn nhưng có thể biến thành payment outage. Policy phải chọn rõ theo risk tier; fallback chung chung không phải business decision.
+- **OpenSearch overwrite theo event ID** đơn giản cho read model hiện tại. Audit append-only phù hợp hơn với accountability lịch sử và lịch sử correction.
+
+## 7. Thiết kế tốt hơn
+
+Giữ money transaction nhỏ:
+
+```java
+// RIGHT: chỉ invariant double-entry nằm trên money path.
 @Transactional
 public void post(LedgerCommand cmd) {
     ledger.entry(new Entry(cmd.eventId(), DEBIT, cmd.partyId(), cmd.amount()));
@@ -35,143 +123,66 @@ public void post(LedgerCommand cmd) {
 }
 ```
 
-**[ANALYSIS]** Mọi công việc thêm vào method này đều tranh chấp cùng database transaction, connection và row lock. Một remote model call đặc biệt không phù hợp ở đây vì timeout và retry của nó nằm ngoài quyền kiểm soát của ledger.
-
-## 2. Những điều không nên làm
-
-Ví dụ dưới đây cố ý không an toàn. Nó cho thấy các failure mode mà thiết kế phải loại trừ.
-
-```java
-// WRONG: gọi AI trên luồng tiền, hardcode secret, không có guardrail.
-public class PaymentProcessor {
-    private static final String OPENAI_API_KEY = "sk-proj-...";
-
-    @Transactional
-    public void postLedger(PaymentEvent event) {
-        ledger.post(debit(event), credit(event));
-        String answer = openAiClient.ask(prompt(event), OPENAI_API_KEY);
-        if ("YES".equals(answer)) {
-            fundsService.hold(event.eventId());
-        }
-        auditRepo.save(new AuditRow(event.eventId(), answer));
-    }
-}
-```
-
-**[ANALYSIS]** Đoạn code có nhiều vấn đề độc lập:
-
-- Database transaction vẫn mở trong khi service chờ third-party API. Theo giả định minh họa, một model có p95 là 2 giây sẽ giữ lock trong thời gian chờ đó, chiếm một connection và làm tăng latency của các lần ghi ledger không liên quan.
-- Không có timeout, retry policy, circuit breaker hay fallback. Vì vậy, provider outage có thể biến thành ledger outage.
-- Credential bị hardcode và có thể bị commit, secret scanner phát hiện, rotate hoặc làm lộ. Cách này cũng khiến deploy phụ thuộc vào một credential tĩnh thay vì inject secret lúc runtime.
-- `fundsService.hold(...)` biến response chưa được kiểm chứng của model thành hành động về tiền. Không có ranh giới cho deterministic policy hay human approval.
-- Kafka có delivery semantics at-least-once. Khi message được gửi lại, service có thể ghi entry lần nữa và gọi `hold` lần nữa nếu consumer và các side effect không idempotent.
-- Ghi audit dùng chung transaction tiền. Nếu remote call bị treo hoặc transaction rollback, bản ghi quyết định có thể biến mất đúng lúc cần nó nhất.
-
-## 3. Guardrail
-
-**[PROPOSED DESIGN]** Hãy coi các điểm sau là yêu cầu ở cấp sản phẩm và reliability, không phải chi tiết triển khai:
-
-1. AI chỉ phát ra tín hiệu; không bao giờ trực tiếp quyết định kết quả về tiền.
-2. Dùng `eventId` làm idempotency key. Consumer, store và external side effect phải chịu được replay.
-3. Áp dụng `timeout -> retry -> circuit breaker` theo đúng thứ tự. Khi lỗi, dùng fallback xác định, ghi nhận lỗi và không block việc ghi ledger.
-4. Dùng BYOK (Bring Your Own Key) thông qua runtime secret injection. Không hardcode hoặc ghi log key; redaction các secret vô tình xuất hiện.
-5. Ghi audit thành record có version, append-only, gồm bằng chứng đầu vào, định danh model, verdict và timestamp.
-6. Instrument đầy đủ luồng AI. Latency, lỗi, việc dùng fallback và tỷ lệ bất thường cần được đưa lên Prometheus để có thể giám sát chính bộ giám sát.
-
-## 4. Port và adapter
-
-**[PROPOSED DESIGN]** Giữ domain độc lập với Kafka, HTTP, JSON, OpenSearch và model SDK. Domain sở hữu model và port (interface). Infrastructure sở hữu adapter (implementation).
+Một ranh giới hướng production sẽ dùng outbox nếu cần phối hợp commit với publication:
 
 ```text
-com.finpay.ledger
-├── domain/
-│   ├── model/              # LedgerEvent, AnomalyScore, AnomalyRecord
-│   └── port/               # AnomalyScorer, AnomalyStore, AuditTrail
-├── application/            # PostingService, DetectAnomalyService
-└── infrastructure/
-    ├── kafka/              # LedgerEventListener
-    ├── ai/                 # OpenAiAnomalyScorer, RuleBasedScorer
-    ├── opensearch/         # OpenSearchAnomalyStore
-    ├── audit/              # AuditTrailImpl
-    └── metrics/            # Prometheus/Micrometer adapter
+DB transaction: debit + credit + outbox(event_id)
+                         |
+                         v
+Kafka ledger.events  (replay source)
+                         |
+                         v
+consumer -> bounded AI adapter -> rule fallback -> signal store
+                                      |                 |
+                                      v                 v
+                                  policy service     OpenSearch read model
+                                      |
+                              review / idempotent side effect
 ```
 
-Các port có thể giữ ở mức nhỏ:
+Consumer claim `(event_id, processing_kind)` theo cách atomic, sau đó gọi adapter qua domain port nhỏ. Adapter áp deadline, chỉ retry bounded transient failure, mở circuit khi provider không khỏe, rồi trả rule result xác định hoặc `UNKNOWN` khi lỗi. Rate limit và cost budget được kiểm tra trước khi gửi. Dead-letter path giữ poison event để replay sau.
 
-```java
-public interface AnomalyScorer {
-    AnomalyScore score(LedgerEvent event);
-}
-
-public interface AnomalyStore {
-    boolean exists(String eventId);
-    void save(AnomalyRecord record);
-}
-
-public interface AuditTrail {
-    void append(AnomalyRecord record);
-}
-```
-
-`OpenAiAnomalyScorer` và `RuleBasedScorer` là các adapter phía sau `AnomalyScorer`. Application layer chọn scorer được cấu hình và fallback; domain không import AI client.
-
-## 5. Luồng bất đồng bộ được đề xuất
-
-**[PROPOSED DESIGN]** Tách việc publish event và chấm điểm khỏi posting transaction:
+Signal và decision là hai record khác nhau. Audit append-only tối thiểu nên có:
 
 ```text
-PostingService
-    -> database transaction: debit + credit
-    -> publish LedgerEvent(eventId)
-
-LedgerEventListener
-    -> kiểm tra idempotency theo eventId
-    -> chấm điểm với timeout, retry và circuit breaker
-    -> dùng deterministic rules khi có lỗi
-    -> lưu AnomalyRecord
-    -> append audit record
-    -> cập nhật Prometheus metrics
+transaction_id, event_id, model_version, prompt_version,
+policy_version, decision, reason
 ```
 
-Listener không được gọi `fundsService.hold(...)` chỉ vì scorer trả về verdict bất thường. Một deterministic policy riêng phải đánh giá tín hiệu cùng bằng chứng hiện có. Nếu nghiệp vụ cần hold, hành động đó nên có idempotency key và audit entry riêng. Model vẫn chỉ mang tính tham khảo.
+Ngoài ra nên có signal/provider, timestamp, evidence reference, trạng thái fallback và human override nếu có. Khi audit write thất bại, cần alert và retry qua durable path; không được coi audit bị thiếu là thành công.
 
-Cơ chế delivery chính xác giữa database và Kafka là một lựa chọn triển khai. Nếu service cần phối hợp chặt hơn giữa ledger commit và event publication, outbox là một đề xuất khả thi; bài viết không khẳng định đó là fact của repository hiện tại.
+## 8. Failure và recovery
 
-## 6. Idempotency và audit
+Thiết kế phải trả lời failure thay vì che giấu chúng:
 
-**[PROPOSED DESIGN]** Dùng event identifier làm ranh giới xử lý replay. Consumer nên kiểm tra event đã được xử lý hay chưa trước khi tạo anomaly record. Check và durable write cần một uniqueness guarantee, không chỉ một check trong memory, vì nhiều delivery có thể được xử lý đồng thời.
+- Provider timeout trả `UNKNOWN` hoặc rule-based score sau retry có giới hạn; posting không bị ảnh hưởng và event vẫn audit được.
+- Rate-limit response kích hoạt backoff hoặc pause detector, thay vì retry vô hạn và khuếch đại tải.
+- Consumer crash sau model call khiến event được redeliver. Unique result claim ngăn duplicate storage; idempotency key hoặc outbox bảo vệ business side effect.
+- Response malformed bị reject và ghi nhận, không bị ép thành `YES`.
+- OpenSearch downtime khiến read-model sink pause hoặc retry trong khi Kafka giữ event có thể replay. Database vẫn là authority.
+- Rollout model hoặc prompt cần canary hoặc shadow, ghi version để policy so sánh outcome và replay input lịch sử.
 
-Scorer có thể bị gọi lại sau timeout hoặc redelivery, nên không được coi là thao tác chỉ chạy một lần. Lưu kết quả với event identifier, metadata về model/version, reference tới evidence, verdict và timestamp. Giữ record ở dạng append-only; correction nên là record mới liên kết với event gốc thay vì update phá hủy dữ liệu cũ.
+## 9. Observability
 
-Audit là concern riêng với money transaction. Nếu không chấm điểm được, hệ thống phải tạo fallback hoặc trạng thái failure có thể audit. Việc đó không được ngăn money transaction hoàn tất.
+Đo cả business behavior và system health. Prometheus label nên bounded, ví dụ `provider`, `model_version`, `outcome`, `fallback`, `reason_code` và `topic`; tuyệt đối không dùng `transaction_id`, `event_id` hay `account_id` làm label.
 
-## 7. Secret và resilience
+Business metrics: signal anomaly rate, review rate, hold rate, mẫu false-positive/false-negative khi có nhãn, và decision latency so với review SLA. System metrics: consumer lag, throughput, in-flight concurrency, scoring latency, timeout/retry count, provider error, rate-limit response, circuit state, cost estimate, duplicate claim, DLQ count và audit/read-model failure.
 
-**[PROPOSED DESIGN]** Inject credential của model lúc runtime từ secret store hoặc cơ chế tương đương của deployment. Chỉ truyền credential cho adapter cần nó. Không đưa credential, full prompt hay các trường ledger nhạy cảm vào application log. Redaction trong logging path là lớp bảo vệ bổ sung, không thay thế access control.
+## 10. Bài học và câu hỏi phỏng vấn
 
-Thứ tự resilience có ý nghĩa:
+Bài học:
 
-- `timeout` giới hạn thời gian một provider call chiếm worker.
-- `retry` xử lý lỗi tạm thời với policy có giới hạn, phù hợp với provider và workload.
-- `circuit breaker` ngừng gửi request khi dependency liên tục không khỏe.
-- `fallback` áp dụng deterministic rules hoặc ghi nhận unknown result để pipeline giám sát tiếp tục chạy.
+1. Bảo vệ money path trước; AI chỉ là advisory signal.
+2. Kafka là transport có replay, database là ledger authority, OpenSearch là read model có thể rebuild.
+3. `exists()` rồi `save()` là race; uniqueness và atomic claim mới là guardrail thật.
+4. Storage idempotent không làm cho hold, email hay webhook idempotent.
+5. Version model, prompt, policy, evidence và decision để audit được.
+6. Capacity, privacy, rate limit và failure behavior đều thuộc thiết kế AI.
 
-Các cơ chế này bảo vệ anomaly detector. Chúng không biến provider failure thành một quyết định tài chính.
+Câu hỏi phỏng vấn:
 
-## 8. Prometheus metrics
-
-**[PROPOSED DESIGN]** Expose metric cho chính detector, không chỉ cho các anomaly mà nó báo cáo. Dimension hữu ích gồm kết quả scorer, việc dùng fallback và trạng thái dependency. Giữ label có cardinality thấp: không dùng `eventId`, định danh party, prompt hay dữ liệu ledger có cardinality cao làm metric label.
-
-Operator tối thiểu cần phân biệt được:
-
-- scoring latency và timeout rate;
-- provider failure và circuit-breaker state;
-- fallback count;
-- số event đã xử lý, trùng lặp và thất bại;
-- anomaly verdict rate.
-
-Prometheus có thể được dùng để alert khi detector im lặng, failure rate tăng hoặc anomaly volume thay đổi. Grafana là một bề mặt visualization và alerting phù hợp nếu đã có trong deployment; detector vẫn phải hoạt động khi hệ thống monitoring không khả dụng.
-
-## Kết luận
-
-Tích hợp an toàn không cần phức tạp: commit ledger entry mà không gọi remote model, publish event, chấm điểm bất đồng bộ, xử lý replay, ghi lại mọi kết quả và đo sức khỏe của detector. Model có thể giúp ưu tiên điều tra, nhưng deterministic policy và human review vẫn chịu trách nhiệm cho quyết định về tiền.
+- Atomic boundary giữa event claim và result nằm ở đâu?
+- Điều gì xảy ra khi provider timeout sau khi đã nhận request?
+- Công thức `Concurrency = Throughput x Latency` thay đổi sizing worker và quota thế nào?
+- Risk tier nào fail open hoặc fail closed, và ai sở hữu policy đó?
+- Sáu tháng sau, reviewer có reproduce được lý do decision mà không phải lộ PII không cần thiết không?
