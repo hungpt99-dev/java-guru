@@ -1,5 +1,5 @@
 ---
-title: "Thiết kế pipeline tiếp nhận tài liệu KYC bằng Vision LLM"
+title: "Từ tài liệu mơ hồ đến quyết định KYC có thể audit"
 description: "Thiết kế thực tế để trích xuất trường KYC từ giấy tờ định danh, kiểm tra bằng các rule xác định và chuyển các trường hợp không chắc chắn sang người duyệt."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
@@ -9,177 +9,128 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/identity-service>
 
+## Bài toán
 
-Tiếp nhận giấy tờ KYC (Know Your Customer) chỉ có vẻ đơn giản cho đến khi hệ thống phải xử lý ảnh kém chất lượng, nhiều định dạng giấy tờ, sự kiện gửi trùng, lỗi từ nhà cung cấp và yêu cầu audit. Vision language model (VLM, mô hình ngôn ngữ có khả năng xử lý hình ảnh) có thể hỗ trợ trích xuất trường dữ liệu, nhưng không nên là hệ thống lưu trữ chuẩn hay bên tự quyết định cuối cùng.
+Tiếp nhận tài liệu KYC bắt đầu bằng một ảnh và kết thúc bằng quyết định có hậu quả nghiệp vụ: chấp nhận, từ chối hoặc yêu cầu người duyệt kiểm tra. Nhiệm vụ tưởng như chỉ là “đọc các trường” lại chứa nhiều contract. Ảnh có thể mờ hoặc bị xoay, giấy tờ có nhiều layout, cùng một event có thể đến nhiều lần, nhà cung cấp AI có thể chậm hoặc không khả dụng. Mỗi quyết định cũng cần một lời giải thích có thể đứng vững khi audit.
 
-Bài viết trình bày một thiết kế ưu tiên ranh giới cho feature `kyc-document-intake-llm`: chuẩn hóa file tải lên thành domain command, trích xuất các trường có cấu trúc, áp dụng các kiểm tra xác định, chỉ dùng LLM cho những câu hỏi cần đánh giá và chuyển kết quả không chắc chắn sang người duyệt. Bài viết cũng đối chiếu thiết kế này với một cách triển khai synchronous phổ biến và giải thích các failure mode cần xử lý rõ ràng.
+FinPay là thiết kế tham chiếu, không phải báo cáo về một hệ thống đã triển khai. Một thiết kế hướng production sẽ coi tài liệu là bằng chứng, database là system of record và model là một tín hiệu có thể sai.
 
-Code và package tree dưới đây mang tính minh họa. Chúng mô tả các ranh giới dự kiến, không phải bằng chứng về một provider, model hay sự cố production cụ thể.
+## Vì sao khó
 
-## Pipeline
+Có hai loại không chắc chắn. Không chắc chắn khi extraction hỏi model có đọc đúng `date_of_birth` hay không. Không chắc chắn khi ra quyết định hỏi business nên làm gì nếu thiếu trường, giấy tờ hết hạn hoặc hai kiểm tra mâu thuẫn. Trộn hai câu hỏi vào một prompt khiến cả hai khó test.
 
-```text
-DocumentUploaded (Kafka) -> IntakeCommand -> VisionExtractionPort (VLM)
-     |                                              |
-     +-> DocumentSnapshot (domain model)            +-> StructuredFields + Confidence
-                         |                                      |
-                         v                                      v
-              FraudScreeningPort <- RiskAssessment (domain) -> LlmJudgePort
-                         |                                      |
-                         v                                      v
-                DecisionEvent -> outbox -> Kafka -> OpenSearch (decision index)
-```
+Semantics của việc giao message tạo thêm vấn đề. Kafka có thể replay message, consumer có thể crash sau khi commit database, và retry có thể gửi email, gọi screening hoặc tạo review task hai lần. Không thể giả định “handler chỉ chạy một lần”.
 
-**[SOURCE FACT]** Thiết kế được cung cấp sử dụng `DocumentUploaded` trên Kafka, một S3 key và `eventId`, một vision extraction port, các trường có cấu trúc kèm confidence, một fraud check dựa trên rule, một LLM judge, outbox, Kafka và OpenSearch.
+## Thiết kế ngây thơ
 
-**[PROPOSED DESIGN]** Trình tự xử lý:
-
-1. Kafka chuyển `DocumentUploaded`. Event nên chứa một object reference, chẳng hạn S3 key, cùng `eventId`; consumer không nên phụ thuộc vào kiểu multipart của web.
-2. Adapter ánh xạ event thành `IntakeCommand` và `DocumentSnapshot`.
-3. Vision adapter gửi tài liệu tới multimodal model và trả về một kết quả có kiểu rõ ràng. Kết quả gồm giá trị các trường, confidence, metadata của provider và trạng thái extraction cụ thể, thay vì văn xuôi tự do.
-4. Rule engine xác định kiểm tra các ràng buộc như loại giấy tờ được phép, checksum có nhất quán hay không và giấy tờ đã hết hạn chưa. Các kiểm tra này vẫn là application code thông thường.
-5. LLM judge có thể trả lời câu hỏi mở, chẳng hạn người trong ảnh selfie có vẻ khớp với người trên giấy tờ hay không. Kết quả chỉ là bằng chứng, không phải quyết định phê duyệt. Lưu kết quả và rationale cần cho việc review, tuân theo chính sách bảo mật của ứng dụng.
-6. Decision được lưu và event được phát hành qua outbox. OpenSearch có thể phục vụ việc truy xuất và tìm kiếm; không nên coi nó là nguồn dữ liệu bền vững duy nhất nếu đó chưa phải quyết định rõ ràng về storage.
-
-## Ranh giới hexagonal
-
-**[SOURCE FACT]** Package layout được cung cấp đặt domain code dưới `domain/` và các integration dưới `infrastructure/`:
-
-```text
-src/main/java/com/finpay/identity/kyc/
-├── domain/                      # Java thuần, không import Spring hoặc SDK
-│   ├── model/
-│   │   ├── DocumentSnapshot.java
-│   │   ├── StructuredFields.java
-│   │   ├── Confidence.java
-│   │   ├── RiskAssessment.java
-│   │   ├── Decision.java
-│   │   └── KycEvent.java
-│   ├── ports/
-│   │   ├── in/IntakeUseCase.java
-│   │   ├── in/AuditUseCase.java
-│   │   └── out/
-│   │       ├── VisionExtractionPort.java
-│   │       ├── LlmJudgePort.java
-│   │       ├── DecisionStorePort.java
-│   │       ├── KycEventPublisherPort.java
-│   │       └── FraudCheckPort.java
-│   └── service/
-│       ├── DocumentIntakeService.java
-│       └── DecisionEngine.java
-└── infrastructure/              # adapter cho Spring, Kafka, OpenSearch và SDK
-    ├── kafka/
-    │   ├── DocumentUploadedConsumer.java
-    │   └── DecisionEventProducer.java
-    ├── openai/
-    │   ├── OpenAiVisionAdapter.java
-    │   └── OpenAiJudgeAdapter.java
-    ├── opensearch/
-    │   ├── DecisionDocument.java
-    │   └── OpenSearchDecisionStore.java
-    └── audit/
-        └── AuditLogWriter.java
-```
-
-**[ANALYSIS]** Không đưa provider SDK vào domain giúp application có một contract ổn định cho extraction và judgment. Decision engine cũng có thể được test mà không cần gọi network. Provider, prompt, token limit, timeout, retry và response parsing nên nằm trong adapter hoặc application service, không nằm trong controller.
-
-Không nên khẳng định một provider có thể được thay thế trong một khoảng thời gian cụ thể, hoặc một thay đổi về giá đã dẫn đến một migration cụ thể, nếu không có tài liệu chứng minh. Lợi ích của kiến trúc là giảm phạm vi thay đổi, không phải bảo đảm một lịch migration nhất định.
-
-## Phiên bản synchronous đơn giản
-
-Ví dụ rút gọn này chỉ mang tính minh họa. Nó cho thấy sự kết dính mà thiết kế đề xuất cần tránh.
+Một cách triển khai dễ nghĩ là đặt mọi thứ trong request upload:
 
 ```java
-@RestController
-public class KycIntakeController {
-    private final ProviderClient providerClient;
-    private final JdbcTemplate jdbcTemplate;
+DocumentResult result = vlm.extract(file);
+if (result.confidence() > 0.8) accept(result);
+else reject(result);
+```
 
-    @PostMapping("/kyc/documents")
-    public Map<String, Object> intake(@RequestParam("file") MultipartFile file)
-            throws IOException {
-        String base64 = Base64.getEncoder().encodeToString(file.getBytes());
+HTTP thread upload file, gọi VLM, hỏi model về fraud, ghi decision rồi trả response. Threshold trở thành policy, model trở thành bên quyết định, còn vòng đời request trở thành workflow engine.
 
-        ProviderResult result = providerClient.extract(
-                "Extract fullName, docNumber, dateOfBirth, expiryDate, "
-                        + "documentType, and country as JSON.",
-                "data:image/jpeg;base64," + base64);
-        String json = result.content();
+## Vì sao vỡ
 
-        String name = extract(json, "fullName");
-        String docNumber = extract(json, "docNumber");
-        jdbcTemplate.update("INSERT INTO kyc_documents (data) VALUES (?)", json);
+Luồng synchronous buộc latency của người dùng phụ thuộc vào latency của provider và khiến timeout trở nên mơ hồ: client có thể retry trong khi lần gọi đầu vẫn đang chạy. Model có thể trả dữ liệu hợp lý nhưng sai, thay đổi sau khi model hoặc prompt được nâng version, hoặc làm cạn rate limit lúc traffic tăng. Một confidence score duy nhất không giải thích được field nào lỗi hay rule xác định nào mâu thuẫn với nó.
 
-        return Map.of("approved", name != null && docNumber != null);
-    }
+Cũng có lỗi duplicate kinh điển:
+
+```java
+if (!repository.exists(event.eventId())) { // SAI: hai consumer đều có thể thấy false
+    repository.save(event);
 }
 ```
 
-**[ANALYSIS]** Phiên bản này có nhiều vấn đề độc lập:
+`exists()` và insert là hai thao tác riêng. Dù storage đã idempotent, email hoặc provider call thực hiện trước insert vẫn có thể chạy hai lần.
 
-1. Controller sở hữu provider SDK, request format, parsing, persistence và decision logic. Như vậy HTTP boundary cũng trở thành integration boundary, khiến việc thay provider tốn kém hơn.
-2. Request chạy synchronous. Provider chậm sẽ giữ HTTP worker và có thể giữ cả database connection. Khi tải tăng, connection pool hoặc thread pool có thể cạn trước khi provider phục hồi.
-3. Không có idempotency key hoặc inbox record. Kafka redelivery hay client retry có thể gọi extraction và persistence thêm lần nữa.
-4. JSON blob không cung cấp schema ổn định cho việc query, validation hay audit. Raw provider output vẫn có thể hữu ích, nhưng nên được lưu cùng normalized fields và metadata, với access control cho dữ liệu nhạy cảm.
-5. Chỉ kiểm tra hai trường có tồn tại không phải là approval policy. Cách này bỏ qua document validity, expiry, fraud signal, confidence threshold và human review.
-6. Ví dụ giả định response luôn thành công và JSON luôn đúng shape. Nó không có timeout, retry policy, fallback, circuit breaker, giới hạn kích thước, kiểm tra content type hay xử lý output malformed.
+## Những bài toán khó
 
-## Application flow an toàn hơn
+Ranh giới hữu ích không phải “có AI hay không”. Đó là signal, policy và decision:
 
-**[PROPOSED DESIGN]** Giữ use case độc lập với HTTP và kiểu dữ liệu của provider:
-
-```java
-public Decision handle(IntakeCommand command) {
-    if (inbox.alreadyProcessed(command.eventId())) {
-        return inbox.previousDecision(command.eventId());
-    }
-
-    DocumentSnapshot snapshot = documents.load(command.objectKey());
-    ExtractionResult extraction = vision.extract(snapshot);
-    RiskAssessment rules = ruleEngine.check(extraction.fields(), snapshot);
-    JudgeResult judgment = rules.requiresJudgment()
-            ? judge.evaluate(snapshot, extraction.fields())
-            : JudgeResult.notRun();
-
-    Decision decision = decisionEngine.decide(extraction, rules, judgment);
-    decisions.save(decision);
-    outbox.append(DecisionEvent.from(decision));
-    inbox.markProcessed(command.eventId(), decision.id());
-    return decision;
-}
+```text
+Document -> extraction signal -> policy evaluation -> business decision
+             fields + confidence    rules + thresholds    accept/reject/review
 ```
 
-Transaction bao quanh các database write cần được thiết kế để việc đánh dấu event đã xử lý và append outbox record là atomic. Publish lên Kafka diễn ra sau commit và phải chịu được retry. Các consumer của `DecisionEvent` cũng phải idempotent.
+Extraction nên trả về field có kiểu rõ ràng, confidence theo từng field, metadata provider/model và status cụ thể như `SUCCEEDED`, `PARTIAL` hoặc `UNREADABLE`. Rule xác định nên kiểm tra loại giấy tờ, checksum, hạn sử dụng, field bắt buộc và tính nhất quán. Judge model có thể đánh giá một câu hỏi giới hạn mà rule không trả lời được, nhưng output vẫn chỉ là signal. Policy ánh xạ signal thành `ACCEPT`, `REJECT` hoặc `MANUAL_REVIEW`; policy, không phải model, sở hữu business decision.
 
-## Xử lý failure
+Workflow cũng phải định nghĩa identity và hành vi retry. `event_id` định danh một lần giao event, còn `idempotency_key` có thể định danh một lần intake được mong muốn. Transaction ID liên kết mọi attempt với cùng một business case.
 
-**[ANALYSIS]** Model call là một external dependency. Hãy xử lý nó như vậy:
+## Trade-off
 
-- Đặt timeout phù hợp với asynchronous worker, không lấy timeout của interactive HTTP request làm mặc định.
-- Chỉ retry các lỗi tạm thời, dùng bounded exponential backoff và chính sách giới hạn số lần thử. Không retry validation error hoặc refusal như thể đó là lỗi network.
-- Dùng circuit breaker để ngừng gửi request trong lúc provider đang lỗi.
-- Dùng fallback state như `MANUAL_REVIEW` hoặc `EXTRACTION_UNAVAILABLE`; không biến việc model không khả dụng thành approval.
-- Áp dụng backpressure (giới hạn tốc độ nhận việc khi downstream quá tải) ở consumer hoặc queue boundary.
-- Giới hạn document size, image dimension và prompt payload trước khi gọi provider.
-- Ghi correlation ID, `eventId`, provider request ID nếu có, model configuration, extraction status và decision version. Mặc định không log image của giấy tờ hoặc raw personally identifiable information.
+Workflow asynchronous làm tăng phần vận hành và khiến API trả về status thay vì decision ngay. Chi phí đó đổi lấy request latency có giới hạn, retry bền vững và cô lập khỏi outage của provider. Human review làm tăng thời gian hoàn tất và chi phí nhân sự, nhưng an toàn hơn việc âm thầm biến confidence thấp thành reject.
 
-Confidence không phải là xác suất có ý nghĩa thống nhất trong mọi model. Threshold là một policy decision và cần được calibration bằng các case đã review. Nếu chưa có threshold được kiểm chứng, hãy chuyển case sang review thay vì trình bày một con số như một bảo đảm.
+Lưu raw document giúp reprocess và audit tốt hơn, nhưng tăng rủi ro privacy và chi phí lưu trữ. Chỉ lưu field đã chuẩn hóa giúp giảm dữ liệu, nhưng cản trở một số điều tra. Một thiết kế hướng production nên chọn retention period, mã hóa object raw, giới hạn quyền truy cập và ghi lại lý do reprocess.
 
-## Data và audit model
+## Thiết kế tốt hơn
 
-**[PROPOSED DESIGN]** Tách các representation theo mục đích sử dụng:
+Luồng đề xuất:
 
-- `DocumentSnapshot`: reference bất biến tới object đã tải lên, content metadata và event identity.
-- `StructuredFields`: giá trị đã normalize, confidence theo từng field, extraction status và validation error.
-- `RiskAssessment`: kết quả của các rule xác định và version của chúng.
-- `JudgeResult`: câu hỏi, model response, confidence hoặc uncertainty signal và provider metadata.
-- `Decision`: policy outcome, reason code, review status và decision version.
-- Raw provider payload: tùy chọn, phải được mã hóa hoặc kiểm soát quyền truy cập, và chỉ lưu khi policy yêu cầu.
+```text
+Kafka event -> intake worker -> DB transaction -> extraction -> rules -> policy
+    replay source       DB = truth                         -> decision + outbox
+                                                               -> Kafka -> OpenSearch
+                                                                 read model
+```
 
-Dùng schema version rõ ràng cho decision và event đã lưu. Audit record phải trả lời được ai hoặc thành phần nào tạo ra từng input, rule nào đã chạy, model configuration nào được dùng và vì sao status cuối cùng được chọn. Redact hoặc tokenize các trường nhạy cảm ở nơi policy audit cho phép.
+Event chứa `event_id` và object reference như S3 key, không chứa web multipart object. Adapter tạo `IntakeCommand` và `DocumentSnapshot`. Worker tải object, gọi các port như `VisionExtractionPort` và (chỉ khi cần) `LlmJudgePort`, sau đó lưu result cùng outbox event.
 
-## LLM không được tự quyết định
+Database là system of record cho intake, attempt, decision và các audit fact. Kafka là event source có thể replay cho work và notification. OpenSearch là read model cho tìm kiếm vận hành, không phải nơi lưu decision có tính thẩm quyền.
 
-LLM không nên là bên duy nhất quyết định identity approval, document validity, sanctions decision hay policy exception. Nó có thể trích xuất giá trị ứng viên và cung cấp bằng chứng bổ sung. Deterministic validation, policy rules và reviewer có thẩm quyền vẫn chịu trách nhiệm cho hướng xử lý cuối cùng.
+Cách ghi an toàn với duplicate dùng unique constraint và atomic insert, không dùng pre-check:
 
-Đó là ràng buộc thiết kế chính. Abstraction hữu ích không phải là “một API endpoint gọi model”, mà là một workflow tiếp nhận có state rõ ràng, event bền vững, dependency được giới hạn và audit trail.
+```sql
+CREATE UNIQUE INDEX one_intake_per_key ON intake(event_id, idempotency_key);
+
+INSERT INTO intake(event_id, idempotency_key, status)
+VALUES (:event_id, :key, 'RECEIVED')
+ON CONFLICT (event_id, idempotency_key) DO NOTHING;
+```
+
+Các cơ chế tương đương gồm Redis `SETNX` kèm expiry, inbox table cho event ID đã consume, hoặc transactional outbox cho fact đã publish. Chọn theo ownership và lifetime của key. Unique insert làm storage idempotent; nó không làm external side effect idempotent. Provider call cần provider hỗ trợ idempotency key nếu có, hoặc durable attempt record cùng reconciliation policy. Outbox publication nên retry từ state đã commit, còn consumer nên dùng inbox hoặc unique event constraint.
+
+Mỗi result phụ thuộc AI phải có `model_version` và `prompt_version`. Mapping nghiệp vụ phải có `policy_version`. Audit record tối thiểu gồm `transaction_id`, `event_id`, `model_version`, `prompt_version`, `policy_version`, `decision`, `reason`, cùng input hash và timestamp. Replay để tái hiện decision cũ phải dùng version đã ghi; re-evaluation có chủ đích tạo attempt mới.
+
+Timeout, retry có giới hạn và jitter, circuit breaker và rate limiter của provider phải bao quanh từng external call. Fallback an toàn không phải “lỗi thì accept”: lưu `AI_UNAVAILABLE` hoặc `EXTRACTION_UNREADABLE` và chuyển sang manual review khi policy cho phép. Dead-letter path phải giữ event và failure reason để kiểm tra.
+
+## Kịch bản lỗi
+
+- Kafka giao duplicate gặp unique inbox constraint và không tạo intake hoặc outbox event thứ hai.
+- Worker chết sau khi commit extraction nhưng trước khi publish. Outbox publisher sẽ phát event sau đó.
+- Provider timeout. Attempt ghi nhận timeout; retry có giới hạn. Khi hết retry, chuyển review hoặc controlled failure state.
+- Provider trả JSON sai schema hoặc field confidence thấp. Schema validation loại response; policy có thể chọn review mà không tự bịa giá trị.
+- Kafka replay sau khi release policy. Audit record cũ vẫn immutable; policy version mới là decision mới có chủ ý.
+- OpenSearch không khả dụng. Decision vẫn truy vấn được từ database; projection consumer sẽ catch up sau.
+- Notification downstream retry. Consumer dùng idempotency key và notification provider nhận stable key nếu được hỗ trợ.
+
+## Capacity
+
+Capacity bắt đầu từ workload đo được, không phải số server. Với arrival rate `λ` và end-to-end latency `W`:
+
+```text
+Concurrency = Throughput x Latency = λ x W
+```
+
+Ở 20 document/giây và workflow dài 12 giây, có khoảng 240 workflow slot đang chạy trước khi cộng headroom. Nếu VLM chiếm worker trong 3 giây, riêng service gọi model cần khoảng 60 call slot đồng thời ở rate đó, còn phụ thuộc quota provider. Kafka partitions và consumer concurrency phải đủ throughput; database phải chịu write rate và connection limit; object storage phải chịu byte volume và retention; OpenSearch phải chịu indexing và query load. Queue depth, tuổi event lâu nhất, provider rate limit, và retry traffic là tín hiệu capacity. Backpressure nên ngừng nhận work hoặc làm chậm consumer trước khi database hay provider bị quá tải.
+
+## Security/Privacy
+
+Giấy tờ định danh chứa PII và thường có dữ liệu sinh trắc học nhạy cảm. Dùng object reference, URL có scope và thời hạn ngắn, mã hóa khi truyền và khi lưu, authorization chặt, access log và cơ chế retention/deletion. Tối thiểu hóa dữ liệu gửi tới AI bên ngoài: crop hoặc redact vùng không liên quan, chỉ gửi ảnh và câu hỏi cần thiết, không tùy tiện gửi toàn bộ transaction, lịch sử account hay dữ liệu khách hàng không liên quan. Coi prompt và model response là dữ liệu nhạy cảm, ngăn prompt biến thành instruction có thể thực thi và không ghi secret vào log. Human reviewer cần quyền tối thiểu và export policy rõ ràng.
+
+## Observability
+
+System metrics nên gồm intake throughput, queue depth, tuổi event lâu nhất, latency theo stage, provider latency, số timeout/retry/circuit-breaker, rate-limit response, database conflict, outbox lag và OpenSearch indexing lag. AI metrics nên gồm extraction status, phân bố confidence theo field, schema-validation failure, fallback rate, ước tính token/chi phí và model/prompt version trong structured log hoặc dimension có cardinality giới hạn.
+
+Business metrics nên gồm tỷ lệ accept/reject/manual-review, reason, backlog và tuổi review, reprocessing rate, cùng mức bất đồng giữa deterministic check và AI signal. Không dùng `transaction_id`, `account_id`, document number hoặc event ID làm Prometheus label. Đưa các identifier đó vào log bảo mật và trace context, kèm redaction và access control. Trace nên nối intake, provider attempt, database transaction, outbox event và projection nhưng không làm lộ raw document.
+
+## Bài học
+
+- Bắt đầu từ failure và decision contract; chỉ đưa architecture vào để đáp ứng chúng.
+- Coi output AI là signal có kiểu và có version. Policy sở hữu business decision.
+- Dùng atomic uniqueness, inbox/outbox và provider idempotency riêng biệt vì storage và side effect có cách fail khác nhau.
+- Giữ Kafka là replay source, database là system of record và OpenSearch là read model có thể rebuild.
+- Capacity, privacy, auditability và observability là một phần của correctness trong KYC, không phải việc trang trí sau production.

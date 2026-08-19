@@ -1,5 +1,5 @@
 ---
-title: "Designing a KYC Document Intake Pipeline with Vision LLMs"
+title: "From Ambiguous Documents to Auditable KYC Decisions"
 description: "A practical design for extracting KYC fields from identity documents, validating them with deterministic rules, and routing uncertain cases to human review."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
@@ -9,177 +9,128 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/identity-service>
 
+## Problem
 
-KYC (Know Your Customer) document intake looks simple until it has to handle bad images, different document formats, duplicate delivery, provider failures, and audit requirements. A vision language model (VLM) can help extract fields from an identity document, but it should not be the system of record or the final decision-maker.
+KYC document intake starts with an image and ends with a consequential business decision: accept, reject, or ask a person to review it. The apparent task, “read the fields,” hides several contracts. The upload may be blurry or rotated, a document may have several layouts, the same event may arrive twice, and an external AI provider may be slow or unavailable. Every decision also needs an explanation that can survive an audit.
 
-This article describes a boundary-first design for the `kyc-document-intake-llm` feature: normalize an upload into a domain command, extract structured fields, apply deterministic checks, use an LLM only for questions that need judgment, and route uncertain results to human review. It also contrasts that design with a common synchronous implementation and explains the failure modes that need explicit handling.
+FinPay is a reference design, not a report of a deployed system. A production-oriented design would treat the document as evidence, the database as the system of record, and the model as one fallible signal.
 
-The code and package tree below are illustrative. They show the intended boundaries; they are not evidence that a particular provider, model, or production incident exists.
+## Why Hard
 
-## Pipeline
+There are two different kinds of uncertainty. Extraction uncertainty asks whether the model read `date_of_birth` correctly. Decision uncertainty asks what the business should do when the field is missing, the document is expired, or two checks disagree. Combining those questions in one prompt makes both hard to test.
 
-```text
-DocumentUploaded (Kafka) -> IntakeCommand -> VisionExtractionPort (VLM)
-     |                                              |
-     +-> DocumentSnapshot (domain model)            +-> StructuredFields + Confidence
-                         |                                      |
-                         v                                      v
-              FraudScreeningPort <- RiskAssessment (domain) -> LlmJudgePort
-                         |                                      |
-                         v                                      v
-                DecisionEvent -> outbox -> Kafka -> OpenSearch (decision index)
-```
+Delivery semantics add another problem. Kafka can replay a message, consumers can crash after a database commit, and a retry can repeat an email, screening request, or review task. “The handler ran once” is not a reliable assumption.
 
-**[SOURCE FACT]** The supplied design uses `DocumentUploaded` on Kafka, an S3 key and `eventId`, a vision extraction port, structured fields with confidence, a rule-based fraud check, an LLM judge, an outbox, Kafka, and OpenSearch.
+## Naive Design
 
-**[PROPOSED DESIGN]** The processing sequence is:
-
-1. Kafka delivers `DocumentUploaded`. The event should carry an object reference, such as an S3 key, and an `eventId`; the consumer should not depend on a web multipart type.
-2. An adapter maps the event to an `IntakeCommand` and a `DocumentSnapshot`.
-3. A vision adapter sends the document to a multimodal model and returns a typed result. The result includes field values, confidence, provider metadata, and an explicit extraction status rather than free-form prose.
-4. A deterministic rule engine checks constraints such as allowed document type, checksum consistency, and expiry. These checks remain ordinary application code.
-5. An LLM judge may answer open-ended questions, such as whether the person in a selfie appears to match the identity document. Its result is evidence, not an approval. Store the result and rationale needed for review, subject to the application's privacy policy.
-6. A decision is persisted and an event is published through an outbox. OpenSearch can support retrieval and search; it should not be treated as the only durable source unless that is an explicit storage decision.
-
-## Hexagonal boundaries
-
-**[SOURCE FACT]** The supplied package layout places domain code under `domain/` and integrations under `infrastructure/`:
-
-```text
-src/main/java/com/finpay/identity/kyc/
-├── domain/                      # pure Java, no Spring or SDK imports
-│   ├── model/
-│   │   ├── DocumentSnapshot.java
-│   │   ├── StructuredFields.java
-│   │   ├── Confidence.java
-│   │   ├── RiskAssessment.java
-│   │   ├── Decision.java
-│   │   └── KycEvent.java
-│   ├── ports/
-│   │   ├── in/IntakeUseCase.java
-│   │   ├── in/AuditUseCase.java
-│   │   └── out/
-│   │       ├── VisionExtractionPort.java
-│   │       ├── LlmJudgePort.java
-│   │       ├── DecisionStorePort.java
-│   │       ├── KycEventPublisherPort.java
-│   │       └── FraudCheckPort.java
-│   └── service/
-│       ├── DocumentIntakeService.java
-│       └── DecisionEngine.java
-└── infrastructure/              # Spring, Kafka, OpenSearch, and SDK adapters
-    ├── kafka/
-    │   ├── DocumentUploadedConsumer.java
-    │   └── DecisionEventProducer.java
-    ├── openai/
-    │   ├── OpenAiVisionAdapter.java
-    │   └── OpenAiJudgeAdapter.java
-    ├── opensearch/
-    │   ├── DecisionDocument.java
-    │   └── OpenSearchDecisionStore.java
-    └── audit/
-        └── AuditLogWriter.java
-```
-
-**[ANALYSIS]** Keeping provider SDKs out of the domain gives the application a stable contract for extraction and judgment. It also makes the decision engine testable without a network call. Provider selection, prompt construction, token limits, timeout, retry, and response parsing belong in adapters or application services, not in a controller.
-
-Do not claim that a provider can be replaced in a particular time or that a price change caused a particular migration unless those facts are documented. The architectural benefit is the smaller change surface, not a guaranteed migration schedule.
-
-## The naive synchronous version
-
-This abbreviated example is intentionally illustrative. It shows the coupling that the proposed design avoids.
+A tempting implementation puts everything in the upload request:
 
 ```java
-@RestController
-public class KycIntakeController {
-    private final ProviderClient providerClient;
-    private final JdbcTemplate jdbcTemplate;
+DocumentResult result = vlm.extract(file);
+if (result.confidence() > 0.8) accept(result);
+else reject(result);
+```
 
-    @PostMapping("/kyc/documents")
-    public Map<String, Object> intake(@RequestParam("file") MultipartFile file)
-            throws IOException {
-        String base64 = Base64.getEncoder().encodeToString(file.getBytes());
+The HTTP thread uploads the file, calls the VLM, asks it for a fraud opinion, writes a decision, and returns a response. The threshold becomes the policy, the model becomes the decision-maker, and the request lifecycle becomes the workflow engine.
 
-        ProviderResult result = providerClient.extract(
-                "Extract fullName, docNumber, dateOfBirth, expiryDate, "
-                        + "documentType, and country as JSON.",
-                "data:image/jpeg;base64," + base64);
-        String json = result.content();
+## Why It Breaks
 
-        String name = extract(json, "fullName");
-        String docNumber = extract(json, "docNumber");
-        jdbcTemplate.update("INSERT INTO kyc_documents (data) VALUES (?)", json);
+The synchronous path couples user latency to provider latency and makes timeouts ambiguous: the client may retry while the first provider call is still running. A model can return plausible but false data, vary after a model or prompt change, or consume the rate limit during a traffic spike. A single confidence score does not explain which field failed or whether a deterministic rule contradicted it.
 
-        return Map.of("approved", name != null && docNumber != null);
-    }
+There is also a classic duplicate bug:
+
+```java
+if (!repository.exists(event.eventId())) { // WRONG: two consumers can both see false
+    repository.save(event);
 }
 ```
 
-**[ANALYSIS]** This version has several independent problems:
+The `exists()` check and the insert are separate operations. Even if storage becomes idempotent, an email or provider call performed before the insert can still happen twice.
 
-1. The controller owns the provider SDK, request format, parsing, persistence, and decision logic. That makes the HTTP boundary the integration boundary and makes provider changes expensive.
-2. The request is synchronous. A slow provider holds an HTTP worker and potentially a database connection. Under load, this can exhaust the connection pool or thread pool before the provider recovers.
-3. There is no idempotency key or inbox record. A Kafka redelivery or client retry can invoke extraction and persistence again.
-4. A JSON blob does not provide a stable schema for querying, validation, or audit. Raw provider output may still be useful, but it should be stored alongside normalized fields and metadata, with access controls for sensitive data.
-5. Presence of two fields is not an approval policy. It ignores document validity, expiry, fraud signals, confidence thresholds, and human review.
-6. The example assumes a successful response and a predictable JSON shape. It has no timeout, retry policy, fallback, circuit breaker, size limit, content-type validation, or handling for malformed output.
+## Hard Problems
 
-## A safer application flow
+The useful boundary is not “AI versus no AI.” It is signal, policy, and decision:
 
-**[PROPOSED DESIGN]** Keep the use case independent of HTTP and provider types:
-
-```java
-public Decision handle(IntakeCommand command) {
-    if (inbox.alreadyProcessed(command.eventId())) {
-        return inbox.previousDecision(command.eventId());
-    }
-
-    DocumentSnapshot snapshot = documents.load(command.objectKey());
-    ExtractionResult extraction = vision.extract(snapshot);
-    RiskAssessment rules = ruleEngine.check(extraction.fields(), snapshot);
-    JudgeResult judgment = rules.requiresJudgment()
-            ? judge.evaluate(snapshot, extraction.fields())
-            : JudgeResult.notRun();
-
-    Decision decision = decisionEngine.decide(extraction, rules, judgment);
-    decisions.save(decision);
-    outbox.append(DecisionEvent.from(decision));
-    inbox.markProcessed(command.eventId(), decision.id());
-    return decision;
-}
+```text
+Document -> extraction signal -> policy evaluation -> business decision
+             fields + confidence    rules + thresholds    accept/reject/review
 ```
 
-The transaction around the database writes should be designed so that marking the event processed and appending the outbox record are atomic. Publishing to Kafka happens after commit and must tolerate retries. Consumers of `DecisionEvent` should also be idempotent.
+Extraction should return typed fields, per-field confidence, provider/model metadata, and an explicit status such as `SUCCEEDED`, `PARTIAL`, or `UNREADABLE`. Deterministic checks should cover document type, checksum, expiry, required fields, and consistency. A judge model can assess a bounded question that rules cannot answer, but its output is still a signal. Policy maps signals to `ACCEPT`, `REJECT`, or `MANUAL_REVIEW`; the policy, not the model, owns the business decision.
 
-## Failure handling
+The workflow must also define identity and retry behavior. An `event_id` identifies a delivery, while an `idempotency_key` can identify the intended intake operation. A transaction identifier ties all attempts to one business case.
 
-**[ANALYSIS]** A model call is an external dependency. Treat it like one:
+## Trade-offs
 
-- Set a timeout appropriate to the asynchronous worker, not to an interactive HTTP request.
-- Retry only transient failures, with bounded exponential backoff and a maximum attempt policy. Do not retry validation errors or a refusal as if they were network failures.
-- Use a circuit breaker to stop sending traffic while the provider is failing.
-- Use a fallback state such as `MANUAL_REVIEW` or `EXTRACTION_UNAVAILABLE`; do not turn an unavailable model into an approval.
-- Apply backpressure (giới hạn tốc độ nhận việc khi downstream quá tải) at the consumer or queue boundary.
-- Bound document size, image dimensions, and prompt payload before calling the provider.
-- Record a correlation ID, `eventId`, provider request ID when available, model configuration, extraction status, and decision version. Do not log document images or raw personally identifiable information by default.
+An asynchronous workflow increases operational machinery and makes the API return a status rather than an immediate decision. That cost buys bounded request latency, durable retries, and isolation from provider outages. Human review increases completion time and staffing cost, but is safer than silently converting low confidence into rejection.
 
-Confidence is not a universal probability. A threshold is a policy decision that needs calibration against reviewed cases. If there is no validated threshold, route the case to review rather than presenting a number as a guarantee.
+Keeping raw documents improves reprocessing and auditability, but increases privacy exposure and storage cost. Keeping only normalized fields minimizes data, but prevents some investigations. A production-oriented design should choose a retention period, encrypt the raw object, restrict access, and record why a reprocessing attempt occurred.
 
-## Data and audit model
+## Better Design
 
-**[PROPOSED DESIGN]** Keep separate representations for different purposes:
+The proposed flow is:
 
-- `DocumentSnapshot`: immutable reference to the uploaded object, its content metadata, and the event identity.
-- `StructuredFields`: normalized values, field-level confidence, extraction status, and validation errors.
-- `RiskAssessment`: deterministic rule results and their versions.
-- `JudgeResult`: the question, model response, confidence or uncertainty signal, and provider metadata.
-- `Decision`: the policy outcome, reason codes, review status, and decision version.
-- Raw provider payload: optional, encrypted or access-controlled, and retained only when required by policy.
+```text
+Kafka event -> intake worker -> DB transaction -> extraction -> rules -> policy
+    replay source       DB = truth                         -> decision + outbox
+                                                               -> Kafka -> OpenSearch
+                                                                 read model
+```
 
-Use an explicit schema version for persisted decisions and events. Audit records should answer who or what produced each input, which rules ran, which model configuration was used, and why the final status was selected. Redact or tokenize sensitive fields wherever the audit requirement permits.
+The event contains an `event_id` and an object reference such as an S3 key, not a web multipart object. The adapter creates an `IntakeCommand` and a `DocumentSnapshot`. A worker loads the object, calls ports such as `VisionExtractionPort` and (only when needed) `LlmJudgePort`, then persists the result and an outbox event.
 
-## What the LLM must not decide alone
+The database is the system of record for the intake, attempts, decision, and audit facts. Kafka is the replayable event source for work and notifications. OpenSearch is a read model for operational search, not authoritative decision storage.
 
-The LLM should not be the sole authority for identity approval, document validity, sanctions decisions, or a policy exception. It can extract candidate values and provide supplementary evidence. Deterministic validation, policy rules, and an authorized reviewer remain responsible for the final path.
+The real duplicate-safe write uses a unique constraint and an atomic insert, not a pre-check:
 
-That separation is the main design constraint. The useful abstraction is not “an API endpoint that calls a model”; it is an intake workflow with explicit state, durable events, bounded dependencies, and an audit trail.
+```sql
+CREATE UNIQUE INDEX one_intake_per_key ON intake(event_id, idempotency_key);
+
+INSERT INTO intake(event_id, idempotency_key, status)
+VALUES (:event_id, :key, 'RECEIVED')
+ON CONFLICT (event_id, idempotency_key) DO NOTHING;
+```
+
+Equivalent mechanisms include Redis `SETNX` with an expiry, an inbox table for consumed event IDs, or a transactional outbox for published facts. Select one according to the ownership and lifetime of the key. A unique insert makes storage idempotent; it does not make an external side effect idempotent. Provider calls need a provider-supported idempotency key where available, or a durable attempt record and a reconciliation policy. Outbox publication should be retried from committed state, and consumers should use an inbox or unique event constraint.
+
+Version every AI-dependent result with `model_version` and `prompt_version`. Version the business mapping with `policy_version`. Store an audit record containing at least `transaction_id`, `event_id`, `model_version`, `prompt_version`, `policy_version`, `decision`, and `reason`, plus the input hash and timestamps. A replay should use the recorded versions when reproducing an old decision, while a deliberate re-evaluation creates a new attempt.
+
+Timeouts, bounded retries with jitter, circuit breaking, and a provider rate limiter belong around each external call. A safe fallback is not “accept on error”: persist `AI_UNAVAILABLE` or `EXTRACTION_UNREADABLE` and route to manual review when policy permits. A dead-letter path must preserve the event and failure reason for inspection.
+
+## Failure Scenarios
+
+- A duplicate Kafka delivery hits the unique inbox constraint and produces no second intake or outbox event.
+- A worker dies after committing extraction but before publishing. The outbox publisher later emits the event.
+- A provider times out. The attempt records the timeout; retries are bounded. Exhaustion routes to review or a controlled failure state.
+- The provider returns malformed JSON or a low-confidence field. Schema validation rejects the response, and policy can choose review without inventing a value.
+- Kafka is replayed after a policy release. The old audit record remains immutable; a new policy version is an explicit new decision.
+- OpenSearch is unavailable. Decisions remain queryable from the database; the projection consumer catches up later.
+- A downstream notification is retried. Its consumer uses an idempotency key, and the notification provider receives a stable key if supported.
+
+## Capacity
+
+Capacity starts with measured workload, not a server count. For arrival rate `λ` and end-to-end latency `W`:
+
+```text
+Concurrency = Throughput x Latency = λ x W
+```
+
+At 20 documents/second and a 12-second workflow, roughly 240 workflow slots are in flight before headroom. If the VLM call occupies a worker for 3 seconds, its service needs about 60 concurrent call slots at that rate, subject to provider quotas. Size Kafka partitions and consumer concurrency for throughput, the database for write rate and connection limits, object storage for bytes and retention, and OpenSearch for indexing plus query load. Queue depth, oldest-message age, provider rate limits, and retry traffic are capacity signals. Backpressure should stop accepting work or slow consumers before the database or provider is overwhelmed.
+
+## Security/Privacy
+
+Identity documents contain PII and often sensitive biometric information. Use object references, short-lived scoped URLs, encryption in transit and at rest, strict service authorization, access logging, and retention/deletion controls. Minimize fields sent to external AI: crop or redact irrelevant regions, send only the needed image and question, and do not casually send the full transaction, account history, or unrelated customer data. Treat prompts and model responses as sensitive data, prevent prompt content from becoming executable instructions, and keep secrets out of logs. Human reviewers need least-privilege access and a defined export policy.
+
+## Observability
+
+System metrics should include intake throughput, queue depth, oldest event age, processing latency by stage, provider latency, timeout/retry/circuit-breaker counts, rate-limit responses, database conflicts, outbox lag, and OpenSearch indexing lag. AI metrics should include extraction status, per-field confidence distributions, schema-validation failures, fallback rate, token/cost estimates, and model/prompt versions in structured logs or dimensions with bounded cardinality.
+
+Business metrics should include accept/reject/manual-review rates, reasons, review backlog and age, reprocessing rate, and disagreement between deterministic checks and AI signals. Do not use `transaction_id`, `account_id`, document number, or event ID as Prometheus labels. Put those identifiers in secured logs and trace context instead, with redaction and access controls. Traces should connect the intake, provider attempt, database transaction, outbox event, and projection without exposing raw document contents.
+
+## Lessons
+
+- Start with the failure and decision contract; introduce architecture only to satisfy it.
+- Treat AI output as a versioned, typed signal. Policy owns the business decision.
+- Use atomic uniqueness, inbox/outbox patterns, and provider idempotency separately because storage and side effects fail differently.
+- Keep Kafka as replay source, the database as system of record, and OpenSearch as a rebuildable read model.
+- Capacity, privacy, auditability, and observability are part of correctness for KYC, not post-production polish.
