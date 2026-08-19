@@ -1,0 +1,132 @@
+You are a senior Staff Engineer. Rewrite the given FinPay AI blog (EN and VI) into a problem-driven engineering narrative.
+
+RULES:
+- Architecture is the RESULT of reasoning, not the start. Structure each locale: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure Scenarios -> Capacity -> Security/Privacy -> Observability -> Lessons.
+- AI is an engineering component, not magic: false positives/negatives, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End each locale with 3-7 lessons (NO Interview Questions section).
+- Bilingual EN+VI parity. Keep frontmatter unchanged except improve title. pubDatetime MUST stay unchanged.
+
+WRITE INSTRUCTIONS (critical): You MUST use your file-write tool to create EXACTLY these two files:
+  /tmp/fpx_llm/llm-transaction-explainer-rag.en.md
+  /tmp/fpx_llm/llm-transaction-explainer-rag.vi.md
+Both directories already exist. Write the complete markdown (with frontmatter) to each.
+
+CURRENT EN:
+---
+title: "Designing a Transaction Explainer with LLM and RAG"
+description: "A practical design for explaining customer transactions with retrieval-augmented generation over ledger and transfer events."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["java", "ai", "fintech", "architecture"]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/customer-service>
+
+## The problem
+
+Customers asking “Where did this charge come from?” need a precise answer, not a generic chatbot response. The answer usually requires correlating balance mutations with the lifecycle of a transfer, then translating technical records into language a customer can understand.
+
+This is difficult for three reasons:
+
+- The relevant evidence is split across event streams.
+- Raw events contain fields that should not be shown to a customer or sent to a model.
+- An LLM can produce fluent text without having evidence for it.
+
+The design in this article uses retrieval-augmented generation (RAG): retrieve the events relevant to one customer and transaction reference, then ask the LLM to explain only that evidence. The LLM is an explanation component. It is not an authority for balances, refunds, or other money decisions.
+
+> **[SOURCE FACT]** The supplied project description uses two Kafka topics, `finpay.ledger` and `finpay.transfer`, and identifies `customerId` as their key. The repository URL above is retained from that description.
+
+## The event model
+
+The two topics represent different parts of the same story:
+
+- `finpay.ledger`: balance mutations such as debits, credits, fees, and refunds.
+- `finpay.transfer`: transfer lifecycle events such as `CREATED`, `SETTLED`, `FAILED`, and `REFUNDED`.
+
+Using the same `customerId` key makes customer-scoped retrieval practical. It does not, by itself, prove that two records belong to the same transaction. The retrieval layer still needs to use a transaction reference, event metadata, and whatever correlation rules the source system defines.
+
+> **[ANALYSIS]** Kafka partitioning by customer helps organize and retrieve customer data. It is not a substitute for authorization, data filtering, or transaction correlation.
+
+## Approach to avoid: put the full history in the prompt
+
+The simplest implementation loads every event for a customer, serializes the internal JSON, and asks the model to find the relevant explanation.
+
+```java
+// WRONG: unbounded history and internal fields in the prompt
+List<JsonNode> events = ledgerRepo.findAllForCustomer(customerId);
+events.addAll(transferRepo.findAllForCustomer(customerId));
+
+String prompt = "Explain the transaction using this data:\n" +
+        events.stream().map(JsonNode::toString)
+                .collect(Collectors.joining("\n"));
+String answer = llm.complete(prompt);
+```
+
+This has four predictable failure modes:
+
+1. **Unbounded context.** Active customers can have hundreds of events. A large prompt may exceed the model context, cover the wrong time period, or be rejected by the client.
+
+
+=== VI CURRENT ===
+---
+title: "Thiết kế dịch vụ giải thích giao dịch bằng LLM và RAG"
+description: "Thiết kế thực tế để giải thích giao dịch của khách hàng bằng retrieval-augmented generation trên các sự kiện ledger và transfer."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["java", "ai", "fintech", "architecture"]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/customer-service>
+
+## Bài toán
+
+Khi khách hàng hỏi “Khoản phí này từ đâu ra?”, họ cần một câu trả lời chính xác, không phải một phản hồi chatbot chung chung. Câu trả lời thường phải đối chiếu các biến động số dư với vòng đời của một giao dịch chuyển tiền, sau đó chuyển các bản ghi kỹ thuật thành ngôn ngữ khách hàng có thể hiểu.
+
+Bài toán khó ở ba điểm:
+
+- Bằng chứng liên quan nằm trong nhiều event stream.
+- Event thô có thể chứa các trường không nên gửi cho model hoặc hiển thị cho khách hàng.
+- LLM có thể tạo ra văn bản trôi chảy dù không có bằng chứng cho nội dung đó.
+
+Thiết kế trong bài dùng retrieval-augmented generation (RAG, truy xuất tăng cường): truy xuất các sự kiện liên quan đến một khách hàng và một mã giao dịch, rồi yêu cầu LLM chỉ giải thích tập bằng chứng đó. LLM chỉ là thành phần giải thích. Nó không có thẩm quyền quyết định số dư, hoàn tiền hay bất kỳ thao tác nào liên quan đến tiền.
+
+> **[SOURCE FACT]** Mô tả dự án được cung cấp sử dụng hai Kafka topic là `finpay.ledger` và `finpay.transfer`, với `customerId` làm key. URL repository ở trên được giữ nguyên từ mô tả đó.
+
+## Mô hình sự kiện
+
+Hai topic thể hiện các phần khác nhau của cùng một câu chuyện:
+
+- `finpay.ledger`: các biến động số dư như ghi nợ, ghi có, phí và hoàn tiền.
+- `finpay.transfer`: các trạng thái trong vòng đời chuyển tiền như `CREATED`, `SETTLED`, `FAILED` và `REFUNDED`.
+
+Việc dùng cùng key `customerId` giúp truy xuất theo phạm vi khách hàng khả thi. Tuy nhiên, điều đó không tự chứng minh hai bản ghi thuộc cùng một giao dịch. Retrieval layer vẫn phải dùng transaction reference, metadata của event và các quy tắc tương quan mà hệ thống nguồn định nghĩa.
+
+> **[ANALYSIS]** Kafka partition theo khách hàng giúp tổ chức và truy xuất dữ liệu khách hàng. Nó không thay thế cho authorization, lọc dữ liệu hay tương quan giao dịch.
+
+## Cách nên tránh: đưa toàn bộ lịch sử vào prompt
+
+Cách triển khai đơn giản nhất là tải mọi event của khách hàng, tuần tự hóa JSON nội bộ rồi yêu cầu model tự tìm phần giải thích liên quan.
+
+```java
+// WRONG: lịch sử không giới hạn và trường nội bộ trong prompt
+List<JsonNode> events = ledgerRepo.findAllForCustomer(customerId);
+events.addAll(transferRepo.findAllForCustomer(customerId));
+
+String prompt = "Explain the transaction using this data:\n" +
+        events.stream().map(JsonNode::toString)
+                .collect(Collectors.joining("\n"));
+String answer = llm.complete(prompt);
+```
+
+Cách này có bốn nhóm lỗi dễ dự đoán:
+
+1. **Ngữ cảnh không giới hạn.** Khách hàng hoạt động nhiều có thể có hàng trăm event. Prompt lớn có thể vượt context của model, bao phủ nhầm khoảng thời gian hoặc 
