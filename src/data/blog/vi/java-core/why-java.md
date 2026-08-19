@@ -10,8 +10,6 @@ tags:
   - career
 ---
 
-# Vì sao Java vẫn quan trọng
-
 Chọn một ngôn ngữ lập trình cho hệ thống production không chủ yếu là câu chuyện về cú pháp. Ngôn ngữ đó phải hỗ trợ vận hành tin cậy, phân định trách nhiệm rõ ràng, kiểm thử, debug, bảo mật và bảo trì theo thời gian.
 
 Java vẫn phù hợp vì nó giải quyết tốt các ràng buộc đó. Bài viết này trình bày nguồn gốc của Java, lý do hệ sinh thái JVM rộng hơn bản thân ngôn ngữ, những bài toán Java phù hợp và lý do các đội ngũ vẫn chọn Java dù nó có trade-off.

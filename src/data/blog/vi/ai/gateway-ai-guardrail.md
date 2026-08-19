@@ -9,7 +9,6 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/gateway>
 
-# AI-7 Gateway AI Guardrail
 
 Đưa LLM vào luồng xử lý thanh toán khó ở một điểm cốt lõi: đầu ra của mô hình mang tính xác suất, còn các side effect của settlement phải được kiểm soát và có thể audit. Guardrail không trao quyền quyết định cho mô hình. Nó giới hạn phạm vi sử dụng mô hình, kiểm tra đầu ra và cung cấp đường fallback khi mô hình không khả dụng hoặc không đáng tin.
 

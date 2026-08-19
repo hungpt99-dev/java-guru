@@ -9,7 +9,6 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/gateway>
 
-# AI-7 Gateway AI Guardrail
 
 Putting an LLM in a payment request path is difficult for a simple reason: model output is probabilistic, while settlement effects must be controlled and auditable. A guardrail does not make the model authoritative. It limits where the model can be used, validates what it returns, and provides a safe path when the model is unavailable or untrusted.
 

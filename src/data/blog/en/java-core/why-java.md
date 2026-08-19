@@ -10,8 +10,6 @@ tags:
   - career
 ---
 
-# Why Java Still Matters
-
 Choosing a programming language for a production system is not mainly a question of syntax. The language must support reliable operation, clear ownership, testing, debugging, security, and maintenance over time.
 
 Java remains relevant because it addresses those constraints well. This article covers where Java came from, why the JVM ecosystem is larger than the language itself, which problems Java suits, and why teams still choose it despite its trade-offs.

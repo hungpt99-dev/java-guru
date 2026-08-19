@@ -9,7 +9,6 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/identity-service>
 
-# AI-6: Thiết kế tiếp nhận tài liệu KYC bằng Vision và LLM
 
 Tiếp nhận giấy tờ KYC (Know Your Customer) chỉ có vẻ đơn giản cho đến khi hệ thống phải xử lý ảnh kém chất lượng, nhiều định dạng giấy tờ, sự kiện gửi trùng, lỗi từ nhà cung cấp và yêu cầu audit. Vision language model (VLM, mô hình ngôn ngữ có khả năng xử lý hình ảnh) có thể hỗ trợ trích xuất trường dữ liệu, nhưng không nên là hệ thống lưu trữ chuẩn hay bên tự quyết định cuối cùng.
 

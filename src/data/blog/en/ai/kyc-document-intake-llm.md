@@ -9,7 +9,6 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/identity-service>
 
-# AI-6: Designing KYC Document Intake with Vision and LLMs
 
 KYC (Know Your Customer) document intake looks simple until it has to handle bad images, different document formats, duplicate delivery, provider failures, and audit requirements. A vision language model (VLM) can help extract fields from an identity document, but it should not be the system of record or the final decision-maker.
 
