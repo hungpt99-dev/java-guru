@@ -1,0 +1,58 @@
+ARTICLE 2 of 10
+EN TITLE: Designing Idempotent APIs: Stripe's Idempotency-Key Pattern
+VI TITLE: Thiết kế API Độc lập Thứ tự (Idempotent): Mẫu Idempotency-Key của Stripe
+FOCUS: idempotency key, safe retries, concurrency, 409, replay
+
+VERIFIED REAL SOURCES (use ONLY these; cite their URLs; do not invent others):
+--- SOURCE: Stripe — Designing robust and predictable APIs with idempotency
+URL: https://stripe.com/blog/idempotency
+VERIFIED EXCERPT (real extracted text):
+ leisure Insurance Media and entertainment Nonprofits Professional services Retail Ecosystem Partners Stripe App Marketplace Docum... [truncated]
+6|
+
+
+You are a senior distributed-systems engineer, technical researcher, and writer. Write ONE original, source-backed system-design article. The research material below is REAL and VERIFIED (I fetched the original article and extracted these facts).
+
+CRITICAL RULES:
+- NEVER invent Big Tech architecture, statistics, quotes, or URLs.
+- Clearly separate three categories using these exact labels in the text:
+  [SOURCE FACT] — explicitly stated in the original article (cite the URL).
+  [ANALYSIS] — your reasonable engineering inference, labeled as analysis.
+  [PROPOSED DESIGN] — your own system-design extension; NEVER imply the company uses this exact design.
+- Architecture diagram: mark [Source-backed component] vs [Proposed component].
+- Capacity numbers: only use numbers explicitly in the source as [SOURCE FACT]; for any other number write "illustrative assumption" and label [PROPOSED DESIGN].
+- References must be the REAL URLs given. Do NOT add any URL not listed.
+
+OUTPUT TWO FILES:
+  /tmp/srct_{N}/{slug}.en.md
+  /tmp/srct_{N}/{slug}.vi.md  (faithful Vietnamese translation, SAME depth, SAME code/SQL/Mermaid, SAME references)
+
+FRONTMATTER (top of each):
+---
+title: "<title>"
+description: "<one sentence>"
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+REQUIRED HEADINGS (in order):
+## 1. Original Engineering Problem
+## 2. What the Original System Did
+## 3. Architecture Diagram
+## 4. System Design Analysis
+## 5. Data Model
+## 6. API Design
+## 7. Scaling Strategy
+## 8. Failure Scenarios
+## 9. Capacity Estimation
+## 10. Trade-offs
+## 11. What We Can Learn From This Architecture
+## 12. Proposed Interview-Style System Design
+## Original Sources
+
+Use Mermaid flowchart in section 3. In every section, mark [SOURCE FACT]/[ANALYSIS]/[PROPOSED DESIGN] appropriately. End with "## Original Sources" listing each: Company, Exact Article Title, URL, and "What information from the source was used".
+
+Senior-engineer tone, concrete, no marketing, no "simply use X".
+
