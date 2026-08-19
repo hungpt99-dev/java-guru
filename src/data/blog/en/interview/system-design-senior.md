@@ -1,6 +1,6 @@
 ---
-title: "Java Interview Prep #7: System Design — Junior to Senior"
-description: "System design is the senior capstone: a 45-minute test of judgment. Process, capacity estimation, caching, CAP, scalability, and observability."
+title: "Java Interview Prep #7: System Design Fundamentals and Trade-offs"
+description: "A practical system-design interview guide covering requirements, capacity, data, failure handling, scalability, and observability."
 pubDatetime: 2026-08-10T10:25:00+07:00
 featured: false
 draft: false
@@ -11,517 +11,249 @@ tags:
   - scalability
 ---
 
-System design is the interview with no single right answer — only defensible trade-offs. Junior candidates name components; seniors take a problem from vague requirements to a design backed by numbers and explain where it breaks. This post moves from "draw a diagram" to "here is the latency budget and the failure I'm watching" — 50 questions: pick the level you are interviewing for, then read one level above it.
+System design is not a component-naming exercise. The hard part is turning incomplete requirements into explicit decisions about latency, consistency, capacity, failure handling, and operations. This guide moves from foundations to trade-offs and then to end-to-end designs.
 
-> Mindset: a junior produces a diagram; a senior produces a diagram _and_ a latency budget, a capacity estimate, and the single failure mode most likely to page them at 2 a.m.
+**How to read the numbers.** Unless a value is a protocol property, every number below is an **illustrative assumption**. Replace it with measurements from the proposed workload, dependency, and region. Labels identify the kind of statement being made: **[SOURCE FACT]** describes a protocol or generally established behavior; **[ANALYSIS]** explains a trade-off; **[PROPOSED DESIGN]** is one defensible design, not a universal answer.
 
-## Junior — Foundations
+## Junior: Foundations
 
 **Q1. What are the main building blocks of a web system?**
-A typical stack is a pipeline in which each layer adds a capability: the LB spreads load, the cache absorbs reads, the queue decouples slow work, and the DB owns the truth. Know the role of each block before you debate any of them:
-
-```
-Client ──> DNS ──> Load Balancer ──> App Servers ──> Cache (Redis)
-                         │               │  │            │
-                         │               │  └──> Message Queue ──> Workers
-                         │               └──────> Database (primary ──> replicas)
-                         └───────────────> CDN (static assets)
-```
-
-**Q2. What happens when you type a URL and press Enter?**
-DNS lookup → TCP handshake → TLS handshake → HTTP request → app logic → response. Each step takes a measurable amount of time — DNS ~10–50 ms (cached ~0 ms), RTT ~1–50 ms, TLS ~10–100 ms. This is your first latency budget: a "fast" request mostly waits on the network, not your code:
+**[ANALYSIS]** A common request path uses DNS, a load balancer, stateless application servers, a cache, a database, and sometimes a queue with workers. A CDN serves cacheable static assets. Each block has a boundary: the database is the system of record, the cache is an optimization, and the queue decouples work that need not finish in the request:
 
 ```text
-browser → DNS (10–50 ms) → TCP handshake (1 RTT) → TLS (1–2 RTT, ~10–100 ms)
-        → HTTP req (RTT) → app logic (10–200 ms) → HTTP resp (RTT)
-a 200 ms budget: network eats ~60–80% of it before your code runs
+Client -> DNS -> Load Balancer -> App -> Cache
+                         |          |       |
+                         |          +-> Queue -> Workers
+                         +-> CDN    +-> Database primary -> replicas
 ```
 
-**Q3. What is the difference between L4 and L7 load balancing?**
-L4 routes by TCP/UDP port — fast (~µs), with no packet inspection, but unable to route by URL. L7 routes by HTTP — slower (it parses headers, ~tens of µs), but it can route by path, retry, and use sticky sessions:
+**Q2. What happens after entering a URL?**
+**[SOURCE FACT]** The usual sequence is DNS lookup, TCP connection, TLS negotiation, HTTP request, application work, and response. **[ANALYSIS]** Treat each part as a measurable latency budget. A cached DNS lookup may add almost no network work; a remote round trip and TLS negotiation may dominate a small request budget. Do not claim that application code is the bottleneck before looking at a trace.
 
-```
-L4:  Client ── TCP:443 ──> LB ──> any healthy node
-L7:  Client ──> LB ── /api/*    ──> api nodes
-                  └─ /static/*  ──> CDN origin
-```
-
-**Q4. What is the difference between horizontal and vertical scaling?**
-Vertical = a bigger machine (more CPU/RAM) — simple but capped at the largest cloud instance and a SPOF. Horizontal = more nodes behind an LB — no hard cap, but requires statelessness. If one node handles ~500 RPS and you need 10k QPS, vertical scaling needs a 20× machine that does not exist; horizontal scaling needs ~20–25 nodes (with headroom):
+**Q3. L4 versus L7 load balancing?**
+**[SOURCE FACT]** L4 routes using transport information such as TCP or UDP. It does not understand an HTTP URL. L7 parses HTTP and can route by path, apply HTTP-aware policy, and sometimes retry. **[ANALYSIS]** L7 adds processing and policy complexity; use it when that visibility is worth the cost.
 
 ```text
-needed_nodes = target_rps / per_node_rps × (1 + headroom)
-             = 10_000 / 500 × 1.25 ≈ 25 nodes
+L4: Client -> TCP:443 -> LB -> healthy node
+L7: Client -> LB -> /api/* -> API nodes
+                 +-> /static/* -> CDN origin
 ```
 
-**Q5. What does stateless mean, and why does it matter for scaling?**
-A stateless server keeps no per-request state — every request carries what it needs, so any node can serve any request. In-memory sessions are the classic violation; moving them to a shared store (Redis) or a client token fixes it:
+**Q4. Horizontal versus vertical scaling?**
+**[SOURCE FACT]** Vertical scaling means a larger machine. Horizontal scaling means more machines, usually behind a load balancer. **[ANALYSIS]** Vertical scaling is simpler but bounded and can leave a single failure domain. Horizontal scaling requires stateless application instances and shared or externalized state. **[ILLUSTRATIVE ASSUMPTION]** If one node serves 500 RPS and the target is 10,000 RPS, 20 nodes cover only the mean; a 25% headroom factor gives 25 nodes:
+
+```text
+nodes = target_rps / node_rps * (1 + headroom)
+      = 10,000 / 500 * 1.25 = 25
+```
+
+**Q5. What does stateless mean?**
+**[SOURCE FACT]** A stateless instance does not keep request-specific state that a later request must find on that same instance. **[ANALYSIS]** In-memory sessions create a routing dependency. Store session state in a shared store or use a client token instead:
 
 ```java
-// WRONG — state in the instance, sticky sessions required
+// Avoid instance-local session state.
 session.put("cart", cart);
 
-// RIGHT — state outside the instance; any node handles any request
-String cartId = redis.set(cartJson);   // TTL 24h
+// External state lets any instance serve the request.
+String cartId = redis.set(cartJson); // illustrative TTL: 24h
 ```
 
-**Q6. What is cache-aside, and when does it break?**
-The app checks the cache first; on a miss, it reads the DB, populates the cache, and returns the result. This is simple and resilient (a cache failure falls back to the DB), but you pay for a stale window and risk a stampede when a hot key misses:
+**Q6. What is cache-aside, and where does it fail?**
+**[SOURCE FACT]** The application reads the cache, reads the database on a miss, then populates the cache. **[ANALYSIS]** This keeps the database authoritative and can fall back when the cache is unavailable, but it permits stale data and can create a stampede. **[ILLUSTRATIVE ASSUMPTION]** A 60-second TTL and 95% hit rate are workload assumptions, not properties of cache-aside:
 
 ```java
-String v = redis.get(key);
-if (v == null) {
-    v = db.query(key);              // miss: hit the DB
-    redis.set(key, v, 60s);         // populate with TTL
+String value = redis.get(key);
+if (value == null) {
+    value = db.query(key);
+    redis.set(key, value, 60); // illustrative TTL in seconds
 }
-return v;                           // hit rate ~95% on hot keys
+return value;
 ```
 
-**Q7. What is a CDN and when do you use it?**
-A CDN caches static assets at edge locations near users, reducing both latency and origin load. Use it for anything static and read-heavy. Dynamic, user-specific responses are not cached — that is the boundary:
+**Q7. What is a CDN?**
+**[SOURCE FACT]** A CDN caches content at edge locations, reducing origin requests and often reducing user latency. **[ANALYSIS]** It is a good fit for versioned static assets and other explicitly cacheable responses. User-specific dynamic responses need suitable cache keys and privacy controls; otherwise do not cache them.
 
-```
-user in Hanoi ──> edge node SG (5 ms) ──> cache hit, done
-origin in Frankfurt (200 ms) only touched on cache miss
-```
+**Q8. SQL versus NoSQL?**
+**[SOURCE FACT]** SQL databases provide relational queries, schemas, and transactional guarantees such as ACID. NoSQL systems vary, but commonly optimize for a particular access pattern, scale-out model, or flexible representation. **[ANALYSIS]** Choose from data shape, query patterns, consistency, and operational constraints, not category preference. A hybrid such as Redis for cache, PostgreSQL for transactional truth, and a column store for analytics can be reasonable.
 
-**Q8. What is the difference between SQL and NoSQL, in one minute?**
-SQL provides ACID, joins, and a strong schema — best for transactional relational data (money, orders). NoSQL trades guarantees for scale and a flexible schema — best for high-volume or loosely structured data (sessions, time series, graphs). Choose based on data shape and consistency needs, not fashion:
+**Q9. What is an index?**
+**[SOURCE FACT]** A B-tree index can avoid scanning every row for suitable predicates, at the cost of additional storage and write work. **[ANALYSIS]** The right answer is measured with `EXPLAIN` and representative data. **[ILLUSTRATIVE ASSUMPTION]** A 10-million-row scan taking seconds and an indexed lookup taking milliseconds are examples, not guarantees.
+
+**Q10. What problem does a message queue solve?**
+**[SOURCE FACT]** A queue buffers work between a producer and a consumer, allowing asynchronous processing and retries. **[ANALYSIS]** It absorbs bursts only for as long as retention and capacity allow; it does not remove overload. Monitor lag and define what happens to poison messages.
+
+**Q11. Explain CAP.**
+**[SOURCE FACT]** During a network partition, a distributed system cannot guarantee both availability and strong consistency for the same operation. **[ANALYSIS]** CP behavior rejects or pauses some operations to preserve consistency; AP behavior continues serving while permitting stale or conflicting observations. A ledger and a like counter have different correctness requirements. Avoid saying a system provides all three during a partition.
+
+**Q12. Monolith or microservices?**
+**[ANALYSIS]** A monolith usually has fewer network and deployment boundaries and makes local transactions simpler. Microservices can provide independent ownership, deployment, and scaling, but add network failure, distributed data, and operational overhead. **[PROPOSED DESIGN]** Start with a well-factored monolith unless a team boundary, isolation requirement, or independent scaling axis justifies a split. Any throughput comparison must be measured for the actual workload.
+
+**Q13. What is HTTP idempotency?**
+**[SOURCE FACT]** An idempotent operation has the same intended effect when repeated. `PUT` and `DELETE` are defined as idempotent at the HTTP semantic level; a business operation sent with `POST` often is not. **[PROPOSED DESIGN]** Give retryable creates a client-supplied idempotency key and persist the result under a unique constraint.
+
+**Q14. Reverse proxy versus forward proxy?**
+**[SOURCE FACT]** A forward proxy represents clients to external servers. A reverse proxy represents servers to clients. **[ANALYSIS]** A reverse proxy can terminate TLS, route traffic, enforce policy, and hide the application fleet:
 
 ```text
-order + money + joins → SQL (ACID across rows)
-sessions, feeds, metrics, docs → NoSQL (scale-out, flexible schema)
-the hybrid that wins: Redis cache + Postgres truth + column store for analytics
+Forward: client -> proxy -> internet
+Reverse: internet -> proxy/LB -> app instances
 ```
 
-**Q9. What is a database index, and why does a query slow down without one?**
-An index is a sorted structure (B-tree) mapping a key to a row location, turning a full table scan into a logarithmic-time lookup. Without an index, scanning a 10M-row table takes ~1–5 s and reads every row; with one, a lookup takes ~1–10 ms and reads a few pages. Indexes have a cost — every write must update them:
+**Q15. WebSocket versus long polling?**
+**[SOURCE FACT]** Long polling holds an HTTP request until an event or timeout and then repeats. WebSocket maintains a bidirectional connection. **[ANALYSIS]** Long polling is easier where WebSocket is unavailable; WebSocket is usually a better fit for frequent, low-latency server push. Size connections, heartbeats, and reconnect storms before choosing.
 
-```text
-no index:  SELECT * FROM orders WHERE user_id = 42 → full scan of 10M rows ~1–5 s
-with index: B-tree lookup → ~1–10 ms (a few pages read, not 10M rows)
-cost: each INSERT/UPDATE now also writes the index B-tree
-```
+**Q16. What does replication provide?**
+**[SOURCE FACT]** Replication copies data from a primary to replicas. It can provide read capacity and failover, depending on the database and topology. **[ANALYSIS]** Asynchronous replication introduces lag and stale reads. A design with three replicas is an illustrative topology, not a general availability guarantee.
 
-**Q10. What is a message queue, and what problem does it solve?**
-A queue buffers work between a producer and a consumer that cannot keep pace, decoupling them so a slow consumer or a crash does not block the producer — and it smooths spikes: the queue absorbs the burst, and consumers drain it at their own rate:
+**Q17. What is sharding?**
+**[SOURCE FACT]** Sharding partitions data across nodes using a shard key. **[ANALYSIS]** It can increase write capacity but makes joins, transactions, backups, rebalancing, and global queries harder. Choose the key from access patterns and failure isolation; do not shard merely because the diagram looks more scalable.
 
-```
-Producers (10k req/s burst) ──> Queue ──> Consumers (drain 2k req/s)
-                                      └──> retries + no drops, drains after the spike
-```
+## Mid: Trade-offs and Failure Modes
 
-**Q11. What is CAP in plain terms?**
-You cannot have all three of Consistency, Availability, and Partition tolerance — and partitions (network splits) are inevitable, so in practice you choose between **CP** (pause writes to remain consistent) and **AP** (stay available while risking stale reads). A payments ledger is CP; a social feed is AP. The interview trap is claiming, "We have all three":
+**Q18. TTL, write-through, or write-back?**
+**[SOURCE FACT]** TTL expires entries. Write-through updates the cache as part of a write path. Write-back acknowledges the cache and persists later. **[ANALYSIS]** TTL accepts bounded staleness; write-through adds coordination and latency; write-back risks losing unflushed data. A read miss racing with a write can repopulate stale data, so invalidation ordering must be explicit.
 
-```text
-         Consistency
-            /\
-           /  \
-          /    \
-         /  YOU \
-        /   pick \
-       /    ONE   \
-Consistency─CP───AP─Availability
-   (pause)      (stale)
-   ZooKeeper    Cassandra
-   ledgers      like-counts
-```
+**Q19. What is a cache stampede?**
+**[SOURCE FACT]** Many requests can miss simultaneously when a hot entry expires. **[PROPOSED DESIGN]** Use TTL jitter, per-key single-flight, or refresh-before-expiry. Bound the wait and provide a fallback; otherwise one hot key can overload the database.
 
-**Q12. Monolith vs microservices — which is better?**
-A monolith is a single deployable; microservices are many smaller deployables with network calls between them. Monoliths win on simplicity and transactionality; microservices win on independent scaling and deployment. A 3-person team with a monolith at 10k QPS beats a 20-person team with 12 services at 2k QPS. The honest senior says: start with a monolith and split it when the team and the load justify it:
+**Q20. How do you estimate capacity?**
+**[ANALYSIS]** Start with the weakest layer and show the arithmetic. **[ILLUSTRATIVE ASSUMPTION]** At 10,000 QPS, if one measured app node sustains 500 RPS at the target p99, 25 nodes is a 25% headroom estimate. If each request performs two database queries and the cache hit rate is 95%, the database sees roughly 1,000 QPS. Validate every assumption with load tests and production telemetry.
 
-```text
-monolith:       one deployable, one DB → local transactions, simple deploys
-microservices:  many deployables → independent scale/deploy, but network calls,
-                distributed transactions, and 3× the operational surface
-rule of thumb: keep the monolith until a team boundary or a scaling axis demands the split
-```
+**Q21. When is SQL the wrong answer?**
+**[ANALYSIS]** SQL is a poor fit when the access pattern needs write scale or distribution that the chosen relational topology cannot provide. NoSQL is a poor fit when the domain needs joins and multi-row transactions that the selected store cannot express safely. **[ILLUSTRATIVE ASSUMPTION]** Clickstream at 100,000 writes/s versus a primary measured at 5,000 writes/s is a capacity mismatch, not a universal SQL limit.
 
-**Q13. What is idempotency in HTTP, and why does `POST` need help?**
-An idempotent operation gives the same result whether called once or ten times — essential because clients retry on timeouts. `PUT` and `DELETE` are naturally idempotent; `POST` is not, so it needs a client-supplied idempotency key:
+**Q22. CP and AP in practice?**
+**[SOURCE FACT]** Coordination stores commonly favor consistency during a partition; many eventually consistent stores favor availability. **[ANALYSIS]** Name the user-visible cost: a ledger may reject writes, while a like count may be temporarily stale. Do not infer guarantees from a product name alone; verify its consistency mode and configuration.
 
-```
-Client ── POST /orders (key=abc-123) ──> Server
-Retry  ── POST /orders (key=abc-123) ──> Server returns stored result, no double-charge
-```
+**Q23. Why not `hash(key) % N`?**
+**[SOURCE FACT]** Modulo sharding remaps many keys when `N` changes. Consistent hashing limits movement to keys in the new node's range; virtual nodes smooth uneven ownership. **[ANALYSIS]** The exact fraction moved depends on the hash and migration strategy. **[ILLUSTRATIVE ASSUMPTION]** Moving from three to four nodes remaps roughly three quarters under simple modulo.
 
-**Q14. What is a reverse proxy, and how is it different from a forward proxy?**
-A forward proxy sits in front of clients (hides them); a reverse proxy sits in front of servers (hides them) — it terminates TLS, balances load, and exposes one endpoint:
+**Q24. Delivery semantics?**
+**[SOURCE FACT]** At-least-once delivery can produce duplicates after an acknowledgement is lost. At-most-once can lose messages. **[ANALYSIS]** “Exactly once” usually means exactly-once effect: an at-least-once consumer deduplicates by message ID and makes side effects idempotent.
 
-```
-Forward:  client ──> proxy ──> internet
-Reverse:  internet ──> LB/proxy ──> app1, app2, app3 (clients never see the fleet)
-```
-
-**Q15. WebSocket vs HTTP long polling — when do you pick which?**
-HTTP request/response means the client must poll for updates; WebSocket holds a bidirectional connection, pushing updates instantly. Long polling is simple and works everywhere but costs a request per event — a dashboard updating 1×/s from 1k clients is ~1k RPS of polling. WebSocket keeps one connection per client — better for chat, live prices, dashboards:
-
-```
-long polling: client ──req──> server (holds open until event) ──resp──> repeat
-websocket:    client ══ one bidirectional connection ══> server (instant push)
-```
-
-**Q16. What is replication, and what does it give you?**
-Replication copies writes from a primary to replicas, giving read scale and failover. With **3 replicas** you can survive a node loss and still serve reads; you pay replication lag (typically <1 s in the same region) and stale reads if you read from replicas:
-
-```
-Primary (writes) ──async──> Replica 1
-                    └──────> Replica 2
-                    └──────> Replica 3
-writes: 1 primary. reads: spread across 3 replicas (3× read capacity)
-```
-
-**Q17. What is sharding, and what does it cost you?**
-Sharding splits data across nodes by a key, multiplying write capacity — but it breaks joins, transactions, and global queries. Sharding into **256 shards** gives ~256× write headroom, but each shard is now its own database with its own backups and capacity planning. Shard late, shard deliberately, and choose the key before you need it:
-
-````
-hash(user_id) % 256 → shard 0..255, each holding 1/256 of rows
-one order's rows all live on one shard → reads stay single-shard
-```## Mid — tradeoffs & pitfalls
-
-**Q18. Cache invalidation — TTL vs write-through vs write-back, and the race?**
-**TTL** (auto-expire) is simple and allows brief staleness. **Write-through** updates cache and DB together — always consistent, but doubles write latency. **Write-back** writes the cache, flushes later — fastest writes, but a crash loses unflushed data. The race: a read populating stale data can interleave with a write, leaving the cache wrong until TTL. Most teams accept short-TTL staleness:
+**Q25. How do you implement API idempotency?**
+**[PROPOSED DESIGN]** Accept an `Idempotency-Key`, reserve it with a unique constraint, execute the operation, and store the response and status. A check followed by an unconstrained insert is racy:
 
 ```java
-db.save(order); redis.del(key);        // write-through: +1 round trip on every write
-redis.set(key, order, 60);            // TTL: stale up to 60s, zero coordination
-// the race: read misses → DB returns old row → write commits → cache holds old value
-````
-
-**Q19. What is a cache stampede, and why doesn't TTL alone save you?**
-When a hot key expires, 1k concurrent requests all miss and all hit the DB — the DB gets 1k× load for the same single value. TTL makes it worse (all keys expire together). Fixes: jitter the TTL, single-flight per key, or refresh before expiry. A stampede on one hot key at 10k QPS can take a DB from 200 ms p99 to 2 s in seconds:
-
-```java
-// jitter: stagger expiry so the herd doesn't expire at once
-redis.set(key, v, baseTtl + ThreadLocalRandom.current().nextInt(30));
-```
-
-**Q20. How do you estimate capacity for 10k QPS?**
-Back-of-envelope, weakest layer first. One stateless app node handles ~500 RPS at p99 < 200 ms (measured, not guessed) → ~20 nodes + headroom → 25–30. Then check the DB: each request may do 2–3 queries, and a connection pool caps effective throughput:
-
-```text
-app nodes  = 10_000 / 500 × 1.25         ≈ 25
-db queries = 10_000 × 2 per request      = 20k QPS → 95% cache hit → ~1k QPS to DB
-cache      = hot set ~5% of data → hit rate ~95% → 5–10 GB Redis
-```
-
-**Q21. When is SQL the wrong answer, and when is NoSQL a trap?**
-SQL is wrong when you need horizontal write scale with flexible schema — clickstream at 100k writes/s vs a single Postgres primary at ~5–10k writes/s. NoSQL is a trap when you have real joins and multi-row transactions — you'll reimplement them badly. Pick by data shape: relational + money → SQL; high-volume + loose + single-doc access → NoSQL. Both at once is legitimate — cache in Redis, truth in Postgres, analytics in a column store:
-
-```text
-clickstream at 100k writes/s: SQL primary caps ~5–10k writes/s → NoSQL/column store
-orders + invoices with joins: NoSQL re-implements joins badly → stay SQL
-decision: shape + consistency first, scale second
-```
-
-**Q22. CAP in practice — which real systems are CP, which are AP?**
-ZooKeeper/etcd are CP (they stop writes during a split); Cassandra/Dynamo are AP (they accept writes, reconcile later, and you may read stale). A ledger is CP; a "like count" is AP. The senior answer adds the cost: during a partition, CP loses availability (a bank that pauses is fine for seconds, not minutes), AP loses correctness guarantees (a like counter at 99.5% accuracy is invisible; a balance at 99.5% is not):
-
-```text
-system          | during partition        | cost of being wrong
-ZooKeeper, etcd | CP: writes pause        | seconds of unavailability
-Cassandra       | AP: writes accepted     | stale reads, reconciles later
-ledger          | CP                      | money must never double-spend
-like counter    | AP                      | 99.5% accuracy is invisible
-```
-
-**Q23. Why not shard by `hash(key) % N`?**
-Modulo sharding means adding a node rehashes nearly everything — going 3 → 4 nodes re-maps ~75% of keys, and during migration, lookups miss. **Consistent hashing** maps keys and nodes onto a ring so adding a node moves only ~1/N of keys (1/4 when going 3 → 4). With **virtual nodes** (each physical node owns ~100–200 ring positions) load also smooths out:
-
-```
-ring: [n1] [n2] [n3] [n1] [n3] [n2] ...   (virtual nodes)
-add n4 → only keys whose hash lands in n4's slots move (~1/4 of keys)
-modulo 4 → 75% of keys move
-```
-
-**Q24. At-least-once vs at-most-once vs exactly-once — which can you actually have?**
-Queues give **at-least-once** by default (retries on ack loss → duplicates). At-most-once drops duplicates but can lose messages. Exactly-once is marketing — you get it by making consumers **idempotent** (dedupe on a message ID), not by magic. At-least-once + idempotent consumer is the only production-sane combination:
-
-```text
-producer ──> queue (retries) ──> consumer processes the message twice
-consumer dedupes on msgId in the DB → exactly-once effect, no double side-effects
-```
-
-**Q25. How do you implement idempotency in a real API?**
-The client sends an `Idempotency-Key` header; the server stores the first response keyed by it and returns the stored result on retry. The atomic part matters — check-then-insert must be a single unique-constrained write, or two concurrent requests both execute:
-
-```java
-String key = req.getHeader("Idempotency-Key");
+// The key must be unique in the database.
 Order existing = orders.findByKey(key);
-if (existing != null) return existing;        // replay: return stored result
-Order order = orderService.create(cart);       // first execution
-orders.insertWithKey(order, key);              // UNIQUE(key) → second insert throws
+if (existing != null) return existing;
+Order order = orderService.create(cart);
+orders.insertWithKey(order, key); // concurrent insert cannot create a second order
 ```
 
-**Q26. How do you size a database connection pool?**
-Pool size follows concurrency, not request rate: `pool ≈ desired_concurrency × (avg_query_ms / target_latency_ms)`. At 10k QPS with 5 ms average queries and a 200 ms budget, ~50 queries are in flight per node — a pool of 10–20 per node is plenty. More connections is not more speed: each Postgres connection costs ~1–10 MB and CPU, and beyond ~cores×2 they add contention:
+**Q26. How do you size a connection pool?**
+**[ANALYSIS]** Pool size follows concurrency and database capacity, not request rate alone. Use measured query time, target latency, transaction behavior, and database CPU. More connections can increase contention. The rough relation `in_flight = rate * service_time` is a starting estimate; benchmark the chosen pool.
+
+**Q27. What is N+1?**
+**[SOURCE FACT]** Loading children once per parent creates one query plus N child queries. **PROPOSED DESIGN** Batch by IDs or use a join, then inspect the query plan. The fix must preserve pagination and avoid creating an oversized `IN` list.
+
+**Q28. When does an index hurt?**
+**[SOURCE FACT]** Writes update affected indexes, and indexes consume storage and cache space. **ANALYSIS** Extra indexes can reduce write throughput, especially on write-heavy tables. Keep indexes that support real queries, verify them with `EXPLAIN`, and remove unused ones after observing workload impact.
+
+**Q29. What breaks with read replicas?**
+**[SOURCE FACT]** Asynchronous replicas can lag the primary. **PROPOSED DESIGN** Route read-after-write traffic to the primary, use a session consistency token, or tolerate stale reads explicitly:
 
 ```text
-in-flight queries = 10_000 req/s × 0.005 s = 50 across the fleet
-pool per node     = 50 / 25 nodes ≈ 2–4 minimum, 10–20 for headroom
+write -> primary -> async replica
+own read -> primary; other eligible reads -> replica
 ```
 
-**Q27. What is the N+1 query problem, and how do you fix it?**
-Looping over N parent rows and fetching children per row issues 1 + N queries — 1k orders becomes 1,001 queries and p99 explodes. Fix with a single `IN`/join query or batch fetching:
+**Q30. How should timeouts and retries work?**
+**[PROPOSED DESIGN]** Set a deadline smaller than the caller's deadline, retry only safe or idempotent operations, use exponential backoff with jitter, and cap attempts with a retry budget. Retries without a budget turn a dependency incident into a retry storm.
 
 ```java
-// WRONG: 1 + N queries
-for (Order o : orders) { customers.get(o.customerId); }   // 1_001 queries
-
-// RIGHT: 2 queries total
-Map<Long, Customer> byId = customers.getByIds(orders.stream()
-        .map(Order::customerId).toList());                 // 2 queries
-```
-
-**Q28. When does an index hurt more than it helps?**
-Every index multiplies write cost — an insert must update the table plus every index (each a B-tree write). On a write-heavy table, 5 extra indexes can cut write throughput by half, and a 1 GB table with heavy indexes can be 2–3 GB on disk. Rule: index what your reads filter on, verify with `EXPLAIN`, and drop unused indexes:
-
-```text
-read-optimized:  1 index → lookup 1 ms vs full scan 2 s (2,000×)
-write-optimized: 5 indexes → each insert pays 6 B-tree writes, not 1
-```
-
-**Q29. Read replicas — what breaks when you add them?**
-Replicas scale reads but introduce replication lag (asynchronous; typically <1 s, seconds under load). A user who writes then reads can hit a replica that hasn't seen the write — "read-your-writes" breaks. Fixes: route the user's own reads to the primary (or add a read-after-write delay), and accept lag for everything else:
-
-```
-write ──> primary ──async (lag 100 ms–2 s)──> replica
-user reads own order from a replica → stale/404 for up to the lag
-fix: own-reads → primary; everyone else's reads → replicas
-```
-
-**Q30. Timeouts, retries, backoff — how do you do this without killing your service?**
-Every downstream call needs a timeout (a 10 s default timeout on a 5 s SLA is a bug), retries with exponential backoff + jitter, and a retry budget cap. Without jitter, retries synchronize into a retry storm that takes down the downstream you were trying to save:
-
-```java
-int attempts = 0;
-while (attempts < 3) {
-    try { return client.call(req); }
-    catch (TimeoutException e) {
-        long wait = Math.min(1000L << attempts, 4000L);              // 1s, 2s, 4s
-        Thread.sleep(wait + ThreadLocalRandom.current().nextLong(200)); // +jitter
-        attempts++;
-    }
+for (int attempt = 0; attempt < maxAttempts; attempt++) {
+    try { return client.call(request); }
+    catch (TimeoutException e) { backoffWithJitter(attempt); }
 }
+return fallbackOrError();
 ```
 
-**Q31. How does a token-bucket rate limiter work, and where does it live?**
-Tokens refill at a fixed rate (e.g. 100 tokens/s) and each request spends one; bursts up to the bucket size pass, sustained rate is capped. Put it at the edge (API gateway/LB) to protect the fleet, and again per-tenant so one noisy customer can't starve everyone. The algorithm is O(1) per request:
+**Q31. How does a token bucket work?**
+**[SOURCE FACT]** Tokens refill at a rate and each request consumes one. The bucket permits bounded bursts and limits the sustained rate. **[PROPOSED DESIGN]** Enforce a global limit at the edge and a tenant limit near the business operation. Make the state distributed if requests can reach multiple nodes.
 
-```java
-class TokenBucket {
-    private final double rate;                   // tokens per second
-    private final long capacity;
-    private double tokens;
-    private long lastRefill = nowNanos();
+**Q32. What is backpressure?**
+**[SOURCE FACT]** Backpressure makes a producer slow down or reject work when consumers cannot keep up. **[PROPOSED DESIGN]** Use bounded queues, explicit rejection, blocking where appropriate, or documented dropping. **[ILLUSTRATIVE ASSUMPTION]** A producer at 10,000 messages/s and consumer at 2,000 messages/s accumulates 8,000 messages/s until capacity or retention is exhausted.
 
-    boolean tryAcquire() {
-        tokens = Math.min(capacity, tokens + (nowNanos() - lastRefill) / 1e9 * rate);
-        lastRefill = nowNanos();
-        if (tokens < 1) return false;
-        tokens -= 1;
-        return true;
-    }
-}
-```
+**Q33. Why is 2PC often a poor service boundary?**
+**[SOURCE FACT]** Two-phase commit holds prepared resources while the coordinator and participants agree, increasing coupling and blocking risk. **[PROPOSED DESIGN]** Prefer local transactions plus a saga and compensating actions, or keep the data in one transactional boundary. Compensation must be durable and idempotent.
 
-**Q32. What is backpressure, and what happens without it?**
-Backpressure is the system telling the producer "slow down" — otherwise the queue grows, memory grows, and the JVM dies of OOM, or the consumer keeps getting overwhelmed and cascades failures. Options: bounded queues with rejection, blocking producers, or dropping oldest. An unbounded queue at 10k req/s with a 2k req/s consumer grows ~8k messages/s until the heap dies:
+**Q34. What does eventual consistency mean to users?**
+**[SOURCE FACT]** Replicas may return stale data temporarily and converge after writes stop propagating. **[ANALYSIS]** State the contract: read-your-writes, monotonic reads, or a documented convergence window. Eventual consistency is a user-visible behavior, not a synonym for “incorrect.”
 
-```java
-new ThreadPoolExecutor(core, max, keepAlive, SECONDS,
-        new ArrayBlockingQueue<>(1000),           // BOUNDED: backpressure
-        new AbortPolicy());                       // reject → 503, not OOM
-```
+## Senior: Design and Defense
 
-**Q33. Distributed transactions — why is 2PC a trap, and what do you use instead?**
-Two-phase commit locks resources across services for the duration — the coordinator becomes a SPOF and one slow participant stalls everything. The alternative is the **saga pattern**: a sequence of local transactions with compensating actions. The senior answer: don't make money moves across services in one transaction — redesign the split or accept eventual consistency:
+**Q35. Design a URL shortener.**
+**[PROPOSED DESIGN]** Clarify redirect latency, availability, retention, abuse controls, and the read/write ratio. Generate a collision-safe key, keep the app tier stateless, cache hot mappings, and shard the durable store only when measured growth requires it. **[ILLUSTRATIVE ASSUMPTION]** For 1 billion redirects/day, average traffic is about 11.6k RPS; a 30k RPS peak and 95% cache hit rate are workload assumptions. The primary failure mode is a hot-key miss, handled with single-flight and bounded fallback.
+
+**Q36. p99 tripled after a deploy. What do you do?**
+**[ANALYSIS]** Decompose the request budget by span, compare the new trace waterfall with baseline, and identify the span whose tail grew. Check new synchronous dependencies, query plans, and N+1 behavior. Fix the offending path, then verify per-span p99 rather than declaring that “the system is slow.”
+
+**Q37. How do you implement consistent hashing?**
+**[PROPOSED DESIGN]** Hash physical nodes and virtual nodes onto a ring. Route a key to the first clockwise position, and move only the affected ranges when adding a node. The implementation needs membership changes, collision handling, migration, and observability; the ring lookup alone is not a production design.
+
+**Q38. How does single-flight prevent a stampede?**
+**[PROPOSED DESIGN]** Keep one in-flight future per key. The first miss loads the database; concurrent misses await the same future. Remove it on completion, bound the wait, and do not cache failures as successful values. Combine this with TTL jitter.
+
+**Q39. What does a 99.95% SLA require?**
+**[SOURCE FACT]** 99.95% availability permits about 26 minutes of unavailability in a 365-day year. **[ANALYSIS]** The budget must be allocated across dependencies; multiplying component availability can produce a lower composite result. **[PROPOSED DESIGN]** Use redundancy, tested failover, and an error budget. “Three replicas” or “two nodes per zone” are illustrative design choices, not guarantees.
+
+**Q40. Active-active versus active-passive?**
+**[ANALYSIS]** Active-passive simplifies write ownership but has failover time and possible write loss. Active-active improves utilization and failover time but needs conflict resolution. **[PROPOSED DESIGN]** Start active-passive for a write-heavy path; if active-active is required, assign disjoint ownership or define a conflict model and reconcile it.
+
+**Q41. How do you design a circuit breaker?**
+**[PROPOSED DESIGN]** Track failures and latency in a window, open after a defined threshold, fail fast or use a safe fallback, then allow limited probes in half-open state. Thresholds and cooldowns are workload-specific assumptions. Also set timeouts and bulkheads; a breaker alone does not create capacity.
 
 ```text
-2PC:  order ──prepare──> payment ──prepare──> inventory (all commit or all abort, locked)
-saga: createOrder ✓ → chargePayment ✓ → reserveInventory ✗ → refundPayment (compensate)
+CLOSED -> OPEN -> HALF_OPEN -> CLOSED
+             \--------failure--------/
 ```
 
-**Q34. Eventual consistency — what does it actually mean for your users?**
-After a write stops, all replicas converge — but in between, reads may be stale. The practical contract is read-your-writes (your own writes are visible), monotonic reads, and "converges in seconds". Eventual consistency is not "sometimes wrong forever" — it's "briefly stale, then right, and here's the reconciliation":
+**Q42. What observability is non-negotiable?**
+**[PROPOSED DESIGN]** Instrument external calls, errors, queue lag, saturation, and user-visible latency. Use RED metrics per endpoint, structured logs keyed by trace ID, traces across service hops, and alerts on symptoms. **[ILLUSTRATIVE ASSUMPTION]** An SLO of 99.9% under a 200 ms target and a 14x burn-rate alert are policy examples, not universal thresholds.
 
-````
-write ──> primary ──> replicas (eventually, <1 s typical)
-user reads stale for ~lag, then correct — never permanently divergent
-```## Senior — design & defense
-
-**Q35. Design a URL shortener for 100M URLs and 1B redirects/day. Walk it.**
-"Requirements first: redirects <50 ms and highly available; reads dominate writes ~100:1. 1B redirects / 86400 s ≈ **11.5k RPS** average with spikes to ~30k. Base62-encode a counter or hash into a 7-char key. Hot keys live in Redis — most traffic hits ~5% of links, so **cache hit ~95%** — the app tier is stateless behind an LB, and the DB is sharded by key prefix. The failure I watch: a suddenly-viral link stampedes the cache → single-flight per key on miss:
-
-````
-
-Client ──> LB ──> redirect service (stateless ×N)
-├──> Redis (hit ~95%, ~1 ms)
-└──> DB shards on miss (shard by key, 3 replicas)
-1B/86400 ≈ 11.5k RPS → ~25 nodes @ ~500 RPS, Redis cluster ~5–10 GB
-
-```
-
-**Q36. A service's p99 latency tripled after a deploy. Find the cause with a budget.**
-"I decompose the budget: LB → TLS → app → cache (1–2 ms) → DB (5–15 ms) → downstream. I compare the new trace waterfall to baseline and look for the span that grew — tripled p99 almost always means a new synchronous dependency or an N+1 query (50 DB calls instead of 1). Fix: batch the calls, move the dependency off the critical path, or cache. I prove it with per-span p99 before/after — the offending span is the one that grew, not 'the system is slow':
-
-```
-
-span budget: LB 5 ms → TLS 20 ms → app 80 ms → cache 2 ms → DB 10 ms
-after deploy: DB span 10 ms → 60 ms (6×) ← an index-less query, found in one trace
-
-````
-
-**Q37. Implement consistent hashing with virtual nodes.**
-"Each physical node owns ~100–200 virtual positions on a 2^32 ring; a key goes to the first clockwise node. Adding a node only relocates the keys that land in its new slots (~1/N of them), versus ~75% for modulo. With **256 physical shards** I'd skip virtual nodes (granularity is already fine); for 8 nodes under uneven load, virtual nodes rebalance:
+**Q43. How does distributed tracing work?**
+**[SOURCE FACT]** A trace ID links spans across service and message boundaries. **[PROPOSED DESIGN]** Propagate it in HTTP headers and message metadata, record parentage and timing, and sample deliberately. Do not trust a client-provided trace ID without validation:
 
 ```java
-class ConsistentHash {
-    private final TreeMap<Integer, String> ring = new TreeMap<>();
-
-    void addNode(String node, int vnodes) {
-        for (int i = 0; i < vnodes; i++) {
-            int h = hash(node + "#" + i);        // virtual position on the ring
-            ring.put(h, node);
-        }
-    }
-    String get(String key) {
-        var e = ring.ceilingEntry(hash(key));     // next clockwise node
-        return (e != null ? e : ring.firstEntry()).getValue();
-    }
-}
-````
-
-**Q38. How do you defend against a cache stampede with single-flight?**
-"When a hot key misses, only one request should hit the DB; the rest wait on the first. A `ConcurrentHashMap<String, CompletableFuture>` per key gives that — on miss, create the future; everyone else awaits it. Combined with a 60 s TTL, the DB sees ~1 query per key per TTL window instead of 10k:
-
-```java
-CompletableFuture<V> f = inflight.computeIfAbsent(key,
-        k -> supplyAsync(() -> db.query(key))        // ONE DB call
-                .whenComplete((v, t) -> inflight.remove(key)));
-return f.get(200, MILLISECONDS);                     // the other 9,999 await it
+String traceId = tracer.startOrContinue(request.header("traceparent"));
+MDC.put("traceId", traceId);
 ```
 
-**Q39. Design for a 99.95% SLA — what does the number actually require?**
-"99.95% allows **26 minutes of downtime a year** — about 4 minutes a month. A single region typically gives 99.9–99.99% per component, and the chain multiplies: 0.999 × 0.999 × 0.999 ≈ 99.7%. So the number dictates the architecture: 99.95% forces redundancy at every layer — **3 replicas** of the DB, ≥2 app nodes per AZ, a cross-region failover plan — and game days proving it:
+**Q44. What breaks first at 100x scale?**
+**[ANALYSIS]** Usually the first hard limit is a shared stateful dependency: primary write capacity, connection pools, coordination, or hot partitions. **[PROPOSED DESIGN]** Shard by a deliberate key, move analytics off the transaction path, pre-aggregate where valid, and redesign cross-shard queries. **[ILLUSTRATIVE ASSUMPTION]** Moving from 10k to 1M QPS and using 256 shards illustrates the arithmetic; it is not a sizing recommendation.
 
-```
-single server:      99.9%  → 8.8 h/year down
-app + DB pairs:     99.99% → 52 min/year
-+ cross-region:     99.95% → 26 min/year ← target budget
-```
+**Q45. How do you choose a shard key?**
+**[ANALYSIS]** Prefer high cardinality, even distribution, and locality for data read together. Test for hot tenants and resharding. A key that is even globally can still produce a hot shard for one customer; mitigate with key splitting or dedicated capacity, accepting query fan-out.
 
-**Q40. Active-active vs active-passive across regions — and the split-brain risk?**
-"Active-passive is simple: one region serves, the other fails over — you eat failover time and lose writes in the gap. Active-active serves both but risks split-brain on writes — two regions accepting writes for the same key. The safe pattern: each region owns a disjoint shard of keys, and reads are eventual across regions. I'd start active-passive and go active-active only for the read path:
+**Q46. Design a notification system.**
+**[PROPOSED DESIGN]** Emit events to a durable queue, fan out by recipient, store delivery state, and send through WebSocket or push providers with rate limits, retries, deduplication, and a dead-letter path. **[ILLUSTRATIVE ASSUMPTION]** 1 million messages/day is about 11.6 messages/s on average; peak rate and provider limits must be measured rather than assumed.
 
-```
-active-passive: region A serves (99.95%), B standby (RTO ~minutes)
-active-active:  A owns keys 0–127, B owns 128–255 → no write conflict
-both: async replication; the failure I watch is lag + stale reads
-```
+**Q47. Design chat for 1 million concurrent connections.**
+**[PROPOSED DESIGN]** Use a connection tier for WebSockets, a broker partitioned by `conversation_id`, and a history store with the same access-oriented key. **[ILLUSTRATIVE ASSUMPTION]** At one message per 10 seconds per concurrent user, ingress is about 100k messages/s. Connection density, fan-out, broker limits, and reconnect behavior need load tests.
 
-**Q41. Design a circuit breaker for a failing dependency.**
-"Count recent failures; past a threshold (e.g. **>50% failures in a 10 s window**), open the circuit — requests fail fast (or serve a fallback) without touching the dependency, giving it time to recover. Half-open after a cooldown to probe with one request. `Resilience4j` or a hand-rolled state machine — the state machine is the interview answer:
-
-```
-CLOSED (normal) ── failures > 50% in 10 s ──> OPEN (fail fast, ~30 s)
-OPEN ── cooldown elapsed ──> HALF_OPEN (1 probe)
-HALF_OPEN ── probe ok ──> CLOSED    |    probe fails ──> OPEN
-```
-
-**Q42. What is non-negotiable observability for a system you hand to on-call?**
-"Three pillars, but the non-negotiables: every external call timed and tagged, every error countable, and alerts on _symptoms_ (user-facing error rate/latency), not causes (CPU). RED metrics — rate, errors, duration — with SLOs and burn-rate alerting. If p99 > 200 ms on 2% of traffic burns the error budget 14× faster than budgeted for 5 minutes, page me. The alert math is burn, not threshold:
+**Q48. How do you implement a money-moving saga?**
+**[PROPOSED DESIGN]** Make each step a local transaction, record durable state before progressing, and make every compensation idempotent. Retry from a recovery table or log. If the business cannot tolerate temporary inconsistency, keep the operation inside one transactional boundary instead of hiding the problem behind a saga.
 
 ```text
-SLO: 99.9% of requests with p99 < 200 ms over 30 days
-alert when: budget burns at 14× for 5 min → page
-logs: structured, keyed by traceId; metrics: RED per endpoint; traces: every span
+create order -> charge payment -> reserve inventory
+                                      failure -> refund -> cancel order
 ```
 
-**Q43. How does distributed tracing work end-to-end?**
-"A trace ID is generated at the edge and propagated through every hop — header on HTTP, key on messages. Each service emits spans (name, start, duration, parent); a collector aggregates them by trace ID, and a search tool reconstructs the waterfall. Without it, a 2 s request is a wall of 'who knows' — with it, the slow span is one click:
+**Q49. How do you size Kafka partitions?**
+**[ANALYSIS]** Measure producer rate, message size, consumer processing rate, replication, and recovery time. A first estimate is `partitions >= peak rate / sustainable rate per partition`, then add operational headroom. **[ILLUSTRATIVE ASSUMPTION]** 100k messages/s at 10k per partition implies at least 10 before headroom. Ordering is per partition, not global.
 
-```java
-MDC.put("traceId", request.getHeader("X-Trace-Id"));
-// every log line now carries the traceId, joinable to spans
-response.setHeader("X-Trace-Id", traceId);   // user pastes it in a bug report
-```
-
-**Q44. The interviewer says 'now make it 100x bigger.' What breaks first?**
-"The relational DB — connection pools exhaust and write throughput caps; 10k → 1M QPS cannot sit on one primary. So: shard by tenant/user key across **256 shards**, push reads to replicas, move analytics off the primary. The app tier scales horizontally — it's stateless. What _really_ breaks is coordination: cross-shard transactions, global queries, and hot shards (one tenant with 40% of traffic). Those force a data-model redesign — denormalize, pre-aggregate, accept per-shard eventual consistency:
-
-```
-10k QPS: Postgres primary + replicas + Redis
-1M QPS:  256 shards (≈3.9k QPS each) + cache tier + pre-aggregated analytics
-first break: the single primary; second: the join/global-query assumptions
-```
-
-**Q45. How do you choose a shard key, and what happens when it's wrong?**
-"A bad key creates hot shards — one tenant hammers shard 7 while 254 idle. Rules: high cardinality, even distribution, and collocate rows you read together (shard orders by `customer_id` so one customer's data lives on one shard). With **256 shards** at 10k QPS, per-shard load is ~39 QPS — until a hot tenant does 5k QPS on its single shard. Mitigations: split the hot key (`tenant_1a/1b/1c`) or give the tenant dedicated shards:
-
-```
-shard = hash(customer_id) % 256        // even for normal tenants
-hot tenant: 5k QPS → shard 7 saturated → split key: c_7_a, c_7_b, c_7_c
-tradeoff: per-tenant queries now fan out to 3 shards
-```
-
-**Q46. Design a notification system that sends 1M messages/day.**
-"Write path: services emit events to a queue; a dispatcher fans out per recipient and stores per-user state. Read path: the app checks an in-app inbox (DB) and pushes via WebSocket/APNs. 1M messages/day ≈ **11.6 msg/s** average, peaks ~100/s — trivial for Kafka. The interesting numbers are the providers: APNs/FCM throttle to ~2k–5k msg/s per connection, so rate-limit per provider and batch device tokens:
-
-```
-services ──> Kafka (burst 100k msg/min) ──> dispatcher ──> in-app inbox (DB)
-                                        └──────> APNs/FCM (rate-limited, retried)
-dedupe on messageId; store delivery status; dead-letter the undeliverable
-```
-
-**Q47. Design a chat system for 10M users with 1M concurrent.**
-"Connection tier: WebSocket servers hold ~50k–100k connections each → ~10–20 nodes for 1M concurrent. Messages go to a broker (Redis pub/sub or Kafka) that fans out to the connection servers of each room's members; history lives in a sharded store keyed by `conversation_id`. 1M concurrent × 1 msg/10 s ≈ **100k msg/s** — the broker must partition by conversation so no single partition exceeds ~10k msg/s:
-
-```
-1M connections / 50k per node ≈ 20 nodes
-user ──> conn node ──> broker (partitioned by conversation_id)
-                    └──> all conn nodes holding room members
-history: shard by conversation_id; unread counts: Redis + periodic flush
-```
-
-**Q48. Implement a saga — how do you keep money consistent across services?**
-"Every step is a local transaction with a compensating action; a failure triggers rollbacks in reverse order. The compensation must be idempotent and durable — a failed saga retries via a recovery table, not by hoping. For money I'd never use 2PC across services; the saga's compensation log is the source of truth:
-
-```java
-try {
-    orderService.create(order);        // step 1
-    paymentService.charge(order);      // step 2
-    inventoryService.reserve(order);   // step 3
-} catch (ReservationFailed e) {
-    paymentService.refund(order);      // compensate step 2 (idempotent)
-    orderService.cancel(order);        // compensate step 1
-}
-// each compensation is recorded in the saga log before it runs → crash-safe retry
-```
-
-**Q49. How do you size Kafka partitions for 100k msg/s?**
-"Throughput per partition is bounded by the slowest consumer in its group — a JSON-processing consumer does maybe 5–20k msg/s per instance. 100k msg/s with 10k msg/s per partition → ≥10 partitions, and I'd double it for headroom and rebalancing. Rule: partitions ≥ peak_rate / per-partition_throughput, and one partition per in-flight processing:
+**Q50. How do you defend a design to on-call?**
+**[PROPOSED DESIGN]** List the likely failure modes, detection signal, alert policy, runbook, and recovery test. Typical entries include cache stampede, pool exhaustion, region loss, consumer lag, and bad deploys. The answer is incomplete if it names components but cannot say what pages the team and what action is safe:
 
 ```text
-needed = 100_000 msg/s ÷ 10_000 msg/s per partition = 10 partitions → run 20
-replication: 3 replicas of each partition (2 brokers can fail, no data loss)
-ordering: only within a partition — order by key = user_id, not globally
-```
-
-**Q50. Design a system you already run — what pages you at 2 a.m., and how do you defend it?**
-"Defense is a numbered list of known failure modes, each with a detection and a response: (1) cache stampede on a viral key → single-flight + jitter, alerted by miss-rate; (2) DB connection pool exhaustion → bounded pool + read replicas, alerted by pool wait time; (3) region loss → failover in <5 min within the 99.95% budget, game-day tested; (4) a slow consumer filling the queue → backpressure + dead-letter, alerted by lag; (5) a bad deploy → canary + rollback in minutes. If I can't tell you which failure will page me, the design isn't done:
-
-```
-failure → detection (metric) → alert (burn) → response (runbook) → recovery
-p99 > 200 ms for 5 min → page on-call → trace to the span → rollback/cache-fix
-the number I defend: SLO 99.95%, error budget 26 min/year, burn-rate paging
+failure -> metric -> alert -> runbook -> recovery test
 ```
 
 #### Self-check
 
-- [ ] Junior: I can draw the building blocks, explain L4 vs L7, horizontal vs vertical scaling, statelessness, cache-aside, CDN, replication, and sharding — each with the number that makes it matter.
-- [ ] Mid: I can reason about cache invalidation and stampedes, size capacity from 10k QPS back-of-envelope, explain consistent hashing vs modulo, implement idempotency and rate limiting, and handle backpressure, retries, and replication lag.
-- [ ] Senior: I can design a URL shortener end-to-end with a latency budget and stampede defense, diagnose a p99 regression from a trace, meet a 99.95% SLA with 3 replicas and failover, choose a shard key across 256 shards, and pick sagas over 2PC.
-- [ ] Senior: I can state what breaks first at 100× scale, size Kafka partitions from RPS, and defend the five failure modes that page me at 2 a.m. with the metric that triggers each.
-- [ ] Verification: I can answer any of the 50 questions with a diagram or code block and at least one concrete number — QPS, p99, hit rate, shard count, or SLA.
+- [ ] Junior: I can explain the request path, scaling, state, cache, data stores, queues, replication, and sharding.
+- [ ] Mid: I can reason about invalidation, stampedes, capacity, idempotency, pool limits, retries, backpressure, and lag.
+- [ ] Senior: I can propose an end-to-end design, state assumptions, identify the first bottleneck, and defend failure handling with telemetry.
+- [ ] Verification: For each answer, I can name the requirement, trade-off, and measurement that would validate the design.
