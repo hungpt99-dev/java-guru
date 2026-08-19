@@ -1,6 +1,6 @@
 ---
-title: "Cẩn thận khi retry – đừng tự DDoS chính hệ thống của mình"
-description: "Retry không kiểm soát có thể gây cascading failure. Hướng dẫn retry đúng cách với exponential backoff, jitter, circuit breaker và deferred retry."
+title: "Thiết kế retry cho hệ thống phân tán"
+description: "Cách dùng retry có giới hạn, backoff, jitter, circuit breaker và xử lý trì hoãn để giảm cascading failure."
 pubDatetime: 2025-06-22T16:02:00+07:00
 featured: false
 draft: false
@@ -10,137 +10,117 @@ tags:
   - backend
 ---
 
-Retry không xấu. Nhưng nếu dùng sai cách, bạn có thể vô tình trở thành "hacker DDoS"... chính hệ thống của mình.
+[SOURCE FACT] Retry là việc thực hiện lại một thao tác sau khi thao tác đó thất bại. Retry hữu ích khi lỗi có tính tạm thời, chẳng hạn gián đoạn mạng, timeout hoặc lỗi tạm thời ở downstream. Retry không phải là lời giải chung cho mọi request thất bại.
 
-Retry – cơ chế lặp lại yêu cầu khi gặp lỗi – là một phần không thể thiếu trong thiết kế hệ thống phân tán. Khi một API gọi đến service khác thất bại do lỗi mạng, timeout hay lỗi tạm thời, ta thường cài đặt retry để tăng khả năng thành công.
+Điểm khó là retry tạo thêm tải đúng lúc dependency có thể đã không khỏe. Vì vậy, một policy hợp lý phải trả lời bốn câu hỏi: lỗi nào có thể retry, được phép tạo thêm bao nhiêu công việc, khi nào nên đưa công việc ra khỏi request path, và khi nào caller phải dừng gửi traffic? Bài viết này trình bày các quyết định đó cùng một số lựa chọn triển khai phổ biến.
 
-Từ một cơ chế hỗ trợ, retry dễ dàng trở thành thủ phạm gây ra hiệu ứng domino nếu thiếu kiểm soát.
+## 1. Vì sao retry có thể khuếch đại sự cố
 
-## 1. Khi retry là con dao hai lưỡi
+[ANALYSIS] Xét phép tính minh họa sau:
 
-Hãy tưởng tượng một tình huống đơn giản:
+- Service A gọi Service B.
+- Service B đang quá tải và trả về HTTP 503 (Service Unavailable).
+- Service A thực hiện 3 lần retry, mỗi lần cách nhau 100 ms.
+- 1.000 request đến Service A gần như cùng lúc.
 
-- Service A gọi sang Service B.
-- Service B bị nghẽn, trả về lỗi 503 (Service Unavailable).
-- Service A có retry 3 lần, mỗi lần delay 100ms.
+Mỗi request có thể tạo ra 4 lần gọi đến Service B: 1 lần ban đầu và 3 lần retry. Như vậy có thể có tới 4.000 lần gọi, với giả định mọi attempt đều đến được dependency. Lưu lượng retry có thể tiêu thụ phần capacity còn lại của Service B và lan lỗi sang các caller khác.
 
-Giờ nếu có 1000 request đến Service A cùng lúc:
+Phép tính này là giả định minh họa, không phải số đo production. Điều cần chú ý là hệ số khuếch đại: phải đánh giá retry policy trên tổng traffic của tất cả caller và instance, không chỉ trên một request.
 
-- Mỗi request thực hiện 4 lần gọi đến Service B (1 lần gốc + 3 lần retry).
-- Tổng cộng: 1000 × 4 = 4000 requests tới Service B.
-- Trong khi Service B đang quá tải, lượng retry này khiến nó nghẹt thở hoàn toàn, dẫn đến cascading failure.
+## 2. Các pattern retry cần tránh
 
-Retry không kiểm soát = tự bắn vào chân.
+[ANALYSIS] Những policy sau thường biến lỗi tạm thời thành outage lớn hơn:
 
-## 2. Các dạng retry nguy hiểm
+- Retry không delay gửi request tiếp theo khi dependency có thể vẫn đang xử lý nguyên nhân của lỗi trước.
+- Nhiều instance retry theo cùng lịch tạo ra traffic spike đồng bộ. Jitter, tức một khoảng trễ ngẫu nhiên nhỏ, giúp giảm sự đồng bộ này.
+- Retry vô hạn giữ công việc ở trạng thái đang xử lý, tiêu thụ connection và worker capacity, đồng thời làm queue bị nghẽn. Hành vi hoàn tất hoặc thất bại cũng trở nên khó dự đoán.
 
-- Retry không có delay → Gây dồn dập, tấn công liên tiếp khi gặp lỗi.
-- Retry đồng loạt từ nhiều instance → Cùng một lúc nhiều instance retry → spike traffic lớn → service đích sập.
-- Retry vô hạn → Có thể gây memory leak, queue nghẽn, tạo bão request không dừng.
+## 3. Quyết định lỗi có thể retry hay không
 
-## 3.5 Khi nào nên retry và khi nào không nên
+[PROPOSED DESIGN] Chỉ retry khi operation có khả năng hợp lý sẽ thành công mà không cần thay đổi input.
 
-Không phải lỗi nào cũng nên retry.
+Thường có thể retry, tùy contract của API:
 
-Nên retry khi:
+- Timeout và connection reset
+- HTTP 5xx như 500, 502, 503 và 504
+- Downstream service đang restart hoặc tạm thời không khả dụng
 
-- Lỗi tạm thời: timeout, connection reset
-- Lỗi hệ thống: HTTP 5xx như 500, 502, 503, 504
-- Trường hợp hệ thống downstream đang khởi động lại
+Thường không nên retry:
 
-Không nên retry khi:
+- Client error như 400, 401, 403 và 404
+- Business error như không tìm thấy user, không đủ tiền hoặc validation thất bại
+- HTTP 422 (Unprocessable Entity)
 
-- Lỗi client: 400, 401, 403, 404
-- Lỗi nghiệp vụ: user không tồn tại, hết tiền, validation sai
-- Lỗi 422 – Unprocessable Entity
+Chỉ nhìn status code là chưa đủ. Timeout không chứng minh server chưa xử lý write. Với operation không idempotent, cần dùng idempotency key và cơ chế deduplication ở server trước khi cân nhắc retry.
 
-✅ Chỉ nên retry nếu lỗi có khả năng tự hồi phục.
+## 4. Retry policy có giới hạn
 
-## 3.6 Retry như thế nào cho đúng?
+[PROPOSED DESIGN] Một policy thực tế nên quy định rõ từng giới hạn:
 
-1. Giới hạn số lần retry
-   Không bao giờ retry vô hạn. Tối đa 2–3 lần tùy ngữ cảnh.
+1. Giới hạn số attempt. Không retry vô hạn. Mức tối đa phụ thuộc request deadline và dependency; ví dụ nguồn dùng khoảng 2–3 retry chỉ là một khoảng minh họa.
+2. Thêm backoff và jitter. Exponential backoff tăng thời gian chờ sau mỗi lần thất bại; linear backoff cũng là một lựa chọn. Thêm jitter để các caller độc lập không retry cùng lúc.
+3. Chỉ retry operation an toàn. GET thường idempotent và PUT thường được thiết kế idempotent, nhưng API contract mới là căn cứ quyết định. POST chỉ nên retry khi operation hỗ trợ idempotency, chẳng hạn qua idempotency key.
+4. Đặt total deadline. Timeout cho từng attempt và deadline tổng của request phải ngăn retry tiêu thụ capacity của caller không giới hạn.
+5. Ghi log quyết định retry. Lưu nguyên nhân lỗi, số attempt, timestamp, delay đã chọn và kết quả cuối. Không ghi dữ liệu request nhạy cảm vào log.
 
-2. Dùng delay và jitter
-   Thêm khoảng trễ giữa các lần retry (exponential/linear), kết hợp jitter để tránh đồng loạt.
+## 5. Circuit breaker và deferred retry
 
-3. Chỉ retry hành động idempotent
-   Ví dụ: GET, PUT an toàn hơn POST, tránh tạo nhiều đơn hàng, chuyển tiền trùng.
+[PROPOSED DESIGN] Circuit breaker dừng gọi dependency sau khi dependency thất bại liên tục. Ở trạng thái open, request fail fast. Sau một khoảng chờ đã cấu hình, breaker chuyển sang half-open và cho phép một số probe giới hạn. Breaker chỉ đóng lại khi dependency có đủ request thành công. Đây là cơ chế điều tiết traffic, không thay thế timeout hoặc giới hạn retry.
 
-4. Sử dụng circuit breaker
-   Ngắt tạm khi service downstream lỗi liên tục, thử lại sau.
+Với công việc không cần phản hồi ngay, dùng deferred retry. Lưu công việc vào queue hoặc database rồi xử lý bằng background consumer khi dependency hồi phục. Giới hạn queue, áp dụng backpressure và định nghĩa dead-letter path cho item vượt quá retry policy. Cách này ngăn request path tạo thêm tải trong lúc có sự cố.
 
-5. Deferred Retry – Retry thông minh qua job
-   Thay vì retry ngay, đưa vào queue hoặc DB rồi xử lý bằng background job khi hệ thống ổn định. Tránh làm quá tải thêm lúc hệ thống đang gặp sự cố.
+Retry rate cũng cần giới hạn. Circuit breaker có thể dừng một caller, nhưng cả fleet caller vẫn có thể tạo ra lượng retry đáng kể. Khi phù hợp, hãy áp dụng rate limit theo client, operation hoặc toàn hệ thống.
 
-6. Log đầy đủ
-   Ghi lại nguyên nhân lỗi, số lần retry, thời điểm retry để dễ debug và cảnh báo.
+## 6. Quyết định khi nào thử lại
 
-## 3.7 Làm sao biết khi nào retry lại được?
+[PROPOSED DESIGN] Dùng các tín hiệu mô tả dependency và request:
 
-1. Dùng circuit breaker
-   Ngắt kết nối tạm thời nếu service đích lỗi liên tục. Sau đó mở dần lại (half-open).
+- Tôn trọng `Retry-After` nếu API cung cấp và giá trị đó vẫn nằm trong request deadline.
+- Dùng health check và service metrics làm tín hiệu vận hành, không xem đó là bảo đảm request tiếp theo sẽ thành công. Các hệ thống metrics như Prometheus và Grafana giúp quan sát recovery, latency và xu hướng lỗi.
+- Để circuit breaker điều khiển việc khôi phục dần thông qua các probe ở trạng thái half-open.
+- Tiếp tục rate-limit retry traffic trong khi dependency hồi phục.
 
-2. Quan sát health check hoặc metric
-   Kiểm tra /health hoặc số liệu từ Prometheus, Grafana để biết hệ thống đã phục hồi chưa.
+## 7. Các lựa chọn triển khai
 
-3. Dựa vào header Retry-After
-   Một số API chuẩn trả về thời gian gợi ý để thử lại.
+[SOURCE FACT] Một số lựa chọn phổ biến:
 
-4. Giới hạn tốc độ retry (rate limit)
-   Tránh trường hợp retry dồn dập khiến service quá tải trở lại.
+Java và Spring:
 
-## 4. Công cụ hỗ trợ triển khai retry hiệu quả
+- Spring Retry cung cấp `@Retryable`, backoff có thể cấu hình và recovery qua `@Recover`.
+- Resilience4j cung cấp retry, circuit breaker, rate limiter và bulkhead, đồng thời tích hợp với Spring Boot và Micrometer.
+- Kafka retry topic chuyển record lỗi sang topic riêng để không block main consumer. Dead-letter topic xử lý record vượt quá policy.
+- Quartz và Spring Task có thể lên lịch background work dạng deferred.
 
-Java / Spring ecosystem:
+Nền tảng khác:
 
-- Spring Retry: Hỗ trợ annotation @Retryable, cấu hình delay, backoff, fallback với @Recover.
-- Resilience4j: Gộp retry, circuit breaker, rate limiter, bulkhead trong cùng thư viện. Tích hợp tốt với Spring Boot và Micrometer.
-- Kafka Retry Topic: Tách retry ra topic riêng có delay, tránh block consumer chính. Kết hợp với dead-letter topic để không mất dữ liệu.
-- Quartz / Spring Task: Dùng để lên lịch xử lý retry dạng deferred background job.
+- Python: Tenacity cho retry decorator và Celery cho retry policy của async task.
+- Node.js: `retry`, Bull và Agenda hỗ trợ policy dựa trên thời gian hoặc số attempt.
+- Go: `go-retryablehttp` và `backoff` cung cấp các building block cho retry và backoff.
 
-Ngôn ngữ/platform khác:
+Cloud service:
 
-- Python: tenacity: retry decorator mạnh mẽ; celery: có built-in retry policy cho task async
-- Node.js: retry, bull, agenda: hỗ trợ retry theo thời gian và số lần
-- Go: go-retryablehttp, backoff: đơn giản, hiệu quả
+- AWS: SQS kết hợp Lambda và dead-letter queue (DLQ), hoặc retry và catch state trong Step Functions.
+- GCP: Cloud Tasks, Pub/Sub retry kết hợp DLQ, hoặc retry logic trong Workflows.
+- Azure: retry policy của Service Bus hoặc retry support của Azure Durable Functions.
 
-Cloud-native:
+Đây là các lựa chọn triển khai, không phải khuyến nghị dùng tất cả cơ chế cùng lúc. Hãy chọn bộ cơ chế nhỏ nhất phù hợp với delivery guarantee, yêu cầu latency và failure mode của operation.
 
-- AWS: SQS + Lambda + DLQ; Step Functions với retry/catch block
-- GCP: Cloud Tasks, Pub/Sub retry + DLQ; Workflows có retry logic
-- Azure: Service Bus với retry policy cấu hình sẵn; Azure Durable Functions hỗ trợ retry built-in
+## 8. Tình huống minh họa
 
-## 5. Case thực tế: Cứu hệ thống mùa cao điểm nhờ retry có chiến lược
+[ANALYSIS; ILLUSTRATIVE ASSUMPTION] Trong một đợt cao điểm khuyến mại, payment dependency bị timeout trong khi batch job vẫn tiếp tục gửi request. Giả định job được cấu hình 5 retry, không delay và không jitter, và retry traffic góp phần gây quá tải. Tác động thực tế phụ thuộc capacity, concurrency và cách dependency xử lý; các con số sau không mô tả một incident đã quan sát.
 
-Bối cảnh:
-Cuối năm, hệ thống chịu tải lớn do chiến dịch khuyến mãi. Một service xử lý thanh toán bị quá tải, trả về lỗi timeout liên tục. Trong khi đó, một batch job tự động đang chạy hàng ngàn request mỗi phút, có retry 5 lần, không delay, không jitter.
+Một thiết kế an toàn hơn sẽ:
 
-Hậu quả:
-Retry dồn dập khiến service thanh toán tắc nghẽn hoàn toàn → ảnh hưởng dây chuyền các hệ thống khác → downtime 15 phút trong giờ cao điểm.
+- Giảm retry budget của operation xuống 2 lần retry.
+- Thêm exponential backoff và jitter.
+- Đặt circuit breaker quanh các lệnh gọi dependency của batch job.
+- Đưa non-interactive work vào queue và xử lý bằng background consumer.
+- Theo dõi timeout rate, latency, queue depth và final failure rate.
 
-Cách xử lý:
+Mục tiêu là khôi phục có kiểm soát thay vì tạo thêm synchronous load. Không thể suy ra hệ thống ổn định trong 10 phút từ ví dụ này; tuyên bố như vậy cần số đo từ hệ thống thực tế.
 
-- Giảm số lần retry còn 2
-- Thêm exponential backoff và jitter
-- Áp dụng circuit breaker cho job
-- Di chuyển các retry sang hàng đợi và xử lý qua background job
+## 9. Kết luận
 
-Kết quả:
-Hệ thống ổn định lại sau chưa đầy 10 phút. Retry không còn gây "nghẹt thở" cho backend.
+Retry là quyết định về capacity và correctness, không chỉ là tiện ích phía client. Chỉ retry các lỗi có khả năng tự hồi phục, giới hạn số attempt và tổng thời gian, phân tán attempt bằng backoff và jitter, đồng thời bảo vệ dependency bằng circuit breaker và rate limit. Khi không cần phản hồi ngay, hãy chuyển công việc bền vững sang deferred processing.
 
-Bài học:
-
-Retry không phải để "cố đấm ăn xôi", mà là để giúp hệ thống hồi phục có kiểm soát.
-
-## 6. Kết luận
-
-Retry là một công cụ mạnh nếu được dùng đúng cách. Nhưng nếu triển khai thiếu kiểm soát, nó có thể phá vỡ hệ thống nhanh hơn cả lỗi ban đầu.
-
-Hãy nhớ:
-
-- Retry chỉ dùng cho lỗi tạm thời, có khả năng tự hồi phục
-- Giới hạn retry, thêm delay + jitter, và luôn có circuit breaker
-- Retry hiệu quả không nằm ở việc "gọi lại bao nhiêu lần", mà ở chỗ "biết lúc nào nên dừng và chờ đợi"
-
-Retry là thuốc – dùng đúng thì chữa bệnh, dùng sai thì đầu độc chính hệ thống của bạn.
+Câu hỏi quan trọng không chỉ là “request này nên chạy lại bao nhiêu lần?” mà còn là “dependency có thể nhận thêm bao nhiêu tải, và khi nào caller nên dừng rồi chờ?”

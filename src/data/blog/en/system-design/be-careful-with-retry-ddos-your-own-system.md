@@ -1,6 +1,6 @@
 ---
-title: "Be Careful with Retry – Don't DDoS Your Own System"
-description: "Uncontrolled retries can cause cascading failures. A guide to proper retry with exponential backoff, jitter, circuit breaker, and deferred retry."
+title: "Designing Retries for Distributed Systems"
+description: "How bounded retries, backoff, jitter, circuit breakers, and deferred processing reduce cascading failures."
 pubDatetime: 2025-06-22T16:02:00+07:00
 featured: false
 draft: false
@@ -10,137 +10,117 @@ tags:
   - backend
 ---
 
-Retry isn't bad. But if used incorrectly, you might accidentally become a "DDoS hacker"... against your own system.
+[SOURCE FACT] Retry repeats an operation after a failure. It is useful when a failure is transient, such as a network interruption, timeout, or temporary downstream error. It is not a general answer to every failed request.
 
-Retry — the mechanism of repeating requests on failure — is an indispensable part of distributed system design. When an API call to another service fails due to network errors, timeouts, or temporary errors, we typically implement retry to increase the chance of success.
+The hard part is that a retry adds load precisely when a dependency may already be unhealthy. A sound policy therefore has to answer four questions: which failures are retryable, how much additional work is allowed, when should work move out of the request path, and when should the caller stop sending traffic? This article covers those decisions, plus common implementation options.
 
-From a supporting mechanism, retry easily becomes the culprit causing a domino effect if uncontrolled.
+## 1. Why retries can amplify an incident
 
-## 1. When Retry Is a Double-Edged Sword
-
-Imagine a simple scenario:
+[ANALYSIS] Consider this illustrative calculation:
 
 - Service A calls Service B.
-- Service B is congested, returns 503 (Service Unavailable).
-- Service A has 3 retries, each with a 100ms delay.
+- Service B is overloaded and returns HTTP 503 (Service Unavailable).
+- Service A makes 3 retries, each after a 100 ms delay.
+- 1,000 requests reach Service A at roughly the same time.
 
-Now if 1000 requests arrive at Service A simultaneously:
+Each request can produce 4 calls to Service B: the original call plus 3 retries. That is up to 4,000 calls, assuming every attempt reaches the dependency. The retry traffic can consume the remaining capacity of Service B and propagate the failure to other callers.
 
-- Each request makes 4 calls to Service B (1 original + 3 retries).
-- Total: 1000 × 4 = 4000 requests to Service B.
-- While Service B is already overloaded, this retry volume suffocates it completely, leading to cascading failure.
+The calculation is an illustrative assumption, not a production measurement. Its point is the multiplier: a retry policy must be evaluated against aggregate traffic across all callers and instances, not only against one request.
 
-Uncontrolled retry = shooting yourself in the foot.
+## 2. Failure patterns to avoid
 
-## 2. Dangerous Retry Patterns
+[ANALYSIS] These policies commonly turn a transient problem into a larger outage:
 
-- Retry without delay → Causes flooding, consecutive attacks on error.
-- Simultaneous retry from multiple instances → Multiple instances retrying at the same time → large traffic spike → target service crashes.
-- Infinite retry → Can cause memory leaks, queue congestion, unstoppable request storms.
+- Retrying without a delay sends another request while the dependency is still processing the first failure.
+- Retrying from many instances on the same schedule creates a synchronized traffic spike. Jitter, or a small random delay, reduces this synchronization.
+- Retrying indefinitely keeps work in flight, consumes connection and worker capacity, and can congest queues. It also makes completion and failure behavior difficult to reason about.
 
-## 3.5 When to Retry and When Not To
+## 3. Decide whether a failure is retryable
 
-Not all errors should be retried.
+[PROPOSED DESIGN] Retry only when the operation has a reasonable chance of succeeding without a change to its input.
 
-Should retry when:
+Usually retryable, depending on the API contract:
 
-- Temporary errors: timeout, connection reset
-- System errors: HTTP 5xx like 500, 502, 503, 504
-- Downstream system is restarting
+- Timeouts and connection resets
+- HTTP 5xx responses such as 500, 502, 503, and 504
+- A downstream service that is restarting or temporarily unavailable
 
-Should NOT retry when:
+Usually not retryable:
 
-- Client errors: 400, 401, 403, 404
-- Business errors: user doesn't exist, insufficient funds, validation errors
-- Error 422 – Unprocessable Entity
+- Client errors such as 400, 401, 403, and 404
+- Business errors such as an unknown user, insufficient funds, or failed validation
+- HTTP 422 (Unprocessable Entity)
 
-✅ Only retry if the error has a chance of self-recovery.
+Status codes alone are not enough. A timeout does not prove that the server did not process a write. For non-idempotent operations, use an idempotency key and server-side deduplication before considering a retry.
 
-## 3.6 How to Retry Correctly?
+## 4. A bounded retry policy
 
-1. Limit the number of retries
-   Never retry infinitely. Maximum 2–3 times depending on context.
+[PROPOSED DESIGN] A practical policy should make each limit explicit:
 
-2. Use delay and jitter
-   Add delays between retries (exponential/linear), combined with jitter to avoid simultaneous retries.
+1. Bound attempts. Never retry forever. The appropriate maximum depends on the request deadline and dependency, but the source example uses 2–3 retries as an illustrative range.
+2. Add backoff and jitter. Exponential backoff increases the wait after successive failures; linear backoff is another option. Add jitter so independent callers do not retry together.
+3. Retry only safe operations. GET is normally idempotent and PUT is commonly designed to be idempotent, but the API contract is authoritative. POST may be retried only when the operation supports idempotency, for example through an idempotency key.
+4. Enforce a total deadline. Per-attempt timeouts and the overall request deadline should prevent retries from consuming unbounded caller capacity.
+5. Log the decision. Record the failure reason, attempt count, timestamps, selected delay, and final outcome. Avoid logging sensitive request data.
 
-3. Only retry idempotent actions
-   Example: GET, PUT are safer than POST, avoid creating multiple orders or duplicate transfers.
+## 5. Circuit breakers and deferred retry
 
-4. Use circuit breaker
-   Temporarily disconnect when downstream service fails continuously, retry later.
+[PROPOSED DESIGN] A circuit breaker stops sending calls after a dependency has failed repeatedly. In the open state, calls fail fast. After a configured wait, the breaker enters half-open and permits a limited probe. It closes again only when the dependency shows sufficient success. This is a traffic-control mechanism, not a replacement for timeouts or a retry limit.
 
-5. Deferred Retry – Smart retry via jobs
-   Instead of retrying immediately, put into queue or DB and process via background job when the system stabilizes. Avoid adding more load when the system is already in trouble.
+For work that does not need an immediate response, use deferred retry. Persist the work in a queue or database and process it with a background consumer when the dependency has recovered. Bound the queue, apply backpressure, and define a dead-letter path for items that exceed their retry policy. This keeps the request path from adding load during an incident.
 
-6. Log thoroughly
-   Record error causes, retry count, retry timestamps for easy debugging and alerting.
+Retry rate also needs a limit. A circuit breaker can stop one caller, but a fleet of callers can still produce substantial retry traffic. Apply per-client, per-operation, or global rate limits where appropriate.
 
-## 3.7 How to Know When to Retry Again?
+## 6. Decide when to try again
 
-1. Use circuit breaker
-   Temporarily disconnect if target service fails continuously. Then gradually reopen (half-open).
+[PROPOSED DESIGN] Use signals that describe the dependency and the request:
 
-2. Observe health checks or metrics
-   Check /health or data from Prometheus, Grafana to know if the system has recovered.
+- Honor `Retry-After` when the API provides it and the value fits within the request deadline.
+- Use health checks and service metrics as operational signals, not as a guarantee that the next request will succeed. Metrics systems such as Prometheus and Grafana can help expose recovery, latency, and error trends.
+- Let the circuit breaker control gradual recovery through its half-open probes.
+- Keep retry traffic rate-limited while the dependency recovers.
 
-3. Based on Retry-After header
-   Some standard APIs return suggested retry timing.
+## 7. Implementation options
 
-4. Rate limit retries
-   Avoid flooding retries that overload the service again.
+[SOURCE FACT] Common options include:
 
-## 4. Tools Supporting Effective Retry Implementation
+Java and Spring:
 
-Java / Spring ecosystem:
+- Spring Retry provides `@Retryable`, configurable backoff, and recovery through `@Recover`.
+- Resilience4j provides retry, circuit breaker, rate limiter, and bulkhead components, with Spring Boot and Micrometer integrations.
+- Kafka retry topics move failed records to a dedicated topic so the main consumer is not blocked. A dead-letter topic handles records that exceed the policy.
+- Quartz and Spring Task can schedule deferred background work.
 
-- Spring Retry: Supports @Retryable annotation, configurable delay, backoff, fallback with @Recover.
-- Resilience4j: Combines retry, circuit breaker, rate limiter, bulkhead in one library. Integrates well with Spring Boot and Micrometer.
-- Kafka Retry Topic: Separate retry into a dedicated topic with delay, avoiding blocking the main consumer. Combine with dead-letter topic to prevent data loss.
-- Quartz / Spring Task: Used to schedule deferred background job retries.
+Other platforms:
 
-Other languages/platforms:
+- Python: Tenacity for retry decorators and Celery for asynchronous task retry policies.
+- Node.js: `retry`, Bull, and Agenda support retry policies based on time or attempt count.
+- Go: `go-retryablehttp` and `backoff` provide retry and backoff building blocks.
 
-- Python: tenacity: powerful retry decorator; celery: built-in retry policy for async tasks
-- Node.js: retry, bull, agenda: support time-based and count-based retry
-- Go: go-retryablehttp, backoff: simple, effective
+Cloud services:
 
-Cloud-native:
+- AWS: SQS with Lambda and a dead-letter queue (DLQ), or Step Functions retry and catch states.
+- GCP: Cloud Tasks, Pub/Sub retry with a DLQ, or Workflows retry logic.
+- Azure: Service Bus retry policies or Azure Durable Functions retry support.
 
-- AWS: SQS + Lambda + DLQ; Step Functions with retry/catch blocks
-- GCP: Cloud Tasks, Pub/Sub retry + DLQ; Workflows with retry logic
-- Azure: Service Bus with pre-configured retry policy; Azure Durable Functions with built-in retry support
+These are implementation options, not a recommendation to add every mechanism. Select the smallest set that matches the delivery guarantee, latency requirement, and failure mode of the operation.
 
-## 5. Real Case: Saving the System During Peak Season with Strategic Retry
+## 8. Illustrative scenario
 
-Context:
-Year-end, the system is under heavy load due to a promotional campaign. A payment processing service is overloaded, continuously returning timeout errors. Meanwhile, an automated batch job is running thousands of requests per minute, with 5 retries, no delay, no jitter.
+[ANALYSIS; ILLUSTRATIVE ASSUMPTION] During a promotional peak, a payment dependency is timing out while a batch job continues sending requests. Assume the job is configured with 5 retries, no delay, and no jitter, and that the resulting retry traffic contributes to overload. The exact impact depends on capacity, concurrency, and the dependency's behavior; the following numbers are not an observed incident.
 
-Consequences:
-Flooding retries cause the payment service to completely congest → cascading impact on other systems → 15 minutes of downtime during peak hours.
+A safer redesign would:
 
-Resolution:
+- Reduce the retry budget to 2 retries for the operation.
+- Add exponential backoff and jitter.
+- Put a circuit breaker around the batch job's dependency calls.
+- Move non-interactive work to a queue and process it with a background consumer.
+- Monitor timeout rate, latency, queue depth, and final failure rate.
 
-- Reduced retries to 2
-- Added exponential backoff and jitter
-- Applied circuit breaker to the job
-- Moved retries to queues and processed via background jobs
+The intended result is controlled recovery rather than additional synchronous load. Any claim such as stabilization within 10 minutes would require measurements from a real system and should not be inferred from this example.
 
-Result:
-System stabilized in under 10 minutes. Retries no longer "suffocated" the backend.
+## 9. Conclusion
 
-Lesson:
+Retry is a capacity and correctness decision, not merely a client-side convenience. Use it for failures that may recover, bound both attempts and total time, spread attempts with backoff and jitter, and protect dependencies with circuit breakers and rate limits. Move durable work to deferred processing when an immediate response is unnecessary.
 
-Retry is not about "forcing it through", but about helping the system recover in a controlled manner.
-
-## 6. Conclusion
-
-Retry is a powerful tool when used correctly. But if implemented without control, it can break the system faster than the original error.
-
-Remember:
-
-- Retry only for temporary errors with self-recovery potential
-- Limit retries, add delay + jitter, and always have a circuit breaker
-- Effective retry isn't about "how many times to call again", but about "knowing when to stop and wait"
-
-Retry is medicine — used correctly, it heals; used incorrectly, it poisons your own system.
+The key question is not only “how many times should this request run?” It is also “what load can the dependency accept, and when should this caller stop and wait?”
