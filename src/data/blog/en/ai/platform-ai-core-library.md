@@ -1,6 +1,6 @@
 ---
 title: "AI-8 Shared ai-core Library (BYOK, retry, audit)"
-description: "FinPay platform AI integration: platform-ai-core-library."
+description: "AI integration for the FinPay platform: platform-ai-core-library."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -11,17 +11,17 @@ Repo: <https://github.com/finpay-lab/platform>
 
 ## Why a shared AI library
 
-Every FinPay team was rolling its own LLM integration: one team called OpenAI directly from a controller, another baked the API key into `application.yml`, a third retried failures by throwing the event back into the dead-letter queue with no timeout. Three services, three different `JsonObject` parsings, zero shared telemetry, and an audit trail that was basically `logger.info("done")`.
+Every FinPay team had rolled its own LLM integration: one called OpenAI directly from a controller, another baked the API key into `application.yml`, and a third retried failures by throwing the event back into the dead-letter queue with no timeout. Three services, three different ways of parsing `JsonObject`, zero shared telemetry, and an audit trail that was basically `logger.info("done")`.
 
 We shipped `platform-ai-core-library` to make AI usage boring, safe, and observable across the platform. It is a Spring Boot module built around hexagonal architecture — `domain/` holds the ports and use cases, `infrastructure/` holds the adapters (Kafka, model providers, OpenSearch, Vault). The repository link is at the bottom too: <https://github.com/finpay-lab/platform>.
 
 ## Guardrails, non-negotiable
 
-Before any code, the rules that shape everything:
+Before any code, here are the rules that shape everything:
 
-1. **AI is not a money decider.** An LLM output can *enrich* a decision — a fraud score, a suggested limit, a risk label — but the decision to move or block money is taken by deterministic rules and humans. The library never returns "approve/reject"; it returns a scored, labeled, auditable observation.
+1. **AI is not a money decider.** An LLM output can *enrich* a decision — a fraud score, a suggested limit, a risk label — but the decision to move or block money is made by deterministic rules and humans. The library never returns "approve/reject"; it returns a scored, labeled, auditable observation.
 2. **Idempotent by `eventId`.** Every AI call is keyed by a caller-supplied `eventId`. Redelivery, retry, double-click — one event produces exactly one decision.
-3. **Timeout, retry, circuit breaker.** No unbounded blocking on an HTTP call. TimeLimit, bounded retries with backoff, and a circuit breaker that degrades gracefully instead of hammering a failing provider.
+3. **Timeout, retry, circuit breaker.** No HTTP call may block without a time bound. TimeLimit, bounded retries with backoff, and a circuit breaker degrade gracefully instead of hammering a failing provider.
 4. **BYOK — the key never lives in our code or logs.** Each tenant brings its own key (`BYOK`), held in Vault/secret manager, resolved by reference, rotated, and *never* serialized into logs, traces, or audit records.
 5. **Audit every decision.** Prompt hash, model, latency, cost, key id, verdict — persisted to OpenSearch for queryable forensics.
 
@@ -41,7 +41,7 @@ Before any code, the rules that shape everything:
                  └── VaultCredentialResolver      (BYOK by reference)
 ```
 
-The use case in `domain/` depends only on ports. Swapping OpenAI for Bedrock is a one-file adapter change.
+The use case in `domain/` depends only on ports. Swapping OpenAI for Bedrock is a one-file change to the adapter.
 
 ## WRONG then RIGHT: credentials (BYOK)
 
@@ -61,7 +61,7 @@ public class MoneyFairyService {
 }
 ```
 
-What's wrong: the key is in the repo, in classpath scans, in every log line, impossible to rotate without a deploy, and appears in GitHub's secret scanner output for the whole internet.
+What's wrong: the key is in the repo, in classpath scans, and in every log line; it is impossible to rotate without a deploy, and it shows up in GitHub's secret-scanner output for the whole internet.
 
 ### RIGHT
 
@@ -151,7 +151,7 @@ public String callLlm(String prompt) throws IOException, InterruptedException {
 }
 ```
 
-What's wrong: a 30-minute thread hold per call, a recursive retry that doubles latency on every failure, no circuit state — when the provider is down we burn the whole thread pool waiting on a dead endpoint.
+What's wrong: a 30-minute thread hold per call, a recursive retry that doubles latency on every failure, no circuit state — when the provider is down, we burn the whole thread pool waiting on a dead endpoint.
 
 ### RIGHT
 
@@ -232,7 +232,7 @@ public void on(TxEvent event) {
 log.info("AI said: " + prompt + " -> " + rawResponse);
 ```
 
-Raw prompts (PII) and unredacted responses in stdout, unsearchable, no key id, no model version, no cost.
+Raw prompts (PII) and unredacted responses land in stdout — unsearchable, with no key id, no model version, no cost.
 
 ### RIGHT
 

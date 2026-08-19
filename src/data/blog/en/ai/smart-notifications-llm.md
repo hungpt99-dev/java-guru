@@ -70,7 +70,7 @@ Kafka topic ───────►│          notification-service           
                     └───────────────────────────────────────────┘
 ```
 
-Spring Boot consumes a Kafka topic. The code is hexagonal: business rules live in `domain/` as ports (interfaces), and every external thing — Kafka, the LLM provider, OpenSearch, the persistence layer — lives in `infrastructure/` as adapters. The domain never imports an SDK. You can reason about the money logic without network access to anything.
+Spring Boot consumes a Kafka topic. The code is hexagonal: business rules live in `domain/` as ports (interfaces), and every external thing — Kafka, the LLM provider, OpenSearch, the persistence layer — lives in `infrastructure/` as adapters. The domain never imports an SDK. You can reason about the money logic without any network access.
 
 ```
 src/main/java/dev/finpay/notifications/
@@ -120,7 +120,7 @@ Hexagonal detail: the Kafka adapter maps the wire JSON to this record in `infras
 
 ## Step 2 — Deduplicate by eventId (idempotency)
 
-Kafka at-least-once semantics means the same event *will* arrive twice. If we generate and send twice, the customer gets a duplicate, or worse, the audit trail gets two contradictory decisions. So the very first thing the pipeline does is claim the event.
+Kafka at-least-once semantics means the same event *will* arrive twice. If we generate and send twice, the customer gets a duplicate, or worse, the audit trail ends up with two contradictory decisions. So the very first thing the pipeline does is claim the event.
 
 ```java
 @Transactional
@@ -143,13 +143,13 @@ public Decision decide(PaymentSettled event) {
 
 Rules that fell out of incidents:
 
-- The claim is keyed by `eventId` only. Replays are detected before *any* external call.
+- The claim is keyed by `eventId` only. Replays are detected before *any* external call is made.
 - On failure we release the claim and let Kafka redeliver — the retry budget lives in the consumer, not in the pipeline.
 - The decision is recorded regardless of outcome. **Audit every decision** is not optional.
 
 ## Step 3 — Idempotent request IDs against the LLM
 
-Even with event-level dedup, the first attempt can time out at the network while the provider *did* answer. Now redelivery generates a second copy. The fix is a per-event idempotency key passed to the provider.
+Even with event-level dedup, the first attempt can time out at the network layer even though the provider *did* answer. Redelivery then generates a second copy. The fix is a per-event idempotency key passed to the provider.
 
 ```java
 // RIGHT — request idempotency at the HTTP layer
@@ -166,7 +166,7 @@ var req = CopyRequest.builder()
     .build();
 ```
 
-Same event → same key → same copy (or a cached one). Combined with the dedup store, the whole path from Kafka to copy is idempotent end to end.
+Same event → same key → same copy (or a cached one). Combined with the dedup store, the whole path from Kafka to the copy is idempotent end to end.
 
 ## Step 4 — The contract: facts in, JSON out, money locked
 
@@ -202,7 +202,7 @@ public record GeneratedCopy(
 }
 ```
 
-The JSON contract plus the enum means `infrastructure/` deserializes with Jackson, and a shape violation fails fast at the adapter boundary — before anything reaches the customer.
+The JSON contract plus the enum means `infrastructure/` can deserialize with Jackson, and any shape violation fails fast at the adapter boundary — before anything reaches the customer.
 
 ## Step 5 — Timeout, retry, circuit breaker
 
@@ -253,11 +253,11 @@ public Optional<GeneratedCopy> generate(PaymentSettled event) {
 
 Three behaviors to notice:
 
-- **Timeout**: hard read timeout; the sender thread is never hostage to the provider.
+- **Timeout**: hard read timeout; the sender thread is never held hostage by the provider.
 - **Retry**: happens at the Kafka consumer level with bounded attempts and backoff. The copy pipeline itself does not loop.
 - **Circuit breaker**: when the LLM degrades, we fall back to a human-approved template filled with the *same facts*. The customer still gets a correct message; it just has less personality.
 
-The fallback exists because of the guardrail **"AI is not a money decider."** The template cannot exist for every case, but the fallback is always fact-accurate, which is the property that actually matters.
+The fallback exists because of the guardrail **"AI is not a money decider."** A single template cannot exist for every case, but the fallback is always fact-accurate — which is the property that actually matters.
 
 ## Step 6 — BYOK: bring your own key, never our problem
 
@@ -279,7 +279,7 @@ private void maskKey(String key) {
 }
 ```
 
-The client adapter attaches the key as an `Authorization: Bearer` header on each request and discards it. If a key leaks in a prompt, in a log line, or in an exception, that is a failing test, not a Monday-morning surprise. The request body is logged with the key stripped by a Jackson filter registered for the LLM DTOs.
+The client adapter attaches the key as an `Authorization: Bearer` header on each request and discards it. If a key leaks into a prompt, a log line, or an exception, that is a failing test, not a Monday-morning surprise. When the request body is logged, the key is stripped out by a Jackson filter registered for the LLM DTOs.
 
 ## Step 7 — OpenSearch: the audit trail is a product
 
@@ -315,9 +315,9 @@ The retention rule: 90 days hot in OpenSearch, then cold storage. If compliance 
 ## What we learned
 
 1. **The prompt is code, review it like code.** We version prompts in the repo, alongside tests that assert the "unsatisfiable" path and the "no invented numbers" rule. A model prompt is a maintenance surface, exactly like a method signature.
-2. **Determinism is the product.** The customer-facing text may vary, but the *facts* must never. Every byte of a money number is written by the domain, never by the model.
+2. **Determinism is the product.** The customer-facing text may vary, but the *facts* must never change. Every byte of a money number is written by the domain, never by the model.
 3. **Fallbacks are not a hack.** The template fallback is the single most important resilience decision we made. When the LLM is down, notifications still go out, correct and on time.
-4. **Audit beats prediction.** We cannot predict what a model will say, but we can record everything it did say and search it later. That asymmetry is the entire reason OpenSearch is in the architecture.
+4. **Audit beats prediction.** We cannot predict what a model will say, but we can record everything it actually said and search it later. That asymmetry is the entire reason OpenSearch is in the architecture.
 5. **`eventId` is your friend.** The same discipline that makes payments idempotent makes LLM copy idempotent. None of this works without the dedup store, and it was the cheapest code we wrote.
 
 The repository is <https://github.com/finpay-lab/notification-service>. The code in this post is the real thing, trimmed to its readable core. If you are about to add an LLM to a system that moves money, copy the guardrails first — the features second.

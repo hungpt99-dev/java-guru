@@ -1,6 +1,6 @@
 ---
 title: "AI-8 Shared ai-core Library (BYOK, retry, audit)"
-description: "Tích hợp AI nền tảng FinPay: platform-ai-core-library."
+description: "Tích hợp AI cho nền tảng FinPay: platform-ai-core-library."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -11,19 +11,19 @@ Repo: <https://github.com/finpay-lab/platform>
 
 ## Vì sao cần một thư viện AI dùng chung
 
-Mỗi team của FinPay đang tự xây tích hợp LLM riêng: team này gọi OpenAI trực tiếp từ controller, team kia nhét API key vào `application.yml`, team nọ retry khi lỗi bằng cách ném event trở lại dead-letter queue mà không có timeout. Ba service, ba cách parse `JsonObject` khác nhau, không có telemetry dùng chung, và audit trail gần như chỉ là `logger.info("done")`.
+Mỗi team của FinPay tự xây dựng tích hợp LLM riêng: team này gọi OpenAI trực tiếp từ controller, team kia nhét API key vào `application.yml`, team nọ thì retry khi lỗi bằng cách ném event trở lại dead-letter queue mà không có timeout. Ba service, ba cách parse `JsonObject` khác nhau, không có telemetry dùng chung, và audit trail gần như chỉ là một dòng `logger.info("done")`.
 
-Chúng tôi đã phát hành `platform-ai-core-library` để việc dùng AI trở nên nhàm chán, an toàn và có thể quan sát được trên toàn nền tảng. Đây là một module Spring Boot xây theo kiến trúc hexagonal — `domain/` chứa các port và use case, `infrastructure/` chứa các adapter (Kafka, nhà cung cấp model, OpenSearch, Vault). Link repo cũng nằm ở cuối bài: <https://github.com/finpay-lab/platform>.
+Chúng tôi đã phát hành `platform-ai-core-library` để việc dùng AI trở nên nhàm chán, an toàn và có thể quan sát được trên toàn nền tảng. Đây là một module Spring Boot được xây dựng theo kiến trúc hexagonal — `domain/` chứa các port và use case, `infrastructure/` chứa các adapter (Kafka, nhà cung cấp model, OpenSearch, Vault). Link repo cũng nằm ở cuối bài: <https://github.com/finpay-lab/platform>.
 
 ## Guardrails, bất khả thương lượng
 
-Trước mọi code, những quy tắc định hình tất cả:
+Trước khi viết bất kỳ code nào, đây là những quy tắc định hình tất cả:
 
 1. **AI không phải người quyết định tiền.** Output của LLM chỉ *làm giàu* một quyết định — một điểm số gian lận, một hạn mức gợi ý, một nhãn rủi ro — nhưng quyết định chuyển hoặc chặn tiền do các luật xác định (deterministic rules) và con người đưa ra. Thư viện không bao giờ trả về "approve/reject"; nó trả về một quan sát có điểm số, nhãn và có thể audit được.
-2. **Idempotent theo `eventId`.** Mọi lời gọi AI đều được định danh bằng `eventId` do caller cung cấp. Giao lại (redelivery), retry, double-click — một event sinh ra đúng một quyết định.
-3. **Timeout, retry, circuit breaker.** Không block vô hạn trên một lời gọi HTTP. TimeLimit, retry có giới hạn kèm backoff, và circuit breaker hạ cấp duyên dáng thay vì đập vào một provider đang chết.
-4. **BYOK — key không bao giờ nằm trong code hay log của chúng ta.** Mỗi tenant mang key riêng của mình (BYOK), được giữ trong Vault/secret manager, giải quyết bằng reference, xoay vòng được, và *không bao giờ* bị serialize vào log, trace hay bản ghi audit.
-5. **Audit mọi quyết định.** Hash của prompt, model, latency, chi phí, id của key, verdict — lưu vào OpenSearch để phục vụ điều tra truy vấn được.
+2. **Idempotent theo `eventId`.** Mọi lời gọi AI đều được định danh bằng `eventId` do caller cung cấp. Giao lại (redelivery), retry, double-click — một event chỉ tạo ra đúng một quyết định.
+3. **Timeout, retry, circuit breaker.** Không một lời gọi HTTP nào bị chờ vô hạn. TimeLimit, retry có giới hạn kèm backoff, và circuit breaker hạ cấp mượt mà thay vì đập vào một provider đang chết.
+4. **BYOK — key không bao giờ nằm trong code hay log của chúng ta.** Mỗi tenant mang key riêng của mình (BYOK), được giữ trong Vault/secret manager, được tra cứu theo reference, có thể xoay vòng, và *không bao giờ* bị serialize vào log, trace hay bản ghi audit.
+5. **Audit mọi quyết định.** Hash của prompt, model, latency, chi phí, id của key, verdict — được lưu vào OpenSearch để có thể truy vấn phục vụ điều tra.
 
 ## Kiến trúc trong một hình
 
@@ -41,7 +41,7 @@ Trước mọi code, những quy tắc định hình tất cả:
                  └── VaultCredentialResolver      (BYOK theo reference)
 ```
 
-Use case trong `domain/` chỉ phụ thuộc vào các port. Đổi OpenAI sang Bedrock chỉ là thay đổi một adapter trong một file.
+Use case trong `domain/` chỉ phụ thuộc vào các port. Đổi OpenAI sang Bedrock chỉ là việc thay đổi một adapter trong một file duy nhất.
 
 ## WRONG rồi RIGHT: credentials (BYOK)
 
@@ -61,7 +61,7 @@ public class MoneyFairyService {
 }
 ```
 
-Sai ở đâu: key nằm trong repo, trong classpath scans, trong từng dòng log, không thể xoay vòng mà không deploy, và xuất hiện trong kết quả secret scanner của GitHub trước mặt cả internet.
+Sai ở đâu: key nằm trong repo, trong classpath scans, trong từng dòng log, không thể xoay vòng nếu không deploy, và xuất hiện trong kết quả secret scanner của GitHub trước mặt cả internet.
 
 ### RIGHT
 
@@ -151,7 +151,7 @@ public String callLlm(String prompt) throws IOException, InterruptedException {
 }
 ```
 
-Sai ở đâu: mỗi lời gọi giữ một thread tới 30 phút, retry đệ quy khiến latency tăng gấp đôi sau mỗi lần lỗi, không có trạng thái circuit — khi provider chết ta đốt cả thread pool chờ một endpoint đã chết.
+Sai ở đâu: mỗi lời gọi chiếm giữ một thread tới 30 phút, retry đệ quy khiến latency tăng gấp đôi sau mỗi lần lỗi, không có trạng thái circuit — khi provider chết, ta đốt cả thread pool chờ một endpoint đã chết.
 
 ### RIGHT
 
@@ -232,7 +232,7 @@ public void on(TxEvent event) {
 log.info("AI said: " + prompt + " -> " + rawResponse);
 ```
 
-Prompt thô (PII) và response không làm đỏ (unredacted) trong stdout, không truy vấn được, không có key id, không có phiên bản model, không có chi phí.
+Prompt thô (PII) và response chưa được che (unredacted) nằm trong stdout, không thể truy vấn, không có key id, không có phiên bản model, không có chi phí.
 
 ### RIGHT
 
@@ -274,19 +274,19 @@ Mọi quyết định đều truy vấn được: "toàn bộ lời gọi dùng 
 
 ## Luồng Kafka từ đầu đến cuối
 
-1. `tx.risk` phát ra `TxEvent` với `eventId` do platform sinh.
+1. `tx.risk` phát ra `TxEvent` với `eventId` do platform sinh ra.
 2. Consumer (trong `infrastructure/kafka`) chuyển nó vào `AiUseCase` trong `domain/`.
 3. `AiUseCase` kiểm tra `OutcomeStore` theo `eventId` (dedup) và gọi `AiClassifier` qua resilient port.
 4. `AnthropicModelAdapter` (hoặc OpenAI/Bedrock — đổi theo `AiProperties.provider`) resolve key BYOK từ Vault cho tenant đó.
 5. Verdict được lưu trong `OutcomeStore` (TTL ngắn) và `OpenSearchDecisionAudit` (dài hạn).
-6. Kết quả đã làm giàu đi tới `tx.decisions`, nơi các luật xác định và sự duyệt của con người — *không phải model* — quyết định hành động tiền.
+6. Kết quả đã làm giàu đi tới `tx.decisions`, nơi các luật xác định và sự rà soát của con người — *không phải model* — quyết định hành động tiền.
 
 ## Vẫn còn những gì khó
 
-- **Khóa chặt prompt templates.** Prompt drift nhỏ cũng đổi verdict; chúng tôi đánh phiên bản prompt và ghi hash vào dòng audit để verdict có thể tái hiện được.
-- **Chi phí bùng nổ.** Prompt ngữ cảnh dài và retry nhân số token; thư viện giới hạn `maxTokens` và theo dõi chi phí theo `eventId` trong OpenSearch.
-- **Xoay vòng BYOK.** Tenant xoay key qua Vault; vì key chỉ là reference, việc xoay vòng không bao giờ gây deploy hay thay đổi code.
+- **Cố định prompt templates.** Một chút prompt drift cũng đổi verdict; chúng tôi đánh phiên bản prompt và ghi hash vào dòng audit để verdict có thể tái hiện được.
+- **Chi phí bùng nổ.** Các lời gọi ngữ cảnh dài và retry khiến số token tăng vọt; thư viện giới hạn `maxTokens` và theo dõi chi phí theo từng `eventId` trong OpenSearch.
+- **Xoay vòng BYOK.** Tenant xoay key qua Vault; vì key chỉ là reference, việc xoay vòng không bao giờ đòi hỏi deploy hay thay đổi code.
 
-Thư viện nằm trong <https://github.com/finpay-lab/platform> — cả các port ở domain và các adapter ở infrastructure đều nằm đó, nên guardrails chỉ cách bất kỳ service nào một dependency.
+Thư viện nằm trong <https://github.com/finpay-lab/platform> — cả các port ở domain lẫn các adapter ở infrastructure đều nằm đó, nên bất kỳ service nào cũng chỉ cách các guardrails này đúng một dependency.
 
 Repo: <https://github.com/finpay-lab/platform>

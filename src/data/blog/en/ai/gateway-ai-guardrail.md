@@ -13,7 +13,7 @@ Repo: <https://github.com/finpay-lab/gateway>
 
 FinPay's payment gateway sits between card networks, issuing banks, and our merchants. Every request carries money-like consequences, so any AI we bolt onto that path has to be treated as a liability, not a feature. `gateway-ai-guardrail` is that liability wrapper: a Spring Boot service that runs prompt-injection and anomaly checks on AI-assisted decisions before a single byte reaches a model, and again before a single decision reaches a settlement system.
 
-This post is the senior-level walkthrough: what the guardrail guards against, how it is wired into the real architecture (Spring Boot, Kafka, hexagonal ports, OpenSearch), and the Java that actually implements it. I show the WRONG way first, because the wrong way is what ships in most demos.
+This post is the senior-level walkthrough: what the guardrail guards against, how it is wired into the real architecture (Spring Boot, Kafka, hexagonal ports, OpenSearch), and the Java code that actually implements it. I show the WRONG way first, because the wrong way is what ships in most demos.
 
 ## Repo
 
@@ -21,7 +21,7 @@ This post is the senior-level walkthrough: what the guardrail guards against, ho
 
 ## 1. Why a guardrail exists at all
 
-The naive version: call the LLM, trust the JSON, execute. In a gateway that is a sequence of catastrophic outcomes:
+The naive version: call the LLM, trust the JSON, execute. In a gateway, that is a sequence of catastrophic outcomes:
 
 - A prompt injection makes the model classify a fraudulent transaction as "safe".
 - A hallucinated "amount" drifts by one decimal place and settles money that was never approved.
@@ -32,7 +32,7 @@ Five rules govern every line of code here:
 1. **AI is not a money decider.** The model produces a *recommendation*. The guardrail, business rules, and humans are the deciders. The model never holds the authority to approve or reject a payment.
 2. **Idempotency by `eventId`.** The same event replayed — retry, consumer restart, redelivery — must produce the same side effect exactly once.
 3. **Timeout, retry, circuit breaker.** The model call is a remote dependency with a bounded budget, and it can be switched off without stopping the gateway.
-4. **BYOK keys never hardcoded, never logged.** Keys come from the caller per request (`X-FinPay-Key-Id`) and resolve via a secret manager; they appear in no code, no config, no logs.
+4. **BYOK keys never hardcoded, never logged.** Keys come from the caller per request (`X-FinPay-Key-Id`) and are resolved via a secret manager; they appear in no code, no config, no logs.
 5. **Audit every decision.** Every input, output, model, latency, and override goes to OpenSearch. If we cannot replay a decision, the decision never happened.
 
 ## 2. Architecture
@@ -74,7 +74,7 @@ gateway-ai-guardrail (consumer)
 kafka:gateway.ai.verdict   ──► settlement decisioning (human + rules)
 ```
 
-The domain never imports a framework class. `application` orchestrates, `infrastructure` adapts, `domain` decides. That is the whole point of hexagonal layout: you can swap OpenAI for a local model or Kafka for Pulsar and the decision logic never changes.
+The domain never imports a framework class. `application` orchestrates, `infrastructure` adapts, `domain` decides. That is the whole point of the hexagonal layout: you can swap OpenAI for a local model or Kafka for Pulsar and the decision logic never changes.
 
 ## 3. The WRONG way (what demo code does)
 
@@ -147,7 +147,7 @@ public DecisionRecord decide(String payload) {
 }
 ```
 
-When a merchant disputes a declined transaction you have nothing to show. "We asked the model" is not an audit trail.
+When a merchant disputes a declined transaction, you have nothing to show. "We asked the model" is not an audit trail.
 
 ## 4. The RIGHT way (the real implementation)
 
@@ -196,7 +196,7 @@ public record GuardrailVerdict(
 
 ### 4.2 Domain: injection scan — the important part
 
-Injection is filtered at three layers. First a deterministic lexical scan (fast, cheap, always runs). Then the assembled prompt is itself sent through a second opinion prompt with an immutable safety frame. Finally, whatever survives is schema-validated with an allow-list.
+Injection is filtered at three layers. First, a deterministic lexical scan (fast, cheap, always runs). Then the assembled prompt is sent through a second-opinion prompt with an immutable safety frame. Finally, whatever survives is schema-validated against an allow-list.
 
 ```java
 package com.finpay.gateway.guardrail.domain.service;
@@ -418,7 +418,7 @@ public class AnalyzeTransaction {
 }
 ```
 
-When things are healthy this returns an `ALLOW`/`REVIEW`/`REJECT` verdict. When the model is down it returns a deterministic `REJECT` — because in a gateway, failing closed is the only acceptable failure mode. AI is never the money decider; its absence must also never be a money decider.
+When things are healthy, this returns an `ALLOW`/`REVIEW`/`REJECT` verdict. When the model is down, it returns a deterministic `REJECT` — because in a gateway, failing closed is the only acceptable failure mode. AI is never the money decider; its absence must also never be a money decider.
 
 ### 4.5 Application: idempotent consumer (Kafka)
 

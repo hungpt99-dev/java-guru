@@ -11,7 +11,7 @@ featured: false
 
 ## The 3 a.m. pager problem
 
-FinPay runs payments. When a settlement batch slips, hundreds of alerts fire in minutes: latency spikes, error-rate cliffs, dead-letter queues filling up. By the time an on-call engineer wades through the noise, the *real* incident — the one consumer-percentage of those alerts was actually about — has already burned the SLO budget.
+FinPay runs payments. When a settlement batch slips, hundreds of alerts fire in minutes: latency spikes, error-rate cliffs, dead-letter queues filling up. By the time an on-call engineer wades through the noise, the *real* incident — the one that only a fraction of those alerts was actually about — has already burned the SLO budget.
 
 We built **ai-ops-incident-triage**, the fourth feature in our observability platform, to answer one question as early as possible: *"Is this one incident, or many? What broke, and does it touch money?"* The AI does the reading, the correlation, and the first-pass classification. It never makes the money decision.
 
@@ -31,7 +31,7 @@ This post is the full design: the architecture, the Spring Boot + Kafka + OpenSe
 
 ## Architecture map
 
-The service follows hexagonal architecture. The domain core doesn't know about Kafka, Spring AI, or OpenSearch — it only knows ports. Adapters live in `infrastructure/`:
+The service follows a hexagonal architecture. The domain core doesn't know about Kafka, Spring AI, or OpenSearch — it only knows ports. Adapters live in `infrastructure/`:
 
 ```
 com.finpay.observability
@@ -135,7 +135,7 @@ public class LlmConfig {
 }
 ```
 
-We also have a CI check that greps the module for `sk-`-shaped literals and a log-filter that redacts anything that *looks* like a key, defense in depth.
+We also have a CI check that greps the module for `sk-`-shaped literals, plus a log filter that redacts anything that *looks* like a key — defense in depth.
 
 ### 2. Timeout, retry, circuit breaker
 
@@ -146,7 +146,7 @@ We also have a CI check that greps the module for `sk-`-shaped literals and a lo
 HttpResponse<String> r = client.send(request, HttpResponse.BodyHandlers.ofString());
 ```
 
-**RIGHT.** Time-boxed, retried with backoff, circuit-broken, and with a deterministic fallback.
+**RIGHT.** Time-boxed, retried with backoff, protected by a circuit breaker, and backed by a deterministic fallback.
 
 ```java
 // infrastructure/config/Resilience4jConfig.java
@@ -418,7 +418,7 @@ public record AuditEntry(
         boolean humanApproved) {}
 ```
 
-If you cannot reconstruct, for a given `eventId`, *what the model was asked, what it answered, which version, and who approved it* — you do not have an audit trail, you have a hope.
+If you cannot reconstruct, for a given `eventId`, *what the model was asked, what it answered, which version, and who approved it* — you do not have an audit trail; you have a hope.
 
 ## The trace enrichment step
 
