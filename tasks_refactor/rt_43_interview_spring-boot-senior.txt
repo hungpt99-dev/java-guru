@@ -1,0 +1,255 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #43: interview/spring-boot-senior
+CURRENT EN FILE (rewrite to /tmp/rt_43_spring-boot-senior/spring-boot-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #3: Spring Boot — Junior to Senior"
+description: "Spring Boot is where senior Java backend developers work. IoC/DI, the bean lifecycle, transaction management, and the auto-configuration magic that interviewers expect you to see through — 50 questions with code, not just annotations."
+pubDatetime: 2026-08-10T10:30:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - spring-boot
+  - backend
+---
+
+Spring Boot is where "I know Java" meets "I can run a backend." Junior developers autowire and hope; seniors understand the container, proxies, and transaction boundaries, and can show the exact code in which `@Transactional` silently fails. These 50 questions range from `@Autowired` to "why isn't my transaction rolling back?" and include runnable examples.
+
+> Mindset: a junior uses annotations; a senior can draw the bean lifecycle and explain exactly when a proxy wraps a method, and when it does not.
+
+## Junior — foundations
+
+**Q1. What is IoC and DI in Spring?**
+Inversion of Control means the framework owns object creation and wiring. Dependency Injection supplies dependencies through a constructor, setter, or field. Constructor injection is preferred because it supports immutability and testing and fails fast when a dependency is missing.
+
+```java
+// WRONG: field injection — not testable without Spring, hides required deps
+@Autowired private UserRepository repo;
+// RIGHT: constructor injection — final, testable, explicit
+@Service
+public class UserService {
+  private final UserRepository repo;
+  public UserService(UserRepository repo) { this.repo = repo; }
+}
+```
+
+**Q2. `@Component` vs `@Service` vs `@Repository` vs `@Controller`?**
+All are `@Component` stereotypes that are automatically scanned into beans. `@Repository` adds persistence-exception translation, while `@Service` and `@Controller` are semantic markers. A class can carry multiple stereotypes, but using one is the convention.
+
+**Q3. What is the default bean scope?**
+**Singleton** means one shared instance per container. A common bug is injecting a `prototype` into a `singleton`, which captures one instance at wiring time rather than creating a fresh one for each call. Use `ObjectProvider` for true per-call instances:
+
+```java
+@Service
+public class OrderService {
+  private final ObjectProvider<PriceCalculator> calculators;
+  public PriceCalculator current() { return calculators.getObject(); }
+}
+```
+
+**Q4. What does `@SpringBootApplication` do?**
+It combines `@Configuration`, `@EnableAutoConfiguration` (which wires beans from the classpath), and `@ComponentScan` (which scans the package and its subpackages). The main class must be in a root package above your components.
+
+**Q5. `@RequestParam` vs `@PathVariable` vs `@RequestBody`?**
+`?q=5` → `@RequestParam`; `/users/5` → `@PathVariable`; JSON body → `@RequestBody`. Confusing them is a frequent cause of 400/405 errors.
+
+**Q6. `@Bean` vs `@Component`?**
+`@Component` is a class-level annotation and is detected automatically. `@Bean` is a method-level annotation used in a `@Configuration` class; use it to wrap a third-party object you do not own:
+
+```java
+@Configuration
+public class AppConfig {
+  @Bean
+  public RestTemplate restTemplate() { return new RestTemplateBuilder().setConnectTimeout(Duration.ofSeconds(3)).build(); }
+}
+```
+
+**Q7. What is `@Autowired` on a constructor — needed or not?**
+Since Spring 4.3, a class with a single constructor is autowired implicitly, so you can omit `@Autowired`. With multiple constructors, you must mark the one Spring should use. Prefer the implicit single-constructor form to reduce noise.
+
+**Q8. What is the difference between `@Value` and `@ConfigurationProperties`?**
+`@Value("${db.url}")` injects a single property; it is stringly typed and easy to mistype. `@ConfigurationProperties("db")` binds a typed object (`db.url`, `db.pool-size`), making it better for structured configuration, with relaxed binding and validation through `@Validated`.
+
+**Q9. What does `@PostConstruct` do, and when does it run?**
+It marks a method to run once after dependency injection completes and before the bean is used. Use it for initialization that depends on other beans. Avoid heavy work there because it blocks startup. For cleanup, use `@PreDestroy`.
+
+**Q10. What is the difference between `@Controller` and `@RestController`?**
+`@Controller` returns a view name for server-rendered templates; `@RestController` combines `@Controller` and `@ResponseBody` and returns the serialized body, such as JSON, directly. For an API, use `@RestController`.
+
+**Q11. How do you inject a `List` of all beans of a type?**
+Spring collects them automatically: `public MyService(List<Handler> handlers)`. This is useful for strategy dispatch. Set their order with `@Order` or `Ordered`. This is how Spring itself wires multiple `Filter`s and `HandlerMethodArgumentResolver`s.
+
+**Q12. What is `application.properties` vs `application.yml`?**
+Both configure the application. `yml` supports nested, hierarchical structures, which are easier for deeply nested configuration, while `properties` uses flat `key=value` pairs. They are interchangeable; choose the format that is more readable. Incorrect YAML indentation causes silent misconfiguration and is a common failure mode.
+
+**Q13. What is a stereotype annotation vs a meta-annotation?**
+`@Service` is itself meta-annotated with `@Component`. Creating your own `@OrderService` meta-annotated with `@Service` and `@Transactional` lets you compose behavior. This is how Spring's own annotations are layered.
+
+**Q14. What does `spring.profiles.active` do?**
+It selects the active profiles, loading `application-{profile}.yml` and `@Profile("prod")` beans. The default profile is always active. Use profiles to switch configuration between environments without changing code.
+
+**Q15. What is the difference between `@Import` and `@ComponentScan`?**
+`@ComponentScan` finds annotated classes on the classpath within a package. `@Import` explicitly registers specific configurations or beans, including auto-configuration classes. Use `@Import` for precise wiring of third-party configurations.
+
+## Mid — tradeoffs & pitfalls
+
+**Q1. Why is my `@Transactional` not rolling back?**
+There are three classic causes, each with a corresponding fix:
+
+```java
+// 1) you swallowed the exception -> Spring never sees it
+@Transactional
+public void transfer() {
+  try { debit(); credit(); }
+  catch (Exception e) { log.error(e); }   // WRONG: swallowed -> commits!
+}
+// FIX: let it propagate (or @Transactional(rollbackFor=...))
+
+// 2) self-invocation bypasses the proxy -> no transaction
+public void outer() { this.inner(); }     // WRONG: direct call, no proxy
+@Transactional public void inner() { ... }
+// FIX: move inner() to another @Service bean
+
+// 3) private/final -> proxy can't intercept
+@Transactional private void foo() { }      // WRONG: never proxied
+```
+
+**Q2. How does `@Transactional` actually work — the proxy?**
+Spring wraps y
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #3: Spring Boot — Junior đến Senior"
+description: "Spring Boot là môi trường làm việc của các senior Java backend. IoC/DI, vòng đời bean, quản lý transaction và phép thuật auto-configuration mà interviewer mong bạn nhìn thấu — 50 câu hỏi có code, không chỉ annotation."
+pubDatetime: 2026-08-10T10:30:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - spring-boot
+  - backend
+---
+
+Spring Boot là nơi "tôi biết Java" gặp "tôi có thể vận hành một backend". Junior thường chỉ autowire rồi cầu may; senior hiểu container, proxy và ranh giới transaction, đồng thời chỉ ra được chính xác đoạn code khiến `@Transactional` âm thầm thất bại. 50 câu hỏi, từ `@Autowired` đến "tại sao transaction của tôi không rollback?", kèm các ví dụ có thể chạy được.
+
+> Tư duy: junior dùng annotation; senior có thể vẽ vòng đời bean và giải thích chính xác khi nào proxy bọc một method, cũng như khi nào nó không bọc.
+
+## Junior — nền tảng
+
+**Q1. IoC và DI trong Spring là gì?**
+Inversion of Control nghĩa là framework chịu trách nhiệm tạo và kết nối các object. Dependency Injection cung cấp dependency thông qua constructor, setter hoặc field. Constructor injection được ưu tiên vì hỗ trợ tính bất biến, dễ kiểm thử và phát hiện sớm dependency bị thiếu.
+
+```java
+// WRONG: field injection — không test được không có Spring, che giấu required dep
+@Autowired private UserRepository repo;
+// RIGHT: constructor injection — final, testable, explicit
+@Service
+public class UserService {
+  private final UserRepository repo;
+  public UserService(UserRepository repo) { this.repo = repo; }
+}
+```
+
+**Q2. `@Component` vs `@Service` vs `@Repository` vs `@Controller`?**
+Tất cả đều là stereotype của `@Component` và được tự động quét thành bean. `@Repository` bổ sung cơ chế chuyển đổi exception của tầng persistence; `@Service` và `@Controller` là các marker mang tính ngữ nghĩa. Một class có thể mang nhiều stereotype, nhưng thông thường chỉ dùng một loại.
+
+**Q3. Scope mặc định của bean?**
+**Singleton** nghĩa là mỗi container chỉ có một instance được dùng chung. Một lỗi phổ biến là inject `prototype` vào `singleton`, khiến một instance bị giữ lại ngay lúc wiring thay vì tạo instance mới cho mỗi lần gọi. Dùng `ObjectProvider` để tạo instance mới theo từng lần gọi:
+
+```java
+@Service
+public class OrderService {
+  private final ObjectProvider<PriceCalculator> calculators;
+  public PriceCalculator current() { return calculators.getObject(); }
+}
+```
+
+**Q4. `@SpringBootApplication` làm gì?**
+Nó kết hợp `@Configuration`, `@EnableAutoConfiguration` (kết nối các bean từ classpath) và `@ComponentScan` (quét package cùng các subpackage). Main class phải nằm trong một root package bao trùm các component.
+
+**Q5. `@RequestParam` vs `@PathVariable` vs `@RequestBody`?**
+`?q=5` → `@RequestParam`; `/users/5` → `@PathVariable`; JSON body → `@RequestBody`. Nhầm lẫn giữa chúng là nguyên nhân thường gặp của lỗi 400/405.
+
+**Q6. `@Bean` vs `@Component`?**
+`@Component` là annotation ở cấp class và được tự động phát hiện. `@Bean` là annotation ở cấp method trong một class `@Configuration`; dùng nó để bọc một object bên thứ ba mà bạn không sở hữu:
+
+```java
+@Configuration
+public class AppConfig {
+  @Bean
+  public RestTemplate restTemplate() { return new RestTemplateBuilder().setConnectTimeout(Duration.ofSeconds(3)).build(); }
+}
+```
+
+**Q7. `@Autowired` trên constructor — cần không?**
+Từ Spring 4.3, class chỉ có một constructor sẽ được autowire ngầm, nên có thể bỏ `@Autowired`. Nếu có nhiều constructor, bạn phải đánh dấu constructor mà Spring cần dùng. Nên ưu tiên dạng single-constructor ngầm định để giảm phần khai báo dư thừa.
+
+**Q8. Khác nhau `@Value` và `@ConfigurationProperties`?**
+`@Value("${db.url}")` inject một property đơn lẻ; giá trị có kiểu chuỗi nên dễ gõ sai. `@ConfigurationProperties("db")` bind vào một object có kiểu (`db.url`, `db.pool-size`), phù hợp hơn với cấu hình có cấu trúc, đồng thời hỗ trợ relaxed binding và validation thông qua `@Validated`.
+
+**Q9. `@PostConstruct` làm gì, chạy khi nào?**
+Nó đánh dấu một method được chạy một lần sau khi dependency injection hoàn tất và trước khi bean được sử dụng. Dùng nó cho phần khởi tạo cần các bean khác. Tránh thực hiện công việc nặng ở đó vì sẽ chặn quá trình khởi động. Dùng `@PreDestroy` cho việc dọn dẹp.
+
+**Q10. Khác nhau `@Controller` và `@RestController`?**
+`@Controller` trả về tên view cho template được render ở server; `@RestController` kết hợp `@Controller` và `@ResponseBody`, trả trực tiếp response body đã được serialize, chẳng hạn JSON. Với API, hãy dùng `@RestController`.
+
+**Q11. Inject `List` của mọi bean cùng type thế nào?**
+Spring tự động gom chúng lại: `public MyService(List<Handler> handlers)`. Cách này hữu ích khi dispatch theo strategy. Sắp xếp thứ tự bằng `@Order` hoặc `Ordered`. Đây cũng là cách Spring tự wire nhiều `Filter` và `HandlerMethodArgumentResolver`.
+
+**Q12. `application.properties` vs `application.yml`?**
+Cả hai đều dùng để cấu hình ứng dụng. `yml` hỗ trợ cấu trúc phân cấp lồng nhau, phù hợp hơn với cấu hình sâu, còn `properties` dùng các cặp `key=value` phẳng. Hai định dạng có thể thay thế cho nhau; hãy chọn định dạng dễ đọc hơn. Thụt lề YAML sai gây misconfiguration âm thầm và là một lỗi rất thường gặp.
+
+**Q13. Stereotype annotation vs meta-annotation?**
+`@Service` bản thân được meta-annotate bằng `@Component`. Tạo `@OrderService` với `@Service` và `@Transactional` cho phép kết hợp nhiều hành vi. Đây cũng là cách các annotation của Spring được xếp lớp.
+
+**Q14. `spring.profiles.active` làm gì?**
+Nó chọn các profile đang hoạt động, nạp `application-{profile}.yml` và các bean `@Profile("prod")`. Profile mặc định luôn hoạt động. Dùng profile để thay đổi cấu hình theo từng môi trường mà không cần sửa code.
+
+**Q15. Khác nhau `@Import` và `@ComponentScan`?**
+`@ComponentScan` tìm các class có annotation trên classpath trong một package. `@Import` đăng ký rõ ràng các configuration hoặc bean cụ thể, kể cả auto-configuration class. Dùng `@Import` để wiring chính xác các configuration bên thứ ba.
+
+## Mid — tradeoff & điểm mù
+
+**Q1. Tại sao `@Transactional` không rollback?**
+Có ba nguyên nhân kinh điển, mỗi nguyên nhân có một cách sửa tương ứng:
+
+```java
+// 1) bạn nuốt exception -> Spring không thấy
+@Transactional
+public void transfer() {
+  try { debit(); credit(); }
+  catch (Exception e) { log.error(e); }   // WRONG: nuốt -> commit!
+}
+// FIX: để nó propagate (hoặc @Transactional(rollbackFor=...))
+
+// 2) self-invocation bypass proxy -> không transaction
+public void outer() { this.inner(); }     // WRONG: direct call, không proxy
+@Transactional public void inner() { ... }
+// FIX: chuyển inner() sang @Service bean khác
+
+// 3) private/final -> proxy không intercept
+@Transactional private void foo() { }      // WRONG: không bao giờ proxied
+```
+
+**Q2. `@Transactional` thực sự hoạt động ra sao — proxy?**
+Spring bọc bean trong một proxy. Method `@Transactional` được gọi thông qua proxy sẽ bắt đầu connection và transaction trước khi chạy, rồi com
+Rewrite both. Write:
+  /tmp/rt_43_spring-boot-senior/spring-boot-senior.en.md
+  /tmp/rt_43_spring-boot-senior/spring-boot-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

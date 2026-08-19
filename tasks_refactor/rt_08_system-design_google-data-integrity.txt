@@ -1,0 +1,167 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #8: system-design/google-data-integrity
+CURRENT EN FILE (rewrite to /tmp/rt_8_google-data-integrity/google-data-integrity.en.md):
+=== EN CURRENT ===
+---
+title: "Data Integrity and Transactional Correctness: Google SRE's Principles"
+description: "A source-backed system-design treatment of transactions, recovery, load shedding, and client-side throttling."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] Google SRE defines data integrity in user terms: the accuracy and accessibility of the datastores needed to provide an adequate service. The chapter stresses that users often cannot distinguish data loss, corruption, and extended unavailability. A system that eventually preserves data but cannot make it available within an acceptable period has still failed its users. Source: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] The data-integrity problem is stricter than an uptime percentage suggests. A small fraction of corrupted bytes can make a document, executable, or database unusable, whereas an equivalent fraction of downtime may be tolerable. The source therefore treats integrity and availability as separate user-facing requirements. Source: https://sre.google/sre-book/data-integrity/
+
+[ANALYSIS] For a transactional service, “correct” means more than a successful write. A committed order must have a valid payment state, inventory reservation, and audit trail; a retry must not create a second order; and a read must not expose a half-applied state. The design challenge is to preserve these invariants while traffic, dependencies, deploys, and recovery operations are all changing.
+
+[SOURCE FACT] The overload chapter starts from an operational fact: eventually some part of every serving system becomes overloaded, so graceful overload handling is fundamental. It recommends degraded responses, redirection, resource-aware capacity signals, quotas, criticality, and rejection that is fast enough not to consume the backend’s remaining capacity. Source: https://sre.google/sre-book/handling-overload/
+
+[ANALYSIS] These concerns are coupled. A retry storm can turn one rejected transaction into many attempts, exhaust database connections, and create duplicate side effects unless the transaction boundary is idempotent. Conversely, an overloaded system that accepts writes indiscriminately can preserve availability at the cost of integrity.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] The Google material is a set of SRE principles and practices, not a complete product architecture for an order or payment system. It describes defense in depth for persistent data: soft deletion, backups and recovery methods, early validation, and, where useful, replication. It explicitly warns that replication is not the same as recoverability because a bad update or delete can propagate to every replica. Source: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] Backups are valuable only insofar as they can be restored. Recovery requirements should determine backup method, restore-point frequency, location, and retention. The source distinguishes quickly restorable backups from archives, and discusses tiered copies, incremental or streaming approaches, and point-in-time recovery as a difficult goal across mixed ACID and BASE datastores. Source: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] The source also recommends proactive detection and rapid repair. Out-of-band validators should check invariants that are catastrophic to users, rather than attempting to validate every possible property. Source: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] For overload, Google describes per-customer resource quotas, request criticality, local utilization signals, bounded retries, and adaptive client-side throttling. In the adaptive approach, a client tracks attempted requests and backend accepts over a recent history; when rejects make the ratio too high, requests are rejected locally before reaching the network. Source: https://sre.google/sre-book/handling-overload/
+
+[ANALYSIS] The transferable lesson is not that a particular Google datastore, RPC stack, or internal quota service should be copied. It is that correctness and overload need explicit control loops: define the invariant, measure the resource, reject work at the cheapest safe point, and prove recovery with exercises.
+
+## 3. Architecture Diagram
+
+[PROPOSED DESIGN] The following is an interview-style extension, not a claim about Google’s exact architecture. It combines a transactional write path with the source-backed reliability controls.
+
+```mermaid
+flowchart LR
+    C[Client]
+    CT[Client throttler\n[Source-backed component]]
+    G[API gateway\n[Proposed component]]
+    Q[Quota and criticality\n[Source-backed component]]
+    O[Overload gate / load shedding\n[Source-backed component]]
+    T[Transaction coordinator\n[Proposed component]]
+    DB[(ACID primary database\n[Proposed component])]
+    E[(Outbox events\n[Proposed component])]
+    W[Workers / downstream effects\n[Proposed component]]
+    B[(Tiered backups\n[Source-backed component]]
+    V[Integrity validators\n[Source-backed component]]
+    R[Restore orchestrator\n[Proposed component]]
+
+    C --> CT --> G --> Q --> O --> T
+    T --> DB
+    T --> E --> W
+    DB --> B
+    DB --> V
+    B --> R --> DB
+    V -. repair signal .-> R
+```
+
+[ANALYSIS] The ACID database is the source of truth for the transaction’s atomic state. The outbox makes downstream publication part of the same commit without pretending that an external payment provider participates in the database transaction. The throttler and overload gate reduce pressure before expensive work; validators and restore orchestration address corruption that ordinary replication cannot.
+
+## 4. System Design Analysis
+
+[SOURCE FACT] Google describes a mixture of ACID and BASE APIs as a common cloud pattern. ACID offers stronger transactional semantics; BASE can offer higher availability with eventual convergence after updates stop. The source highlights referential-integrity problems when metadata, blobs, and client caches live in separate systems. Source: https://sre.google/sre-book/data-integrity/
+
+[ANALYSIS] Use ACID where a business invariant must change atomically: order creation, inventory reservation, and the order’s idempotency record. Use asynchronous boundaries for effects that can be retried or reconciled: email, search indexing, analytics, and notifications. Do not call an external side effect inside a database transaction and assume rollback can undo it.
+
+[PROPOSED DESIGN] Each write carries an idempotency key scoped to the authenticated customer and operation. The database stores that key with the resulting resource identifier and a request fingerprint. A repeated key with the same fingerprint returns the original result; a different fingerprint is rejected. This converts transport retries into a safe read of an existing decision.
+
+[PROPOSED DESIGN] The transaction writes an order, its line items, an inventory rese
+=== VI CURRENT ===
+---
+title: "Toàn vẹn Dữ liệu và Tính Đúng đắn Giao dịch: Nguyên tắc của Google SRE"
+description: "Phân tích thiết kế hệ thống dựa trên nguồn về giao dịch, khôi phục, loại bỏ tải và điều tiết phía máy khách."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] Google SRE định nghĩa toàn vẹn dữ liệu theo góc nhìn người dùng: độ chính xác và khả năng truy cập của các datastore cần thiết để cung cấp dịch vụ phù hợp. Chương này nhấn mạnh rằng người dùng thường không thể phân biệt mất dữ liệu, dữ liệu hỏng và tình trạng không khả dụng kéo dài. Một hệ thống cuối cùng vẫn giữ được dữ liệu nhưng không thể cung cấp dữ liệu trong khoảng thời gian chấp nhận được vẫn đã thất bại đối với người dùng. Nguồn: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] Bài toán toàn vẹn dữ liệu nghiêm ngặt hơn những gì một tỷ lệ uptime thể hiện. Một phần nhỏ byte bị hỏng có thể khiến tài liệu, executable hoặc database không sử dụng được, trong khi một phần thời gian ngừng hoạt động tương đương có thể chấp nhận được. Vì vậy, nguồn xem toàn vẹn và khả năng sẵn sàng là các yêu cầu riêng biệt hướng tới người dùng. Nguồn: https://sre.google/sre-book/data-integrity/
+
+[ANALYSIS] Với một dịch vụ giao dịch, “đúng” không chỉ có nghĩa là ghi thành công. Một order đã commit phải có trạng thái thanh toán, reservation tồn kho và audit trail hợp lệ; retry không được tạo order thứ hai; và một lần đọc không được lộ ra trạng thái mới chỉ áp dụng một phần. Thách thức thiết kế là duy trì các bất biến này trong khi lưu lượng, dependency, deployment và hoạt động khôi phục đều thay đổi.
+
+[SOURCE FACT] Chương về overload bắt đầu từ một thực tế vận hành: cuối cùng một phần nào đó của mọi serving system cũng sẽ quá tải, nên xử lý overload một cách uyển chuyển là nền tảng của hệ thống đáng tin cậy. Nguồn đề xuất response suy giảm, chuyển hướng, tín hiệu capacity dựa trên tài nguyên, quota, criticality và việc reject đủ nhanh để không tiêu thụ phần capacity còn lại của backend. Nguồn: https://sre.google/sre-book/handling-overload/
+
+[ANALYSIS] Các vấn đề này liên kết với nhau. Retry storm có thể biến một giao dịch bị reject thành nhiều attempt, làm cạn connection của database và tạo side effect trùng lặp nếu ranh giới giao dịch không có tính idempotent. Ngược lại, hệ thống quá tải nhưng vẫn nhận mọi write có thể giữ availability bằng cái giá là mất integrity.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] Tài liệu Google là tập hợp các nguyên tắc và thực hành SRE, không phải kiến trúc hoàn chỉnh của một sản phẩm order hay payment. Tài liệu mô tả defense in depth cho dữ liệu bền vững: soft deletion, backup và phương thức recovery, validation sớm, và replication khi phù hợp. Tài liệu cảnh báo rõ rằng replication không đồng nghĩa với recoverability vì một update hoặc delete sai có thể lan tới mọi replica. Nguồn: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] Backup chỉ có giá trị khi có thể restore. Yêu cầu recovery phải quyết định phương thức backup, tần suất tạo restore point, vị trí lưu và retention. Nguồn phân biệt backup có thể restore nhanh với archive, đồng thời bàn về bản sao theo tầng, phương pháp incremental hoặc streaming, và point-in-time recovery như một mục tiêu khó khi chạy trên các datastore ACID và BASE hỗn hợp. Nguồn: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] Nguồn cũng khuyến nghị phát hiện chủ động và repair nhanh. Validator ngoài luồng nên kiểm tra những invariant gây hậu quả nghiêm trọng cho người dùng, thay vì cố validation mọi thuộc tính có thể có. Nguồn: https://sre.google/sre-book/data-integrity/
+
+[SOURCE FACT] Đối với overload, Google mô tả quota tài nguyên theo từng customer, criticality của request, tín hiệu utilization cục bộ, retry có giới hạn và adaptive throttling phía client. Trong cách adaptive, client theo dõi số request đã thử và số request backend chấp nhận trong lịch sử gần đây; khi tỷ lệ reject quá cao, request được reject cục bộ trước khi đi qua network. Nguồn: https://sre.google/sre-book/handling-overload/
+
+[ANALYSIS] Bài học có thể chuyển giao không phải là sao chép một datastore, RPC stack hay quota service nội bộ cụ thể của Google. Đó là việc biến correctness và overload thành các control loop rõ ràng: định nghĩa invariant, đo tài nguyên, reject công việc tại điểm an toàn và rẻ nhất, rồi chứng minh khả năng recovery bằng diễn tập.
+
+## 3. Architecture Diagram
+
+[PROPOSED DESIGN] Sơ đồ sau là phần mở rộng theo kiểu phỏng vấn system design, không phải tuyên bố về kiến trúc chính xác của Google. Nó kết hợp write path giao dịch với các cơ chế reliability được nguồn hỗ trợ.
+
+```mermaid
+flowchart LR
+    C[Client]
+    CT[Client throttler\n[Source-backed component]]
+    G[API gateway\n[Proposed component]]
+    Q[Quota and criticality\n[Source-backed component]]
+    O[Overload gate / load shedding\n[Source-backed component]]
+    T[Transaction coordinator\n[Proposed component]]
+    DB[(ACID primary database\n[Proposed component])]
+    E[(Outbox events\n[Proposed component])]
+    W[Workers / downstream effects\n[Proposed component]]
+    B[(Tiered backups\n[Source-backed component]]
+    V[Integrity validators\n[Source-backed component]]
+    R[Restore orchestrator\n[Proposed component]]
+
+    C --> CT --> G --> Q --> O --> T
+    T --> DB
+    T --> E --> W
+    DB --> B
+    DB --> V
+    B --> R --> DB
+    V -. repair signal .-> R
+```
+
+[ANALYSIS] ACID database là source of truth của trạng thái giao dịch nguyên tử. Outbox đưa việc phát hành downstream vào cùng commit mà không giả định external payment provider tham gia database transaction. Throttler và overload gate giảm áp lực trước phần xử lý tốn kém; validator và restore orchestration xử lý corruption mà replication thông thường không ngăn được.
+
+## 4. System Design Analysis
+
+[SOURCE FACT] Google mô tả việc phối hợp API ACID và BASE là một pattern cloud phổ biến. ACID cung cấp semantics giao dịch mạnh hơn; BASE có thể cung cấp availability cao hơn với hội tụ eventual sau khi các update dừng lại. Nguồn nêu bật các vấn đề referential integrity khi metadata, blob và cache phía client nằm ở các hệ thống riêng. Nguồn: https://sre.google/sre-book/data-integrity/
+
+[ANALYSIS] Dùng ACID ở nơi invariant nghiệp vụ phải thay đổi nguyên tử: tạo order, reservation tồn kho và bản ghi idempotency của order. Dùng ranh giới bất đồng bộ cho effect có thể retry hoặc reconcile: email, lập chỉ mục tìm kiếm, analytics và notification. Không gọi external side effect bên trong database transaction rồi giả định rollback có thể hoàn tác nó.
+
+[PROPOSED DESIGN] Mỗi write mang một idempotency key có scope theo customer đã xác thực và operation. Database lưu key cùng resource identifier kết quả và request fingerprint. Cùng key với cùng fingerprint sẽ trả về kết quả ban đầu; fingerprint khác sẽ bị reject. Như vậy, retry ở transport trở thành việc đọc lại một quyết định đã tồn tại.
+
+[PROPOSED DESIGN] Transaction ghi or
+Rewrite both. Write:
+  /tmp/rt_8_google-data-integrity/google-data-integrity.en.md
+  /tmp/rt_8_google-data-integrity/google-data-integrity.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,290 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #15: system-design/news-feed
+CURRENT EN FILE (rewrite to /tmp/rt_15_news-feed/news-feed.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a News Feed with Fan-out"
+description: "A production design for a read-heavy, ranked news feed that balances fresh posts, predictable latency, and fan-out cost."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building the home feed for a social product. A user follows authors, opens the home screen, and expects a ranked stream of posts from those authors. A post should normally become visible within 30 seconds, while the first page should load in p95 under 300 ms. A user can refresh or paginate without seeing duplicates or losing items because the ranking changed between requests.
+
+The users are readers, authors, and internal ranking/abuse systems. Functional requirements are:
+
+- create, delete, and retrieve posts;
+- follow and unfollow authors;
+- aggregate followed authors' posts and rank them per reader;
+- paginate with an opaque cursor;
+- insert newly eligible posts into an active feed without corrupting pagination;
+- hide deleted, blocked, or policy-removed content.
+
+The workload is read-heavy, approximately 1,000 feed reads per post write. Read latency and freshness are both important, but a few seconds of staleness is acceptable. Ranking is personalized and may change as features arrive. We therefore avoid promising a globally identical order. We promise a stable page boundary, no intentional duplicates, and monotonic visibility of committed content within a reader's chosen snapshot.
+
+The central decision is where aggregation happens. Fan-out-on-write copies a post into each follower's inbox and makes reads cheap, but celebrity authors can create millions of writes. Fan-out-on-read avoids that amplification, but a reader following many authors pays the merge cost on every request. The design below uses both paths.
+
+## 2. Scale Estimation
+
+Assumptions are explicit so capacity can be recomputed rather than treated as a prediction:
+
+| Quantity | Assumption | Calculation / result |
+|---|---:|---:|
+| Daily active users | 50 million | Product target |
+| Feed requests per active user/day | 20 | 50M x 20 = 1 billion requests/day |
+| Average feed RPS | 1B / 86,400 | 11,574 RPS |
+| Peak factor | 10x average | 115,740 RPS; provision for 150k RPS |
+| New posts/day | 1 million | One post per 50 DAU per day is a conservative write baseline for a read-heavy feed |
+| Post write RPS | 1M / 86,400 | 11.6 average, about 116 peak |
+| Read:write ratio | 1B / 1M | 1,000 feed reads per post, matching the read-heavy requirement |
+| Retained post record | 2 KiB | 1M x 2 KiB x 365 = 0.73 TB/year before replicas and indexes |
+| Feed-edge record | 32 bytes | Ordinary fan-out is estimated at 5 followers/post, so 5M edges/day x 32 bytes x 30 days = 4.8 GB logical hot inbox data |
+| Feed response | 20 items x 1.5 KiB | 30 KiB; 115,740 x 30 KiB x 8 = 27.8 Gbit/s peak egress before compression |
+| Availability target | 99.95% monthly | About 22 minutes of unavailability/month for feed reads; writes may degrade to delayed fan-out |
+
+The 5-follower average is deliberately not a universal social-graph assumption: it represents the subset of posts we fan out. The remaining high-degree authors use on-read merge. At 10x growth, posts become 500M/day, average feed traffic becomes 115,740 RPS, and the hybrid boundary must move based on measured fan-out amplification rather than a fixed follower count.
+
+Storage is larger in practice: three replicas, indexes, tombstones, moderation metadata, and media pointers can make the 0.73 TB/year post estimate roughly 3 TB/year. Media itself belongs in object storage and is excluded from the feed database calculation. Feed edges have a short TTL because they are a retrieval accelerator, not the source of truth.
+
+## 3. API Design
+
+All endpoints use HTTPS and an authenticated user identity from the access token. `X-Request-ID` is accepted or generated and propagated to logs and traces. Cursors are opaque, signed, and contain a feed version plus the last `(rank_key, post_id)` boundary.
+
+### Read the feed
+
+```http
+GET /v1/feed?limit=20&cursor=eyJ2Ijox...
+Authorization: Bearer <token>
+X-Request-ID: 7f2c...
+```
+
+Response:
+
+```json
+{
+  "items": [{"post_id":"p91", "author_id":"u7", "text":"...", "created_at":"2026-08-15T02:00:00Z", "rank":0.984}],
+  "next_cursor":"eyJ2IjoxLCJsYXN0IjpbMC45ODQsInA5MSJdfQ",
+  "feed_version":"v-20260815-020001",
+  "generated_at":"2026-08-15T02:00:03Z"
+}
+```
+
+`limit` is capped at 100. A cursor keeps the same ranking snapshot for a bounded session, so a new post can be inserted at the top without shifting the current page. If the snapshot expires, the service returns a new cursor and a `snapshot_expired` warning rather than silently repeating rows.
+
+### Create a post
+
+```http
+POST /v1/posts
+Authorization: Bearer <token>
+Idempotency-Key: 01J...
+Content-Type: application/json
+
+{"text":"hello", "media_ids":["m1"]}
+```
+
+The response is `201 Created` with the durable `post_id`. The idempotency key is unique per author for 24 hours and stores the original response. A timeout after the database commit can therefore be retried without creating a second post.
+
+### Follow and unfollow
+
+```http
+PUT    /v1/users/{author_id}/follow
+DELETE /v1/users/{author_id}/follow
+```
+
+Both operations are idempotent. The follow write records `following_since`; the feed reader uses it as a lower bound so old posts are not unexpectedly backfilled. `DELETE` also emits an invalidation event; already materialized rows are filtered at read time until asynchronous cleanup completes.
+
+### Publish a real-time insertion
+
+The client opens `GET /v1/feed/stream` over a WebSocket or server-sent event connection. The server sends `{event:"new_item", post_id, feed_version}` only for items that pass authorization and a lightweight eligibility check. The client prepends it outside the paginated list and deduplicates by `post_id`; the next HTTP page remains cursor-based.
+
+## 4. Data Model
+
+The source of truth is sharded SQL because post creation, follow state, moderation state, and idempotency require constraints and transactions. A denormalized inbox is an accelerator.
+
+```sql
+CREATE TABLE posts (
+  post_id        BIGINT PRIMARY KEY,
+  author_id      BIGINT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL,
+  text           TEXT NOT NULL,
+  rank_features  JSONB NOT NULL,
+  visibility     SMALLINT NOT NULL DEFAULT 1,
+  deleted_at     TIMESTAMPTZ NULL
+);
+CREATE INDEX posts_author_time ON posts (author_id, created_at DESC, post_id DESC);
+
+CREATE TABLE follows (
+  follower_id       BIGINT NOT NULL,
+  followed_id       BIGINT NOT NULL,
+  following_since   TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (follower_id, followed_id)
+);
+CREATE INDEX follows_reverse ON follows (followed_id, follower_id);
+
+CREATE TABLE feed_inbox (
+  reader_id      BIGINT NOT NULL,
+  rank_key       DOUBLE PRECISION NOT NULL,
+  post_id        BIGINT NOT NULL,
+  author_id      BIGINT NOT NULL,
+  inserted_at    TIMESTAMPTZ NOT
+=== VI CURRENT ===
+---
+title: "Thiết kế Hệ thống Bảng tin với Fan-out"
+description: "Thiết kế production cho bảng tin được xếp hạng, thiên về đọc, cân bằng độ mới, độ trễ ổn định và chi phí fan-out."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng bảng tin chính cho một sản phẩm mạng xã hội. Người dùng theo dõi các tác giả, mở màn hình chính và mong đợi một luồng bài đăng đã được xếp hạng từ những tác giả đó. Một bài đăng thường phải hiển thị trong vòng 30 giây, trong khi trang đầu tiên phải tải với p95 dưới 300 ms. Người dùng có thể refresh hoặc phân trang mà không thấy bản sao hay mất mục vì thứ hạng thay đổi giữa các request.
+
+Đối tượng sử dụng gồm độc giả, tác giả và các hệ thống xếp hạng/chống lạm dụng nội bộ. Yêu cầu chức năng là:
+
+- tạo, xóa và lấy bài đăng;
+- theo dõi và bỏ theo dõi tác giả;
+- tổng hợp bài đăng của các tác giả được theo dõi và xếp hạng theo từng độc giả;
+- phân trang bằng cursor;
+- chèn các bài mới đủ điều kiện vào bảng tin đang mở mà không làm hỏng phân trang;
+- ẩn nội dung đã xóa, bị chặn hoặc bị gỡ theo chính sách.
+
+Workload thiên về đọc, khoảng 1.000 lần đọc bảng tin cho mỗi lần ghi bài. Độ trễ đọc và độ mới đều quan trọng, nhưng chấp nhận trễ vài giây. Thứ hạng được cá nhân hóa và có thể thay đổi khi feature đến. Vì vậy ta không hứa một thứ tự toàn cục giống hệt nhau. Ta hứa ranh giới trang ổn định, không cố ý trùng lặp và khả năng hiển thị đơn điệu của nội dung đã commit trong snapshot mà độc giả đã chọn.
+
+Quyết định cốt lõi là nơi thực hiện việc tổng hợp. Fan-out-on-write sao chép bài vào inbox của từng follower, khiến đọc rẻ nhưng celebrity có thể tạo hàng triệu lần ghi. Fan-out-on-read tránh khuếch đại ghi nhưng độc giả theo dõi nhiều tác giả sẽ phải merge trong mỗi request. Thiết kế dưới đây dùng cả hai đường đi.
+
+## 2. Scale Estimation
+
+Các giả định được nêu rõ để có thể tính lại capacity thay vì coi đây là dự báo:
+
+| Đại lượng | Giả định | Phép tính / kết quả |
+|---|---:|---:|
+| Người dùng hoạt động hằng ngày | 50 triệu | Mục tiêu sản phẩm |
+| Số request bảng tin mỗi người/ngày | 20 | 50M x 20 = 1 tỷ request/ngày |
+| RPS trung bình | 1B / 86.400 | 11.574 RPS |
+| Hệ số đỉnh | 10x trung bình | 115.740 RPS; provision cho 150k RPS |
+| Bài đăng mới/ngày | 1 triệu | Một bài mỗi 50 DAU mỗi ngày là baseline thận trọng cho ghi trong feed thiên về đọc |
+| RPS ghi bài | 1M / 86.400 | Trung bình 11,6, khoảng 116 đỉnh |
+| Tỷ lệ đọc:ghi | 1B / 1M | 1.000 lần đọc bảng tin cho mỗi bài, khớp yêu cầu thiên về đọc |
+| Bản ghi bài | 2 KiB | 1M x 2 KiB x 365 = 0,73 TB/năm trước replica và index |
+| Bản ghi cạnh bảng tin | 32 byte | Fan-out thông thường ước tính 5 follower/bài, nên 5M cạnh/ngày x 32 byte x 30 ngày = 4,8 GB dữ liệu inbox nóng logic |
+| Response bảng tin | 20 mục x 1,5 KiB | 30 KiB; 115.740 x 30 KiB x 8 = 27,8 Gbit/s egress đỉnh trước nén |
+| Mục tiêu availability | 99,95% theo tháng | Khoảng 22 phút không khả dụng/tháng cho đọc bảng tin; ghi có thể suy giảm thành fan-out trễ |
+
+Giả định trung bình 5 follower không phải giả định phổ quát về social graph: đó là tập bài ta chọn fan-out. Các tác giả có degree cao còn lại dùng merge khi đọc. Ở tăng trưởng 10x, bài đăng thành 500M/ngày, traffic bảng tin trung bình thành 115.740 RPS, và ranh giới hybrid phải di chuyển dựa trên fan-out amplification đo được thay vì một ngưỡng follower cố định.
+
+Storage thực tế lớn hơn: ba replica, index, tombstone, metadata kiểm duyệt và con trỏ media có thể khiến ước tính bài đăng 0,73 TB/năm thành khoảng 3 TB/năm. Media thuộc object storage và bị loại khỏi phép tính database bảng tin. Cạnh inbox có TTL ngắn vì chỉ là bộ tăng tốc truy xuất, không phải nguồn sự thật.
+
+## 3. API Design
+
+Mọi endpoint dùng HTTPS và danh tính người dùng đã xác thực từ access token. `X-Request-ID` được chấp nhận hoặc tự sinh rồi truyền qua log và trace. Cursor là opaque, được ký, chứa feed version và biên `(rank_key, post_id)` cuối cùng.
+
+### Đọc bảng tin
+
+```http
+GET /v1/feed?limit=20&cursor=eyJ2Ijox...
+Authorization: Bearer <token>
+X-Request-ID: 7f2c...
+```
+
+Response:
+
+```json
+{
+  "items": [{"post_id":"p91", "author_id":"u7", "text":"...", "created_at":"2026-08-15T02:00:00Z", "rank":0.984}],
+  "next_cursor":"eyJ2IjoxLCJsYXN0IjpbMC45ODQsInA5MSJdfQ",
+  "feed_version":"v-20260815-020001",
+  "generated_at":"2026-08-15T02:00:03Z"
+}
+```
+
+`limit` bị giới hạn ở 100. Cursor giữ cùng ranking snapshot trong một session có thời hạn, nên bài mới có thể được chèn lên đầu mà không đẩy lệch trang hiện tại. Nếu snapshot hết hạn, service trả cursor mới và cảnh báo `snapshot_expired` thay vì âm thầm lặp dòng.
+
+### Tạo bài đăng
+
+```http
+POST /v1/posts
+Authorization: Bearer <token>
+Idempotency-Key: 01J...
+Content-Type: application/json
+
+{"text":"hello", "media_ids":["m1"]}
+```
+
+Response là `201 Created` cùng `post_id` bền vững. Idempotency key là duy nhất theo tác giả trong 24 giờ và lưu response ban đầu. Vì vậy timeout sau khi database commit có thể retry mà không tạo bài thứ hai.
+
+### Theo dõi và bỏ theo dõi
+
+```http
+PUT    /v1/users/{author_id}/follow
+DELETE /v1/users/{author_id}/follow
+```
+
+Cả hai thao tác đều idempotent. Ghi follow lưu `following_since`; feed reader dùng nó làm cận dưới để bài cũ không bị backfill bất ngờ. `DELETE` cũng phát event invalidation; các dòng đã materialize được lọc lúc đọc cho đến khi cleanup bất đồng bộ hoàn tất.
+
+### Phát insertion realtime
+
+Client mở `GET /v1/feed/stream` qua kết nối WebSocket hoặc server-sent event. Server chỉ gửi `{event:"new_item", post_id, feed_version}` cho mục vượt qua authorization và kiểm tra eligibility nhẹ. Client prepend mục đó bên ngoài danh sách phân trang và deduplicate theo `post_id`; trang HTTP kế tiếp vẫn dùng cursor.
+
+## 4. Data Model
+
+Nguồn sự thật là SQL được shard vì tạo bài, trạng thái follow, moderation và idempotency cần constraint và transaction. Inbox phi chuẩn hóa là bộ tăng tốc.
+
+```sql
+CREATE TABLE posts (
+  post_id        BIGINT PRIMARY KEY,
+  author_id      BIGINT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL,
+  text           TEXT NOT NULL,
+  rank_features  JSONB NOT NULL,
+  visibility     SMALLINT NOT NULL DEFAULT 1,
+  deleted_at     TIMESTAMPTZ NULL
+);
+CREATE INDEX posts_author_time ON posts (author_id, created_at DESC, post_id DESC);
+
+CREATE TABLE follows (
+  follower_id       BIGINT NOT NULL,
+  followed_id       BIGINT NOT NULL,
+  following_since   TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (follower_id, followed_id)
+);
+CREATE INDEX follows_reverse ON follows (followed_id, follower_id);
+
+CREATE TABLE feed_inbox (
+  reader_id      BIGINT NOT NULL,
+  rank_key       DOUBLE PRECISION NOT NULL,
+  post_id        BIGINT NOT NULL,
+  author_id      BIGINT NOT NULL,
+  inserted_at    TIMESTAMPTZ NOT NULL,
+  expires_at     TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (reader_id, rank_key, post_id)
+);
+CREATE INDEX feed_inbox_expiry ON feed_inbox (expires_at);
+
+CREATE TABLE outbox_events (
+  event_id       BIGSERIAL PRIMARY KEY,
+  aggregate_id   BIGINT NOT NULL,
+  event
+Rewrite both. Write:
+  /tmp/rt_15_news-feed/news-feed.en.md
+  /tmp/rt_15_news-feed/news-feed.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

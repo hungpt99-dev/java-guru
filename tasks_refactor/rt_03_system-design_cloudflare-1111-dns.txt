@@ -1,0 +1,227 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #3: system-design/cloudflare-1111-dns
+CURRENT EN FILE (rewrite to /tmp/rt_3_cloudflare-1111-dns/cloudflare-1111-dns.en.md):
+=== EN CURRENT ===
+---
+title: "Building 1.1.1.1: Cloudflare's Global Anycast DNS at Scale"
+description: "A source-backed system-design analysis of the latency, routing, privacy, and operational boundaries behind a global consumer DNS resolver."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] DNS is the directory-like lookup step that commonly precedes loading a website, sending email, or opening an application. The source distinguishes authoritative DNS, which serves the content side of the system, from resolvers, which serve users and are often selected by an ISP, Wi-Fi operator, or mobile network. ([Cloudflare, “Announcing 1.1.1.1: the fastest, privacy-first consumer DNS service”](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] Cloudflare described two user-facing problems: resolvers could be slow and could expose a user's queried domains to the network operator, even when the destination website used HTTPS. The source also describes DNS blocking as a censorship mechanism. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[ANALYSIS] This is a distributed-systems problem with three coupled objectives:
+
+- Reduce lookup latency by putting recursive resolution close to users.
+- Make a stable service reachable despite failures in individual locations or networks.
+- Minimize the privacy damage created by operating a high-volume observation point.
+
+The hard part is not answering one DNS question. It is operating a globally reachable, low-latency service while keeping routing, cache behavior, abuse controls, protocol compatibility, and data retention consistent.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] Cloudflare said it used its large, highly interconnected global network and DNS experience to launch a consumer resolver. Testing showed the resolver running across that network outperformed other consumer DNS services available at the time. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] The service used the memorable addresses `1.1.1.1` and `1.0.0.1`. APNIC's research group held those addresses and had observed a flood of garbage traffic when they were announced. Cloudflare offered its network to receive and study that traffic while offering a resolver on the addresses. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] Cloudflare committed not to write querying IP addresses to disk, to wipe logs within 24 hours, and to retain KPMG for annual audits with a public report. The source says some logging was still needed for abuse prevention and debugging. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] At launch, 1.1.1.1 supported DNS-over-TLS and DNS-over-HTTPS. The source presents DNS-over-HTTPS as encrypted and promising for newer transports and protocol capabilities. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] DNSPerf was described as ranking 1.1.1.1 fastest for queries to non-Cloudflare customers, averaging around 14 ms globally. For Cloudflare authoritative-DNS customers, the source says the resolver and recursor were on the same network and hardware, enabling very fast answers and immediate updates without waiting for TTL expiry. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[ANALYSIS] These facts imply a design centered on edge-local ingress and recursive-cache locality, not on one central resolver cluster. They do not, by themselves, disclose the exact routing policy, process layout, cache algorithm, or abuse pipeline.
+
+## 3. Architecture Diagram
+
+The diagram separates what the source explicitly says from an interview-style extension.
+
+```mermaid
+flowchart LR
+    U[End user / device] -->|DNS UDP/TCP or DoT/DoH| A[Anycast service address]
+    A --> E1[Edge resolver site A]
+    A --> E2[Edge resolver site B]
+    A --> EN[Edge resolver site N]
+    E1 --> C1[Recursive cache]
+    E2 --> C2[Recursive cache]
+    EN --> CN[Recursive cache]
+    C1 --> AUTH[Authoritative DNS / upstreams]
+    C2 --> AUTH
+    CN --> AUTH
+    E1 --> P[Privacy, abuse, and telemetry controls]
+    E2 --> P
+    EN --> P
+    P --> L[Short-lived operational logs]
+
+    classDef source fill:#d9f2e6,stroke:#176b45,color:#102a1d
+    classDef proposed fill:#fff0c2,stroke:#9a6b00,color:#3d2b00
+    class U,A,E1,E2,EN,AUTH source
+    class C1,C2,CN,P,L proposed
+```
+
+[SOURCE FACT] In the diagram, green nodes are [Source-backed component] and yellow nodes are [Proposed component].
+
+[SOURCE FACT] The source-backed components are the consumer resolver, the global network, the memorable service addresses, DNS-over-TLS/DNS-over-HTTPS support, and the relationship with Cloudflare authoritative DNS. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[PROPOSED DESIGN] The per-site caches, explicit privacy pipeline, and short-lived log sink are a concrete decomposition for discussion. The source does not claim that Cloudflare used these exact components or boundaries.
+
+## 4. System Design Analysis
+
+[ANALYSIS] Anycast gives the service a single address from the client's perspective while allowing traffic to enter at a nearby or topologically preferred edge. The benefit is not guaranteed geographic proximity: BGP chooses a route according to network policy, and a nearby site can be unreachable or suboptimal. Therefore, health withdrawal and route diversity are as important as the number of sites.
+
+[ANALYSIS] DNS has unusually strong cache leverage. A recursive resolver can answer many repeated questions from an edge-local cache, avoiding an upstream round trip. Negative answers and TTLs also shape load, but aggressive caching must respect authoritative records and avoid turning stale data into a correctness failure.
+
+[ANALYSIS] Privacy is an architecture constraint, not merely a policy page. If the system does not need client IP addresses after request handling, the data path should avoid durable storage of them. Abuse detection then needs coarse, short-lived, or separately protected signals. The source's 24-hour deletion commitment is a source fact; the implementation mechanism here is analysis.
+
+[ANALYSIS] Encryption on the client-to-resolver leg changes the edge workload. DoH adds HTTP connection management and request parsing; DoT adds TLS session handling. Both improve confidentiality over plaintext DNS on the access network, but neither makes the resolver unable to see the query itself.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] The following logical records are an interview model, not a description of Cloudflare's internal schema:
+
+```text
+CacheEntry {
+  question_key: (qname, qtype, qclass, ecs_scope)
+  response: dns_message
+  expires_at: timestamp
+  authoritative_ttl: duration
+  negative: boolean
+}
+
+AbuseSignal {
+  coarse_source_token: short_lived_token
+  edge_site: opaque_site_id
+  query_class: enum
+  count_window: short_window
+  expires_at: 
+=== VI CURRENT ===
+---
+title: "Xây dựng 1.1.1.1: DNS Anycast Toàn cầu của Cloudflare ở Quy mô Lớn"
+description: "Phân tích dựa trên nguồn về độ trễ, định tuyến, quyền riêng tư và các ranh giới vận hành của một trình phân giải DNS tiêu dùng toàn cầu."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] DNS là bước tra cứu giống như một danh bạ, thường diễn ra trước khi tải website, gửi email hoặc mở ứng dụng. Nguồn phân biệt DNS có thẩm quyền, phục vụ phía nội dung, với trình phân giải phục vụ người dùng và thường được ISP, nhà vận hành Wi-Fi hoặc mạng di động lựa chọn. ([Cloudflare, “Announcing 1.1.1.1: the fastest, privacy-first consumer DNS service”](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] Cloudflare mô tả hai vấn đề hướng tới người dùng: trình phân giải có thể chậm và có thể làm lộ các tên miền người dùng truy vấn cho nhà vận hành mạng, ngay cả khi website đích dùng HTTPS. Nguồn cũng mô tả việc chặn DNS như một cơ chế kiểm duyệt. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[ANALYSIS] Đây là bài toán hệ thống phân tán với ba mục tiêu gắn chặt:
+
+- Giảm độ trễ tra cứu bằng cách đặt việc phân giải đệ quy gần người dùng.
+- Làm cho dịch vụ vẫn có thể truy cập dù từng địa điểm hoặc mạng riêng lẻ gặp lỗi.
+- Giảm thiểu tác hại quyền riêng tư do vận hành một điểm quan sát lưu lượng lớn.
+
+Điểm khó không phải là trả lời một câu hỏi DNS. Điểm khó là vận hành một dịch vụ có thể truy cập trên toàn cầu, độ trễ thấp, đồng thời giữ cho định tuyến, bộ nhớ đệm, kiểm soát lạm dụng, tương thích giao thức và thời hạn lưu dữ liệu nhất quán.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] Cloudflare cho biết họ dùng mạng toàn cầu lớn, kết nối rộng và kinh nghiệm về DNS để ra mắt một trình phân giải cho người tiêu dùng. Thử nghiệm cho thấy trình phân giải chạy trên mạng đó nhanh hơn các dịch vụ DNS tiêu dùng khác có sẵn khi ấy. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] Dịch vụ dùng các địa chỉ dễ nhớ `1.1.1.1` và `1.0.0.1`. Nhóm nghiên cứu của APNIC sở hữu các địa chỉ này và từng quan sát một luồng lưu lượng rác tràn vào khi chúng được quảng bá. Cloudflare cung cấp mạng của mình để tiếp nhận và nghiên cứu lưu lượng đó, đồng thời cung cấp trình phân giải trên các địa chỉ này. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] Cloudflare cam kết không ghi địa chỉ IP truy vấn xuống đĩa, xóa log trong vòng 24 giờ, và thuê KPMG kiểm toán hằng năm rồi công bố báo cáo. Nguồn nói vẫn cần một phần log để ngăn lạm dụng và gỡ lỗi. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] Khi ra mắt, 1.1.1.1 hỗ trợ DNS-over-TLS và DNS-over-HTTPS. Nguồn xem DNS-over-HTTPS là một hướng được mã hóa, có tiềm năng cho các phương thức truyền và khả năng giao thức mới hơn. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[SOURCE FACT] DNSPerf được mô tả là xếp 1.1.1.1 nhanh nhất đối với truy vấn tới khách hàng không dùng Cloudflare, trung bình khoảng 14 ms trên toàn cầu. Với khách hàng dùng DNS có thẩm quyền của Cloudflare, nguồn nói trình phân giải và recursor nằm trên cùng mạng và phần cứng, cho phép trả lời rất nhanh và cập nhật tức thời mà không cần chờ TTL hết hạn. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[ANALYSIS] Những dữ kiện này gợi ý một thiết kế tập trung vào điểm vào tại edge và tính cục bộ của cache đệ quy, thay vì một cụm trình phân giải trung tâm. Tuy nhiên, chúng không tự tiết lộ chính sách định tuyến, bố cục tiến trình, thuật toán cache hay pipeline chống lạm dụng chính xác.
+
+## 3. Architecture Diagram
+
+Sơ đồ tách các thành phần được nguồn nói rõ khỏi phần mở rộng theo kiểu phỏng vấn.
+
+```mermaid
+flowchart LR
+    U[End user / device] -->|DNS UDP/TCP or DoT/DoH| A[Anycast service address]
+    A --> E1[Edge resolver site A]
+    A --> E2[Edge resolver site B]
+    A --> EN[Edge resolver site N]
+    E1 --> C1[Recursive cache]
+    E2 --> C2[Recursive cache]
+    EN --> CN[Recursive cache]
+    C1 --> AUTH[Authoritative DNS / upstreams]
+    C2 --> AUTH
+    CN --> AUTH
+    E1 --> P[Privacy, abuse, and telemetry controls]
+    E2 --> P
+    EN --> P
+    P --> L[Short-lived operational logs]
+
+    classDef source fill:#d9f2e6,stroke:#176b45,color:#102a1d
+    classDef proposed fill:#fff0c2,stroke:#9a6b00,color:#3d2b00
+    class U,A,E1,E2,EN,AUTH source
+    class C1,C2,CN,P,L proposed
+```
+
+[SOURCE FACT] Trong sơ đồ, node màu xanh là [Source-backed component] và node màu vàng là [Proposed component].
+
+[SOURCE FACT] Các thành phần có căn cứ từ nguồn là trình phân giải tiêu dùng, mạng toàn cầu, các địa chỉ dịch vụ dễ nhớ, hỗ trợ DNS-over-TLS/DNS-over-HTTPS và quan hệ với DNS có thẩm quyền của Cloudflare. ([Cloudflare](https://blog.cloudflare.com/announcing-1111/))
+
+[PROPOSED DESIGN] Cache tại từng site, pipeline quyền riêng tư rõ ràng và nơi ghi log ngắn hạn là cách phân rã cụ thể để thảo luận. Nguồn không khẳng định Cloudflare dùng đúng các thành phần hoặc ranh giới này.
+
+## 4. System Design Analysis
+
+[ANALYSIS] Anycast cho dịch vụ một địa chỉ duy nhất từ góc nhìn client, đồng thời cho phép traffic đi vào tại edge gần hoặc phù hợp nhất về mặt cấu trúc mạng. Lợi ích không đảm bảo khoảng cách địa lý: BGP chọn tuyến theo chính sách mạng, và một site gần có thể không truy cập được hoặc không tối ưu. Vì vậy, rút quảng bá khi lỗi và đa dạng tuyến quan trọng không kém số lượng site.
+
+[ANALYSIS] DNS có lợi thế cache rất mạnh. Trình phân giải đệ quy có thể trả lời nhiều câu hỏi lặp lại từ cache tại edge, tránh một vòng đi lên upstream. Câu trả lời âm và TTL cũng định hình tải; tuy nhiên cache tích cực phải tôn trọng bản ghi có thẩm quyền để không biến dữ liệu cũ thành lỗi đúng-sai.
+
+[ANALYSIS] Quyền riêng tư là ràng buộc kiến trúc, không chỉ là nội dung chính sách. Nếu hệ thống không cần địa chỉ IP client sau khi xử lý request, data path nên tránh lưu bền vững chúng. Khi đó phát hiện lạm dụng cần các tín hiệu thô, ngắn hạn hoặc được bảo vệ riêng. Cam kết xóa trong 24 giờ của nguồn là source fact; cơ chế triển khai ở đây là phân tích.
+
+[ANALYSIS] Mã hóa đoạn client tới trình phân giải làm thay đổi tải tại edge. DoH thêm quản lý kết nối HTTP và phân tích request; DoT thêm xử lý phiên TLS. Cả hai cải thiện tính bí mật so với DNS plaintext trên mạng truy cập, nhưng không khiến trình phân giải không nhìn thấy chính truy vấn.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] Các bản ghi logic sau đây là mô hình dùng trong phỏng vấn, không phải mô tả schema nội bộ của Cloudflare:
+
+```text
+CacheEntry {
+  question_key: (qname, qtype, qclass, ecs_scope)
+  response: dns_message
+  expires_at: timestamp
+  authoritative_ttl: duration
+  negative: boolean
+}
+
+AbuseSignal {
+  coarse_source_token: short_lived_token
+  edge_site: opaque_site_id
+  query_class: enum
+  count_window: short_window
+  expires_at: timestamp
+}
+
+RouteHealth {
+  edge_site: opaque_site_id
+  resolver_ready: boolean
+  upstream_re
+Rewrite both. Write:
+  /tmp/rt_3_cloudflare-1111-dns/cloudflare-1111-dns.en.md
+  /tmp/rt_3_cloudflare-1111-dns/cloudflare-1111-dns.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,292 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #31: ai/kyc-document-intake-llm
+CURRENT EN FILE (rewrite to /tmp/rt_31_kyc-document-intake-llm/kyc-document-intake-llm.en.md):
+=== EN CURRENT ===
+---
+title: "KYC Document Intake with Vision LLMs"
+description: "How FinPay's identity-service extracts KYC fields from uploaded identity documents with a vision LLM and routes them for human review instead of automatic approval."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/identity-service>
+
+# AI-6: KYC Document Intake with Vision and LLM
+
+KYC (Know Your Customer) onboarding is the highest-volume, highest-regret pipeline in any fintech. Every misread ID card, misfiled selfie, or valid passport that is rejected represents either a compliance fine or a lost customer. The `identity-service` `kyc-document-intake-llm` feature is the AI gateway that turns raw document bytes into a structured, auditable verification request ready for a decision.
+
+This is a **senior engineering** walkthrough covering a real architecture, real failure modes, and code that actually shipped (and was later fixed). I'll show you the WRONG way first, because it is what every first AI integration tends to look like: a single HTTP call in a transaction, a raw JSON blob in the DB, and the model treated as the final authority. Then I'll show you the RIGHT way: hexagonal, event-driven, idempotent, and guarded.
+
+## The core pipeline
+
+```
+DocumentUploaded (Kafka) ─▶ IntakeCommand ─▶ VisionExtractionPort (VLM)
+     │                                            │
+     └─▶ DocumentSnapshot (domain model)          └─▶ StructuredFields + Confidence
+                        │                                    │
+                        ▼                                    ▼
+              FraudScreeningPort ◀── RiskAssessment (domain) ──▶ LLM JudgePort
+                        │                                    │
+                        ▼                                    ▼
+                DecisionEvent ──▶ outbox ──▶ Kafka ──▶ OpenSearch (index/decision-v1)
+```
+
+The flow:
+
+1. **Kafka** delivers `DocumentUploaded` (provider-agnostic and containing an S3 key plus an `eventId`).
+2. A **domain command** normalizes it; no `MultipartFile` leaks past the adapter layer.
+3. A **Vision port** sends the image to a multimodal model and returns structured fields **with confidence scores**, not prose.
+4. A **rule engine** (plain Java, zero AI) checks hard rules: whether the document type is allowed, whether the checksum matches, and whether the document has expired.
+5. An **LLM judge** scores the open-ended questions: "is the person named on the selfie and the ID the same?" It is always **non-authoritative** and always logged.
+6. A **Decision** is produced, persisted to OpenSearch for retrieval and search, and published through the outbox pattern.
+
+## Architecture: hexagonal, from the first commit
+
+The feature lives inside `identity-service`'s modular monolith. The KYC package follows the ports-and-adapters pattern strictly:
+
+```
+src/main/java/com/finpay/identity/kyc/
+├── domain/                      # pure Java, zero Spring, zero SDK
+│   ├── model/
+│   │   ├── DocumentSnapshot.java
+│   │   ├── StructuredFields.java
+│   │   ├── Confidence.java
+│   │   ├── RiskAssessment.java
+│   │   ├── Decision.java
+│   │   └── KycEvent.java
+│   ├── ports/
+│   │   ├── in/IntakeUseCase.java        # primary (driving) port
+│   │   ├── in/AuditUseCase.java
+│   │   └── out/
+│   │       ├── VisionExtractionPort.java
+│   │       ├── LlmJudgePort.java
+│   │       ├── DecisionStorePort.java
+│   │       ├── KycEventPublisherPort.java
+│   │       └── FraudCheckPort.java
+│   └── service/
+│       ├── DocumentIntakeService.java
+│       └── DecisionEngine.java
+└── infrastructure/              # Spring, Kafka, OpenSearch, SDKs — all here
+    ├── kafka/
+    │   ├── DocumentUploadedConsumer.java
+    │   └── DecisionEventProducer.java
+    ├── openai/
+    │   ├── OpenAiVisionAdapter.java
+    │   └── OpenAiJudgeAdapter.java
+    ├── opensearch/
+    │   ├── DecisionDocument.java
+    │   └── OpenSearchDecisionStore.java
+    └── audit/
+        └── AuditLogWriter.java
+```
+
+**Why it matters:** `domain/` has zero imports from Spring, the Kafka SDK, or OpenAI. It is testable in pure JUnit in milliseconds. The entire AI story — model, prompt, token budget, provider — is a swappable adapter. When the vision provider doubled its price, we switched adapters in an afternoon, not a rewrite.
+
+## WRONG: the naive first attempt
+
+This is what well-meaning teams ship. The web layer calls the model directly, inside the transaction, and trusts the output. Every mistake below is a real incident that we (and every AI fintech) have lived through.
+
+```java
+@RestController
+public class KycIntakeController {
+
+    private final OpenAiClient openAiClient;  // vendor SDK in the controller
+    private final JdbcTemplate jdbcTemplate;
+
+    @PostMapping("/v1/kyc/documents")
+    public Map<String, Object> intake(@RequestParam("file") MultipartFile file) {
+        String base64 = Base64.getEncoder().encodeToString(file.getBytes());
+
+        // 1. Provider SDK called directly from the web layer
+        ChatCompletionRequest request = ChatCompletionRequest.builder()
+                .model("gpt-4o-vision")
+                .messages(List.of(
+                        Message.ofUserContent("""
+                                Extract: fullName, docNumber, dateOfBirth,
+                                expiryDate, documentType, country. Return JSON.
+                                """),
+                        Message.ofUserPart(new ImageContent("data:image/jpeg;base64," + base64))
+                ))
+                .responseFormat("json_object")
+                .build();
+
+        ChatCompletionResult result = openAiClient.chatCompletions(request);
+        String json = result.getChoices().get(0).getMessage().getContent();
+
+        // 2. LLM output trusted as ground truth, parse crashes on prose
+        String name = extract(json, "fullName");
+        String docNumber = extract(json, "docNumber");
+        // ...
+
+        // 3. Persist raw JSON blob: unqueryable, unauditable, unqueryable schema
+        jdbcTemplate.update(
+                "INSERT INTO kyc_documents (data) VALUES (?)",
+                json);
+
+        // 4. The model's word IS the decision — no rules, no human-in-loop
+        boolean approved = name != null && docNumber != null;
+        return Map.of("approved", approved);
+    }
+}
+```
+
+### What's wrong, in detail
+
+1. **The vendor SDK owns the web layer.** Putting `OpenAiClient` in a controller means the transport, serialization, retry policy, and model name are all glued to HTTP. You cannot unit-test `intake()` without mocking a third-party SDK, and you cannot swap providers.
+2. **The HTTP timeout is now the model's latency.** The model can take 10–60s under load. The servlet thread pool and the DB connection in the transaction are held hostage. One provider outage means complete connection-pool exhaustion, taking down the entire identity-service.
+3. **No idempotency.** The client retrie
+=== VI CURRENT ===
+---
+title: "KYC Document Intake with Vision LLMs"
+description: "Cách identity-service của FinPay trích xuất các trường KYC từ giấy tờ định danh được tải lên bằng vision LLM và chuyển chúng sang duyệt thủ công thay vì tự động phê duyệt."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/identity-service>
+
+# AI-6: Tiếp nhận tài liệu KYC bằng Vision và LLM
+
+KYC (Know Your Customer) là pipeline có khối lượng xử lý lớn nhất và rủi ro cao nhất trong bất kỳ fintech nào. Mỗi thẻ căn cước bị đọc sai, mỗi ảnh chân dung bị xếp nhầm, hay mỗi hộ chiếu hợp lệ bị từ chối oan đều có thể dẫn đến một khoản phạt tuân thủ hoặc làm mất một khách hàng. Feature `kyc-document-intake-llm` của `identity-service` là cổng AI biến dữ liệu byte thô của tài liệu thành một yêu cầu xác minh có cấu trúc, có thể kiểm toán và sẵn sàng cho việc ra quyết định.
+
+Đây là bài viết đi sâu ở **cấp kỹ sư senior**, với kiến trúc thực tế, các chế độ hỏng thực tế và code đã thực sự được đưa lên production (rồi được sửa). Tôi sẽ trình bày cách WRONG trước, vì đó là cách mọi tích hợp AI đầu tiên thường được xây dựng: một lần gọi HTTP nằm trong transaction, một blob JSON thô trong DB và coi mô hình là phán quyết cuối cùng. Sau đó là cách RIGHT: hexagonal, hướng sự kiện, idempotent và có các cơ chế bảo vệ.
+
+## Pipeline cốt lõi
+
+```
+DocumentUploaded (Kafka) ─▶ IntakeCommand ─▶ VisionExtractionPort (VLM)
+     │                                            │
+     └─▶ DocumentSnapshot (domain model)          └─▶ StructuredFields + Confidence
+                        │                                    │
+                        ▼                                    ▼
+              FraudScreeningPort ◀── RiskAssessment (domain) ──▶ LLM JudgePort
+                        │                                    │
+                        ▼                                    ▼
+                DecisionEvent ──▶ outbox ──▶ Kafka ──▶ OpenSearch (index/decision-v1)
+```
+
+Luồng xử lý:
+
+1. **Kafka** chuyển `DocumentUploaded` (không phụ thuộc nhà cung cấp, chứa S3 key và `eventId`).
+2. Một **domain command** chuẩn hóa sự kiện này; không có `MultipartFile` nào lọt qua lớp adapter.
+3. Một **Vision port** gửi ảnh tới mô hình đa phương thức và trả về các trường có cấu trúc **kèm điểm tin cậy**, không phải văn xuôi.
+4. Một **rule engine** (Java thuần, zero AI) kiểm tra các luật cứng: loại tài liệu có được phép hay không, checksum có khớp hay không và tài liệu đã hết hạn hay chưa.
+5. Một **LLM judge** chấm điểm các câu hỏi mở: "người có tên trên ảnh chân dung và trên giấy tờ tùy thân có phải là cùng một người không?" Nó luôn **không có thẩm quyền quyết định** và luôn được ghi log.
+6. Một **Decision** được tạo ra, lưu vào OpenSearch để truy vấn và tìm kiếm, rồi được phát hành qua outbox pattern.
+
+## Kiến trúc: hexagonal, ngay từ commit đầu tiên
+
+Feature này nằm trong monolith dạng mô-đun của `identity-service`. Package KYC tuân thủ nghiêm ngặt mô hình ports-and-adapters:
+
+```
+src/main/java/com/finpay/identity/kyc/
+├── domain/                      # Java thuần, zero Spring, zero SDK
+│   ├── model/
+│   │   ├── DocumentSnapshot.java
+│   │   ├── StructuredFields.java
+│   │   ├── Confidence.java
+│   │   ├── RiskAssessment.java
+│   │   ├── Decision.java
+│   │   └── KycEvent.java
+│   ├── ports/
+│   │   ├── in/IntakeUseCase.java        # primary (driving) port
+│   │   ├── in/AuditUseCase.java
+│   │   └── out/
+│   │       ├── VisionExtractionPort.java
+│   │       ├── LlmJudgePort.java
+│   │       ├── DecisionStorePort.java
+│   │       ├── KycEventPublisherPort.java
+│   │       └── FraudCheckPort.java
+│   └── service/
+│       ├── DocumentIntakeService.java
+│       └── DecisionEngine.java
+└── infrastructure/              # Spring, Kafka, OpenSearch, SDK — tất cả ở đây
+    ├── kafka/
+    │   ├── DocumentUploadedConsumer.java
+    │   └── DecisionEventProducer.java
+    ├── openai/
+    │   ├── OpenAiVisionAdapter.java
+    │   └── OpenAiJudgeAdapter.java
+    ├── opensearch/
+    │   ├── DecisionDocument.java
+    │   └── OpenSearchDecisionStore.java
+    └── audit/
+        └── AuditLogWriter.java
+```
+
+**Vì sao quan trọng:** `domain/` không import gì từ Spring, Kafka SDK, hay OpenAI. Nó có thể được test bằng JUnit thuần trong vài mili-giây. Toàn bộ câu chuyện AI — mô hình, prompt, token budget, nhà cung cấp — chỉ nằm trong một adapter có thể thay thế. Khi nhà cung cấp vision tăng giá gấp đôi, chúng tôi đổi adapter trong một buổi chiều, chứ không phải viết lại toàn bộ.
+
+## WRONG: nỗ lực ngây thơ đầu tiên
+
+Đây là thứ các đội ngũ có thiện chí thường đưa lên production. Lớp web gọi thẳng mô hình bên trong transaction và tin tuyệt đối vào output. Mỗi sai lầm dưới đây đều là một sự cố có thật mà chúng tôi (và các fintech sử dụng AI khác) từng gặp.
+
+```java
+@RestController
+public class KycIntakeController {
+
+    private final OpenAiClient openAiClient;  // SDK của nhà cung cấp trong controller
+    private final JdbcTemplate jdbcTemplate;
+
+    @PostMapping("/v1/kyc/documents")
+    public Map<String, Object> intake(@RequestParam("file") MultipartFile file) {
+        String base64 = Base64.getEncoder().encodeToString(file.getBytes());
+
+        // 1. Gọi SDK của nhà cung cấp trực tiếp từ lớp web
+        ChatCompletionRequest request = ChatCompletionRequest.builder()
+                .model("gpt-4o-vision")
+                .messages(List.of(
+                        Message.ofUserContent("""
+                                Extract: fullName, docNumber, dateOfBirth,
+                                expiryDate, documentType, country. Return JSON.
+                                """),
+                        Message.ofUserPart(new ImageContent("data:image/jpeg;base64," + base64))
+                ))
+                .responseFormat("json_object")
+                .build();
+
+        ChatCompletionResult result = openAiClient.chatCompletions(request);
+        String json = result.getChoices().get(0).getMessage().getContent();
+
+        // 2. Coi output của LLM là ground truth, parse vỡ khi có văn xuôi
+        String name = extract(json, "fullName");
+        String docNumber = extract(json, "docNumber");
+        // ...
+
+        // 3. Lưu blob JSON thô: không truy vấn được, không kiểm toán được
+        jdbcTemplate.update(
+                "INSERT INTO kyc_documents (data) VALUES (?)",
+                json);
+
+        // 4. Lời của mô hình CHÍNH LÀ quyết định — không rule, không người duyệt
+        boolean approved = name != null && docNumber != null;
+        return Map.of("approved", approved);
+    }
+}
+```
+
+### Sai ở đâu, chi tiết
+
+1. **SDK của nhà cung cấp chi phối lớp web.** Đặt `OpenAiClient` trong controller nghĩa là transport, serialization, retry policy và tên mô hình đều bị gắn chặt với HTTP. Bạn không thể unit test `intake()` mà không mock SDK bên thứ ba, cũng không thể đổi nhà cung cấp.
+2. **HTTP timeout giờ chính là độ trễ của mô hình.** Mô hình có thể mất 10–60 giây khi quá tải. Thread p
+Rewrite both. Write:
+  /tmp/rt_31_kyc-document-intake-llm/kyc-document-intake-llm.en.md
+  /tmp/rt_31_kyc-document-intake-llm/kyc-document-intake-llm.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

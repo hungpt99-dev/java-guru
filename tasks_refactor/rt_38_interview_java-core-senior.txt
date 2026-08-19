@@ -1,0 +1,183 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #38: interview/java-core-senior
+CURRENT EN FILE (rewrite to /tmp/rt_38_java-core-senior/java-core-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #1: Java Core (JVM, GC, Concurrency) — Junior to Senior"
+description: "The backbone of every Java interview: JVM memory, garbage collection, the JMM, and concurrency. Fifty interview-grade questions, from 'what is the heap?' to 'here is how I halved GC pauses on a 40 GB service.'"
+pubDatetime: 2026-08-10T10:00:00+07:00
+featured: true
+draft: false
+tags:
+  - java
+  - interview
+  - java-core
+  - concurrency
+---
+
+Java core is the filter that ends more interviews than system design ever does. A junior can memorize keywords; a senior can prove they have stared at a heap dump at 3 a.m. This post covers the same topic from "what is the heap?" to "here is how I halved GC pauses on a 40 GB service": 50 questions. Pick the level you are interviewing for, then read one level above it.
+
+> Mindset: a junior can name the garbage collectors; a senior can tell you which one paused their service last quarter, for how long, and what they changed.
+
+## Junior — foundations
+
+**Q1. What are the main memory areas of the JVM?**
+The JVM divides memory into the **heap** (all object instances; shared and GC-managed), **metaspace** (class metadata, formerly PermGen), a **stack** for each thread (frames, local variables, and operands), a **PC register** for each thread, and **native method stacks**. Everything you create with `new` lives in the heap; every method call pushes a frame onto the thread's stack. The heap typically accounts for 70–90% of a Java process's RAM; metaspace starts at roughly 20 MB and grows.
+
+**Q2. What is the difference between `==` and `equals()`?**
+`==` compares references (whether two references point to the same object). `equals()` compares _logical_ equality; you must override it (together with `hashCode()`) or inherit `Object`'s reference-based comparison. Two `String`s with the same characters are `==` only when they refer to the same interned literal in the string pool:
+
+```java
+String a = "java";
+String b = new String("java");
+System.out.println(a == b);        // false — different objects
+System.out.println(a.equals(b));   // true  — same characters
+```
+
+**Q3. What are the primitive types and are they objects?**
+`byte, short, int, long, float, double, char, boolean` are the eight primitive types. They are stored by value, not as objects. Everything else is a reference to a heap object. Autoboxing (`int` ↔ `Integer`) hides allocations; `IntegerCache` interns values from -128 to 127, so `Integer.valueOf(42) == Integer.valueOf(42)` is `true`, but `Integer.valueOf(200) == Integer.valueOf(200)` is `false`.
+
+**Q4. `String`, `StringBuilder`, `StringBuffer` — what's the difference?**
+`String` is immutable: every concatenation allocates a new object. `StringBuilder` is mutable and not thread-safe, which makes it fast. `StringBuffer` is similar but synchronized, so it is slower and rarely needed. In a loop, `+=` on a `String` causes O(n²) allocations; use `StringBuilder` instead.
+
+**Q5. `final`, `finally`, `finalize` — what do they mean?**
+`final` forbids subclassing a class, overriding a method, or reassigning a variable. `finally` runs after `try`/`catch`, regardless of whether an exception was thrown, and is commonly used for cleanup. `finalize()` is a deprecated hook that the GC may call before reclaiming an object. Never rely on it; use `try-with-resources` or `Cleaner` instead.
+
+**Q6. Checked vs unchecked exceptions?**
+Checked exceptions (`Exception` minus `RuntimeException`) must be caught or declared; they model recoverable conditions. Unchecked exceptions (`RuntimeException` and `Error`) need not be declared. Modern code generally prefers unchecked exceptions for programming errors and reserves checked exceptions for genuinely external failures.
+
+**Q7. What is autoboxing and a trap it causes?**
+Autoboxing automatically converts a primitive to its wrapper type (`int`→`Integer`). The trap is that `Integer` is an object: `Map<Integer,String>` lookups with a primitive key auto-box it, while unboxing `null` throws `NullPointerException`:
+
+```java
+Integer i = null;
+int x = i;   // NullPointerException at runtime — autounbox of null
+```
+
+**Q8. What is the difference between `int` and `Integer` in a collection?**
+Collections store only objects, so `List<Integer>` boxes each `int`, adding roughly 16 bytes of object overhead per value along with extra GC pressure. For 1M ints, that is roughly 16 MB of wrapper objects. Use `int[]` or primitive-oriented streams and arrays when size and speed matter.
+
+**Q9. How does `switch` work on `String` (Java 7+)?**
+The compiler hashes the string and compares it with `equals` in a synthetic lookup: O(1) amortized, but with hidden `hashCode` and `equals` costs. It is not the jump table used by `int` and `enum` switches. For hot paths, prefer `enum` switches (~1 ns) over `String` switches (~10–20 ns).
+
+**Q10. What is a `static` block and when does it run?**
+A `static {}` block runs once, when the class is first loaded (lazily, on first use). It initializes static state. A common bug is a `static` initializer that throws, leaving the class in a permanently unusable state (`ExceptionInInitializerError`).
+
+**Q11. What is the difference between `this` and `super`?**
+`this` refers to the current instance; `super` refers to the superclass's implementation. `super()` (the first statement in a constructor) calls the parent constructor; omitting it implicitly calls the parent's no-argument constructor.
+
+**Q12. What is method overloading resolution order?**
+The compiler picks the most specific applicable overload at compile time; it does not choose based on the runtime type. Ambiguity (for example, `log(Object)` versus `log(String)` with `null`) is a compile-time error, not a runtime choice.
+
+**Q13. What is the default value of an uninitialized field vs local?**
+Object fields get type-specific defaults (`0`, `false`, `null`); local variables are uninitialized, and the compiler forbids using them before assignment. This is why `int x; System.out.println(x);` does not compile.
+
+**Q14. What is the difference between `>>` and `>>>`?**
+`>>` is a signed right shift (the sign bit is replicated); `>>>` is unsigned (zero-filled). They differ for negative numbers: `-8 >> 1` is `-4`, while `-8 >>> 1` is a very large positive number. Use `>>>` when treating bits as unsigned data.
+
+**Q15. What is the difference between `Math.round`, `ceil`, `floor`?**
+`round` returns the nearest `long` or `int` (0.5 rounds up); `ceil` rounds up to the next `double`; `floor` rounds down. `Math.round(-2.5)` is `-2` (toward +∞, not "away from zero"), which is a frequent trap.
+
+## Mid — trade-offs and pitfalls
+
+**Q1. How does the generational garbage collector work, and what breaks in production?**
+The heap is split into **young** (Eden plus two Survivor spaces) and **old** generations. Most objects die young: a minor GC copies survivors from Eden to a Survivor space, then promotes them to old once they age out. A **major/full GC** collects the old gene
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #1: Java Core (JVM, GC, Concurrency) — Junior đến Senior"
+description: "Nội dung cốt lõi quyết định kết quả của nhiều buổi phỏng vấn Java hơn cả system design: bộ nhớ JVM, garbage collection, JMM và concurrency. 50 câu hỏi phỏng vấn, từ 'heap là gì?' đến 'tôi đã giảm một nửa thời gian GC pause trên service 40 GB như thế nào'."
+pubDatetime: 2026-08-10T10:00:00+07:00
+featured: true
+draft: false
+tags:
+  - java
+  - interview
+  - java-core
+  - concurrency
+---
+
+Java core là phần kiến thức quyết định kết quả của nhiều buổi phỏng vấn hơn cả system design. Junior có thể học thuộc keyword; senior có thể chứng minh mình từng xem heap dump lúc 3 giờ sáng. Bài viết này đi từ "heap là gì?" đến "tôi đã giảm một nửa thời gian GC pause trên service 40 GB như thế nào": 50 câu hỏi. Hãy chọn cấp độ phù hợp với buổi phỏng vấn của bạn, rồi đọc thêm một cấp độ cao hơn.
+
+> Tư duy: junior gọi tên được các garbage collector; senior nói được collector nào đã pause service của mình trong quý trước, pause bao lâu và họ đã thay đổi điều gì.
+
+## Junior — nền tảng
+
+**Q1. Các vùng nhớ chính của JVM là gì?**
+JVM chia bộ nhớ thành: **heap** (mọi object instance, được chia sẻ và GC quản lý), **metaspace** (class metadata, trước đây là PermGen), **stack** của mỗi thread (frame, biến cục bộ và operand), **PC register** của mỗi thread, và **native method stack**. Mọi thứ bạn tạo bằng `new` đều nằm trong heap; mỗi lần gọi method sẽ đẩy một frame lên stack của thread. Heap thường chiếm 70–90% RAM của một process Java; metaspace bắt đầu ở khoảng 20 MB và sẽ tăng dần.
+
+**Q2. `==` và `equals()` khác nhau như thế nào?**
+`==` so sánh reference, tức là kiểm tra hai reference có trỏ đến cùng một object hay không. `equals()` so sánh tính bằng nhau về mặt logic; bạn phải override method này (cùng với `hashCode()`) hoặc sử dụng cách so sánh reference được kế thừa từ `Object`. Hai `String` có cùng ký tự chỉ bằng nhau với `==` khi chúng cùng trỏ đến một literal đã được intern trong string pool:
+
+```java
+String a = "java";
+String b = new String("java");
+System.out.println(a == b);        // false — object khác nhau
+System.out.println(a.equals(b));   // true  — cùng ký tự
+```
+
+**Q3. Primitive type là gì, và chúng có phải object không?**
+`byte, short, int, long, float, double, char, boolean` là tám primitive type. Chúng được lưu theo giá trị, không phải object. Mọi kiểu khác đều là reference trỏ đến một object trên heap. Autoboxing (`int`↔`Integer`) che giấu việc cấp phát object; `IntegerCache` intern các giá trị từ -128 đến 127, nên `Integer.valueOf(42) == Integer.valueOf(42)` là `true`, còn `Integer.valueOf(200) == Integer.valueOf(200)` là `false`.
+
+**Q4. `String`, `StringBuilder` và `StringBuffer` khác nhau như thế nào?**
+`String` là immutable: mỗi lần nối chuỗi đều cấp phát một object mới. `StringBuilder` mutable và không thread-safe nên nhanh. `StringBuffer` tương tự nhưng có `synchronized`, vì vậy chậm hơn và hiếm khi cần dùng. Trong loop, `+=` trên `String` gây ra O(n²) lần cấp phát; hãy dùng `StringBuilder`.
+
+**Q5. `final`, `finally` và `finalize` có nghĩa là gì?**
+`final` ngăn việc subclass một class, override một method hoặc gán lại một variable. `finally` chạy sau `try`/`catch`, bất kể có exception hay không, và thường được dùng để cleanup. `finalize()` là một hook đã deprecated mà GC có thể gọi trước khi thu hồi object. Đừng bao giờ phụ thuộc vào nó; hãy dùng `try-with-resources` hoặc `Cleaner`.
+
+**Q6. Checked vs unchecked exception?**
+Checked exception (`Exception` trừ `RuntimeException`) phải được catch hoặc declare; chúng mô hình hóa các tình huống có thể khôi phục. Unchecked exception (`RuntimeException`, `Error`) không cần được declare. Code hiện đại thường dùng unchecked exception cho programming error và dành checked exception cho các lỗi bên ngoài thực sự cần xử lý.
+
+**Q7. Autoboxing là gì, và nó gây ra một bẫy nào?**
+Autoboxing tự động chuyển primitive thành wrapper (`int`→`Integer`). Bẫy nằm ở chỗ `Integer` là object: khi lookup `Map<Integer,String>` bằng primitive key, key sẽ được auto-box; còn unbox `null` sẽ throw `NullPointerException`:
+
+```java
+Integer i = null;
+int x = i;   // NullPointerException lúc runtime — unbox của null
+```
+
+**Q8. `int` và `Integer` khác nhau như thế nào trong collection?**
+Collection chỉ lưu object, nên `List<Integer>` phải box mỗi `int`, làm tăng khoảng 16 byte overhead cho mỗi giá trị và tạo thêm áp lực lên GC. Với 1M int, riêng wrapper object đã chiếm khoảng 16 MB. Hãy dùng `int[]` hoặc stream và array chuyên cho primitive khi kích thước và tốc độ quan trọng.
+
+**Q9. `switch` trên `String` (Java 7+) hoạt động như thế nào?**
+Compiler hash string rồi so sánh bằng `equals` trong một lookup được sinh tự động: O(1) amortized nhưng có thêm cost ẩn của `hashCode` và `equals`, chứ không dùng jump table như `switch` trên `int`/`enum`. Với hot path, nên ưu tiên `enum` switch (~1 ns) thay vì `String` switch (~10–20 ns).
+
+**Q10. `static` block là gì và chạy khi nào?**
+`static {}` chạy một lần, khi class được load lần đầu (lazy, tức là lúc được sử dụng lần đầu). Nó khởi tạo static state. Một bug thường gặp là static initializer throw exception, khiến class rơi vào trạng thái không thể sử dụng được nữa (`ExceptionInInitializerError`).
+
+**Q11. `this` và `super` khác nhau như thế nào?**
+`this` trỏ đến instance hiện tại; `super` trỏ đến implementation của superclass. `super()` (câu lệnh đầu tiên trong constructor) gọi parent constructor; nếu bỏ qua, compiler sẽ ngầm gọi constructor không tham số của parent.
+
+**Q12. Thứ tự phân giải method overloading là gì?**
+Compiler chọn overload cụ thể nhất có thể áp dụng tại compile time; nó KHÔNG chọn dựa trên runtime type. Trường hợp mơ hồ, chẳng hạn `log(Object)` và `log(String)` khi truyền `null`, là compile error chứ không phải lựa chọn ở runtime.
+
+**Q13. Giá trị mặc định của field chưa được khởi tạo khác local variable như thế nào?**
+Object field có giá trị mặc định theo type (`0`, `false`, `null`); local variable không được tự động khởi tạo và compiler cấm sử dụng trước khi assignment. Đó là lý do `int x; System.out.println(x);` không compile.
+
+**Q14. `>>` và `>>>` khác nhau như thế nào?**
+`>>` là signed right shift, lặp lại sign bit; `>>>` là unsigned right shift, điền bằng zero. Với số âm, chúng cho kết quả khác nhau: `-8 >> 1` là `-4`, còn `-8 >>> 1` là một số dương rất lớn. Dùng `>>>` khi xử lý bit như unsigned data.
+
+**Q15. `Math.round`, `ceil` và `floor` khác nhau như thế nào?**
+`round` trả về `long` hoặc `int` gần nhất (0.5 làm tròn lên); `ceil` làm tròn lên thành `double` tiếp theo; `floor` làm tròn xuống. `Math.round(-2.5)` bằng `-2` (về phía +∞, không phải "xa số 0"), đây là một bẫy thường gặp.
+
+## Mid — trade-off và điểm cần lưu ý
+
+**Q1. Generational GC hoạt động ra sao, và điều gì có thể gây sự cố trong production?**
+Heap được chia thành **young** (Eden và hai Survivor) và **old**. Hầu hết object đều chết khi còn trẻ: minor GC copy survivor từ Eden sang Survivor, rồi chuyển chúng sang old khi đủ tuổi. **Maj
+Rewrite both. Write:
+  /tmp/rt_38_java-core-senior/java-core-senior.en.md
+  /tmp/rt_38_java-core-senior/java-core-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,287 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #44: interview/system-design-senior
+CURRENT EN FILE (rewrite to /tmp/rt_44_system-design-senior/system-design-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #7: System Design — Junior to Senior"
+description: "System design is the senior capstone: a 45-minute test of judgment. Process, capacity estimation, caching, CAP, scalability, and observability."
+pubDatetime: 2026-08-10T10:25:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - system-design
+  - scalability
+---
+
+System design is the interview with no single right answer — only defensible trade-offs. Junior candidates name components; seniors take a problem from vague requirements to a design backed by numbers and explain where it breaks. This post moves from "draw a diagram" to "here is the latency budget and the failure I'm watching" — 50 questions: pick the level you are interviewing for, then read one level above it.
+
+> Mindset: a junior produces a diagram; a senior produces a diagram _and_ a latency budget, a capacity estimate, and the single failure mode most likely to page them at 2 a.m.
+
+## Junior — Foundations
+
+**Q1. What are the main building blocks of a web system?**
+A typical stack is a pipeline in which each layer adds a capability: the LB spreads load, the cache absorbs reads, the queue decouples slow work, and the DB owns the truth. Know the role of each block before you debate any of them:
+
+```
+Client ──> DNS ──> Load Balancer ──> App Servers ──> Cache (Redis)
+                         │               │  │            │
+                         │               │  └──> Message Queue ──> Workers
+                         │               └──────> Database (primary ──> replicas)
+                         └───────────────> CDN (static assets)
+```
+
+**Q2. What happens when you type a URL and press Enter?**
+DNS lookup → TCP handshake → TLS handshake → HTTP request → app logic → response. Each step takes a measurable amount of time — DNS ~10–50 ms (cached ~0 ms), RTT ~1–50 ms, TLS ~10–100 ms. This is your first latency budget: a "fast" request mostly waits on the network, not your code:
+
+```text
+browser → DNS (10–50 ms) → TCP handshake (1 RTT) → TLS (1–2 RTT, ~10–100 ms)
+        → HTTP req (RTT) → app logic (10–200 ms) → HTTP resp (RTT)
+a 200 ms budget: network eats ~60–80% of it before your code runs
+```
+
+**Q3. What is the difference between L4 and L7 load balancing?**
+L4 routes by TCP/UDP port — fast (~µs), with no packet inspection, but unable to route by URL. L7 routes by HTTP — slower (it parses headers, ~tens of µs), but it can route by path, retry, and use sticky sessions:
+
+```
+L4:  Client ── TCP:443 ──> LB ──> any healthy node
+L7:  Client ──> LB ── /api/*    ──> api nodes
+                  └─ /static/*  ──> CDN origin
+```
+
+**Q4. What is the difference between horizontal and vertical scaling?**
+Vertical = a bigger machine (more CPU/RAM) — simple but capped at the largest cloud instance and a SPOF. Horizontal = more nodes behind an LB — no hard cap, but requires statelessness. If one node handles ~500 RPS and you need 10k QPS, vertical scaling needs a 20× machine that does not exist; horizontal scaling needs ~20–25 nodes (with headroom):
+
+```text
+needed_nodes = target_rps / per_node_rps × (1 + headroom)
+             = 10_000 / 500 × 1.25 ≈ 25 nodes
+```
+
+**Q5. What does stateless mean, and why does it matter for scaling?**
+A stateless server keeps no per-request state — every request carries what it needs, so any node can serve any request. In-memory sessions are the classic violation; moving them to a shared store (Redis) or a client token fixes it:
+
+```java
+// WRONG — state in the instance, sticky sessions required
+session.put("cart", cart);
+
+// RIGHT — state outside the instance; any node handles any request
+String cartId = redis.set(cartJson);   // TTL 24h
+```
+
+**Q6. What is cache-aside, and when does it break?**
+The app checks the cache first; on a miss, it reads the DB, populates the cache, and returns the result. This is simple and resilient (a cache failure falls back to the DB), but you pay for a stale window and risk a stampede when a hot key misses:
+
+```java
+String v = redis.get(key);
+if (v == null) {
+    v = db.query(key);              // miss: hit the DB
+    redis.set(key, v, 60s);         // populate with TTL
+}
+return v;                           // hit rate ~95% on hot keys
+```
+
+**Q7. What is a CDN and when do you use it?**
+A CDN caches static assets at edge locations near users, reducing both latency and origin load. Use it for anything static and read-heavy. Dynamic, user-specific responses are not cached — that is the boundary:
+
+```
+user in Hanoi ──> edge node SG (5 ms) ──> cache hit, done
+origin in Frankfurt (200 ms) only touched on cache miss
+```
+
+**Q8. What is the difference between SQL and NoSQL, in one minute?**
+SQL provides ACID, joins, and a strong schema — best for transactional relational data (money, orders). NoSQL trades guarantees for scale and a flexible schema — best for high-volume or loosely structured data (sessions, time series, graphs). Choose based on data shape and consistency needs, not fashion:
+
+```text
+order + money + joins → SQL (ACID across rows)
+sessions, feeds, metrics, docs → NoSQL (scale-out, flexible schema)
+the hybrid that wins: Redis cache + Postgres truth + column store for analytics
+```
+
+**Q9. What is a database index, and why does a query slow down without one?**
+An index is a sorted structure (B-tree) mapping a key to a row location, turning a full table scan into a logarithmic-time lookup. Without an index, scanning a 10M-row table takes ~1–5 s and reads every row; with one, a lookup takes ~1–10 ms and reads a few pages. Indexes have a cost — every write must update them:
+
+```text
+no index:  SELECT * FROM orders WHERE user_id = 42 → full scan of 10M rows ~1–5 s
+with index: B-tree lookup → ~1–10 ms (a few pages read, not 10M rows)
+cost: each INSERT/UPDATE now also writes the index B-tree
+```
+
+**Q10. What is a message queue, and what problem does it solve?**
+A queue buffers work between a producer and a consumer that cannot keep pace, decoupling them so a slow consumer or a crash does not block the producer — and it smooths spikes: the queue absorbs the burst, and consumers drain it at their own rate:
+
+```
+Producers (10k req/s burst) ──> Queue ──> Consumers (drain 2k req/s)
+                                      └──> retries + no drops, drains after the spike
+```
+
+**Q11. What is CAP in plain terms?**
+You cannot have all three of Consistency, Availability, and Partition tolerance — and partitions (network splits) are inevitable, so in practice you choose between **CP** (pause writes to remain consistent) and **AP** (stay available while risking stale reads). A payments ledger is CP; a social feed is AP. The interview trap is claiming, "We have all three":
+
+```text
+         Consistency
+            /\
+           /  \
+          /    \
+         /  YOU \
+        /   pick \
+       /    ONE   \
+Consistency─CP───AP─Availability
+   (pause)      (stale)
+   ZooKeeper    Cassandra
+   ledgers      like-counts
+```
+
+**Q12. Monolith vs microservices — which is better?**
+A mon
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #7: System Design — Junior đến Senior"
+description: "System design là phần tổng kết dành cho senior: một bài kiểm tra khả năng phán đoán trong 45 phút. Quy trình, ước lượng capacity, caching, CAP, scalability và observability."
+pubDatetime: 2026-08-10T10:25:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - system-design
+  - scalability
+---
+
+System design là buổi phỏng vấn không có đáp án duy nhất — chỉ có những trade-off có thể bảo vệ được. Junior gọi tên các component; senior đưa một bài toán từ yêu cầu mơ hồ đến thiết kế dựa trên số liệu và chỉ ra nơi nó sẽ gãy. Bài này đi từ "vẽ diagram" đến "đây là latency budget và failure tôi đang theo dõi" — gồm 50 câu hỏi; hãy chọn đúng level bạn đang phỏng vấn và đọc thêm một level cao hơn.
+
+> Mindset: junior tạo ra một diagram; senior tạo ra một diagram _và_ latency budget, capacity estimate, cùng failure mode duy nhất có khả năng page họ lúc 2 giờ sáng cao nhất.
+
+## Junior — Nền tảng
+
+**Q1. Các building block chính của một web system là gì?**
+Một stack điển hình là một pipeline, trong đó mỗi layer bổ sung một khả năng: LB dàn đều tải, cache hấp thụ các read, queue tách rời công việc chậm, còn DB nắm dữ liệu chuẩn. Hãy hiểu vai trò của từng block trước khi tranh luận về bất kỳ block nào:
+
+```
+Client ──> DNS ──> Load Balancer ──> App Servers ──> Cache (Redis)
+                         │               │  │            │
+                         │               │  └──> Message Queue ──> Workers
+                         │               └──────> Database (primary ──> replicas)
+                         └───────────────> CDN (tài nguyên tĩnh)
+```
+
+**Q2. Chuyện gì xảy ra khi bạn gõ một URL và nhấn Enter?**
+DNS lookup → bắt tay TCP → bắt tay TLS → HTTP request → logic app → response. Mỗi bước đều tốn một khoảng thời gian đo được — DNS ~10–50 ms (nếu đã cache thì ~0 ms), RTT ~1–50 ms, TLS ~10–100 ms. Đây là latency budget đầu tiên của bạn: một request "nhanh" chủ yếu là chờ mạng, không phải chờ code:
+
+```text
+browser ──> DNS (10–50 ms) ──> bắt tay TCP (1 RTT) ──> TLS (1–2 RTT, ~10–100 ms)
+        ──> HTTP req (RTT) ──> logic app (10–200 ms) ──> HTTP resp (RTT)
+budget 200 ms: mạng ngốn ~60–80% trước khi code của bạn chạy
+```
+
+**Q3. Khác nhau giữa load balancing L4 và L7 là gì?**
+L4 route theo port TCP/UDP — nhanh (~µs), không soi gói tin, không route theo URL. L7 route theo HTTP — chậm hơn (phải parse header, ~vài chục µs), nhưng route theo path, retry, và sticky session được:
+
+```
+L4:  Client ── TCP:443 ──> LB ──> bất kỳ node khỏe mạnh nào
+L7:  Client ──> LB ── /api/*    ──> node api
+                  └─ /static/*  ──> CDN origin
+```
+
+**Q4. Khác nhau giữa horizontal và vertical scaling là gì?**
+Vertical = máy to hơn (nhiều CPU/RAM) — đơn giản nhưng bị chặn ở instance cloud lớn nhất và là SPOF. Horizontal = thêm node sau LB — không giới hạn cứng, nhưng đòi hỏi statelessness. Nếu một node làm ~500 RPS và bạn cần 10k QPS, vertical cần một máy 20× mà không tồn tại; horizontal cần ~20–25 node (có headroom):
+
+```text
+needed_nodes = target_rps / per_node_rps × (1 + headroom)
+             = 10_000 / 500 × 1.25 ≈ 25 nodes
+```
+
+**Q5. Stateless nghĩa là gì, và tại sao nó quan trọng cho scaling?**
+Server stateless không giữ bộ nhớ theo từng request — mỗi request tự mang đủ thứ nó cần, nên node nào cũng phục vụ được request nào. Session trong memory là vi phạm kinh điển; chuyển chúng sang shared store (Redis) hoặc client token là cách sửa:
+
+```java
+// SAI — trạng thái nằm trong instance, phải sticky session
+session.put("cart", cart);
+
+// ĐÚNG — trạng thái nằm ngoài instance; node nào cũng xử lý được request nào
+String cartId = redis.set(cartJson);   // TTL 24h
+```
+
+**Q6. Cache-aside là gì, và khi nào nó vỡ?**
+App kiểm tra cache trước; miss thì đọc DB, đổ vào cache, rồi trả về. Đơn giản và resilient (cache hỏng thì fallback về DB) nhưng bạn trả giá bằng cửa sổ stale và rủi ro stampede khi hot-key miss:
+
+```java
+String v = redis.get(key);
+if (v == null) {
+    v = db.query(key);              // miss: gọi DB
+    redis.set(key, v, 60s);         // populate với TTL
+}
+return v;                           // hit rate ~95% trên hot key
+```
+
+**Q7. CDN là gì và khi nào bạn dùng nó?**
+CDN cache tài nguyên tĩnh tại edge gần người dùng, cắt cả latency lẫn tải origin. Dùng cho mọi thứ tĩnh và read-heavy. Response động, theo từng user thì không cache được — đó là ranh giới:
+
+```
+user ở Hà Nội ──> edge node SG (5 ms) ──> cache hit, xong
+origin ở Frankfurt (200 ms) chỉ bị đụng khi cache miss
+```
+
+**Q8. Khác nhau giữa SQL và NoSQL, trong một phút?**
+SQL cho ACID, join, và schema mạnh — tốt nhất cho dữ liệu quan hệ mang tính giao dịch (tiền, đơn hàng). NoSQL đánh đổi guarantee lấy scale và schema linh hoạt — tốt nhất cho dữ liệu khối lượng lớn hoặc lỏng lẻo (session, time-series, graph). Chọn theo hình dạng dữ liệu và nhu cầu consistency, không theo mốt:
+
+```text
+order + tiền + join → SQL (ACID xuyên các dòng)
+session, feed, metric, doc → NoSQL (scale-out, schema linh hoạt)
+hybrid thắng cuộc: Redis cache + Postgres làm sự thật + column store cho analytics
+```
+
+**Q9. Database index là gì, và tại sao query chậm khi không có nó?**
+Index là cấu trúc đã sắp xếp (B-tree) ánh xạ key → vị trí dòng, biến full table scan thành lookup log-time. Không có index, quét bảng 10M dòng mất ~1–5 s và đọc từng dòng; có index, lookup ~1–10 ms và chỉ đọc vài page. Index có giá — mỗi lần ghi phải cập nhật nó:
+
+```text
+không index:  SELECT * FROM orders WHERE user_id = 42 → quét toàn bộ 10M dòng ~1–5 s
+có index: tra B-tree → ~1–10 ms (đọc vài page, không phải 10M dòng)
+chi phí: mỗi INSERT/UPDATE giờ cũng phải ghi B-tree của index
+```
+
+**Q10. Message queue là gì, và nó giải quyết vấn đề gì?**
+Queue đệm công việc giữa producer và consumer không theo kịp pace, tách rời chúng để consumer chậm hoặc crash không chặn producer — và nó làm phẳng spike: queue hấp thụ burst, consumer rút nước theo tốc độ của mình:
+
+```
+Producer (burst 10k req/s) ──> Queue ──> Consumer (rút 2k req/s)
+                                     └──> retry + không drop, rút nốt sau spike
+```
+
+**Q11. CAP bằng lời đơn giản là gì?**
+Bạn không thể có cả ba Consistency, Availability, và Partition tolerance — và partition (mạng bị chia cắt) là điều không tránh khỏi, nên thực tế bạn chọn giữa **CP** (tạm dừng ghi để giữ nhất quán) và **AP** (vẫn sống, chấp nhận đọc stale). Sổ cái thanh toán là CP; social feed là AP. Bẫy phỏng vấn là nói "chúng tôi có cả ba":
+
+```text
+         Consistency
+            /\
+           /  \
+          /    \
+         /  BẠN \
+        /  chọn  \
+       /   MỘT    \
+Consistency─CP───AP─Availability
+   (dừng ghi)  (đọc stale)
+   ZooKeeper    Cassandra
+   sổ cái       like-count
+```
+
+**Q12. Monolith vs microservices — cái nào tốt hơn?**
+Monolith là một deployable; microservices là nhiều deployable nhỏ với các cuộc gọi mạng giữa chúng. Monolith thắng ở sự đơn giản và transaction; microservices thắng ở scale và deploy độc lập. Một team 3 người với monolith ở 10k QPS đánh b
+Rewrite both. Write:
+  /tmp/rt_44_system-design-senior/system-design-senior.en.md
+  /tmp/rt_44_system-design-senior/system-design-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,231 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #1: system-design/aws-architecture-patterns
+CURRENT EN FILE (rewrite to /tmp/rt_1_aws-architecture-patterns/aws-architecture-patterns.en.md):
+=== EN CURRENT ===
+---
+title: "Production Order Processing with AWS Architecture Patterns"
+description: "A source-disciplined design for a multi-AZ, queue-backed order-processing system, including its failure boundaries and delivery guarantees."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem and Scope
+
+[SOURCE FACT] The supplied source is the [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/). The verified material supplied with this article does not describe one named production system, its traffic, database schema, or implementation details.
+
+[ANALYSIS] That distinction limits what can be claimed. An architecture-blog landing page is not evidence for a particular AWS internal topology. The useful engineering question is how to apply the stated themes, such as well-architected design, multi-AZ deployment, decoupling, queues, and resilience, to a system that can tolerate partial failure without making synchronous callers wait for every downstream operation.
+
+[PROPOSED DESIGN] This article uses an order-processing platform as a concrete design exercise. A client submits an order, receives a response after the request has been durably recorded, and later reads fulfillment progress. The platform must preserve the order intent, avoid duplicate side effects during retries, keep slow workers out of the request path, and continue accepting work when an availability zone or worker pool is impaired.
+
+The central design work is defining failure boundaries and guarantees:
+
+- The synchronous path validates and durably records an order.
+- A queue absorbs bursts and separates admission from processing.
+- Workers perform idempotent fulfillment and publish state changes.
+- Read paths remain available while asynchronous processing is delayed.
+
+## 2. Source Boundary and Proposed System
+
+[SOURCE FACT] No original runtime system is described in the verified material supplied for this article. The only verified source is the AWS Architecture Blog landing page: https://aws.amazon.com/blogs/architecture/.
+
+[ANALYSIS] It would be unsupported to state that AWS used a particular queue, database, retry policy, or multi-AZ diagram based on this source. The patterns below are engineering analysis and a proposed design, not a reconstruction of an AWS production implementation.
+
+[PROPOSED DESIGN] The request service writes an order and an outbox record in one database transaction. An outbox relay publishes the record to a durable queue. Fulfillment workers consume messages, update order state, and record an idempotency result. A separate notification consumer handles email or webhook delivery. These consumers can be scaled, paused, or repaired independently.
+
+An accepted order therefore means that the platform durably recorded the request. It does not mean that every downstream action has completed. This contract prevents a slow notification provider from extending the customer's request latency.
+
+## 3. Architecture
+
+[ANALYSIS] The supplied source does not name runtime components, so none of the components in this diagram should be read as source-backed AWS claims.
+
+[PROPOSED DESIGN] The topology is intentionally explicit about the proposed components:
+
+```mermaid
+flowchart LR
+    SRC["AWS Architecture Blog\n[Source-backed context]"]
+    C["Client"] --> G["API ingress\n[Proposed component]"]
+    G --> R["Order API\n[Proposed component]"]
+    R --> DB[("Orders + outbox\n[Proposed component]")]
+    DB --> O["Outbox relay\n[Proposed component]"]
+    O --> Q["Durable order queue\n[Proposed component]"]
+    Q --> W["Fulfillment workers\n[Proposed component]"]
+    W --> DB
+    W --> E["External fulfillment\n[Proposed component]"]
+    W --> NQ["Notification queue\n[Proposed component]"]
+    NQ --> N["Notification workers\n[Proposed component]"]
+    N --> P["Email/webhook provider\n[Proposed component]"]
+    R --> READ["Order status read API\n[Proposed component]"]
+    READ --> DB
+    SRC -. "focus only; not an implementation claim" .- R
+```
+
+[ANALYSIS] Multi-AZ deployment is a placement property, not an availability guarantee by itself. The stateless API and worker pools should be placed in at least two availability zones as a proposed deployment choice. The database, queue, and load-balancing layer need understood and tested failure behavior. Cross-zone redundancy does not remove dependency failures, bad deployments, exhausted connection pools, or poison messages.
+
+## 4. Request Path and Delivery Guarantees
+
+[ANALYSIS] The design separates several concerns: admission protects the user-facing path; durability protects accepted intent; asynchronous processing isolates variable downstream latency; and idempotency protects correctness when delivery is retried.
+
+[PROPOSED DESIGN] The Order API accepts a client-supplied idempotency key scoped to the customer. It validates the request, checks the key, and inserts the order and outbox event atomically. A retry with the same key and request hash returns the original result. Reusing the key with a different payload returns a conflict.
+
+[ANALYSIS] The outbox closes the dual-write gap. Without it, the API could commit an order and fail before publishing its queue message, or publish a message and fail before committing the order. The relay may publish an event more than once, so exactly-once delivery is not a safe assumption. Consumers must be idempotent.
+
+[PROPOSED DESIGN] Use guarded, monotonic state transitions:
+
+`PENDING -> PROCESSING -> FULFILLED`
+
+Also model `FAILED_RETRYABLE` and `FAILED_FINAL` explicitly. A worker claims work with a lease, calls the external fulfillment system with an idempotency token, and commits the result. When the lease expires, another worker may retry the message. The external operation must tolerate that retry; a local database lock cannot make an external side effect exactly once.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] A relational model makes the order transition and outbox insert atomic. The uniqueness constraint on `(customer_id, idempotency_key)` enforces the request contract at the database boundary.
+
+```sql
+CREATE TABLE orders (
+  order_id          UUID PRIMARY KEY,
+  customer_id       UUID NOT NULL,
+  idempotency_key   TEXT NOT NULL,
+  request_hash      TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  result_json       JSONB,
+  created_at        TIMESTAMP NOT NULL,
+  updated_at        TIMESTAMP NOT NULL,
+  UNIQUE (customer_id, idempotency_key)
+);
+
+CREATE TABLE outbox (
+  event_id          UUID PRIMARY KEY,
+  aggregate_id      UUID NOT NULL,
+  event_type        TEXT NOT NULL,
+  payload_json      JSONB NOT NULL,
+  published_at      TIMESTAMP
+);
+```
+
+[ANALYSIS] The outbox relay should claim unpublished rows safely, publish them, and mark them published. A crash between publish and the update creates a duplicate, which is why the queue consumer needs a durable deduplication or idempotency record. Retaining outbox rows until the publication 
+=== VI CURRENT ===
+---
+title: "Xử lý đơn hàng production với các mẫu kiến trúc AWS"
+description: "Thiết kế có phân biệt nguồn cho một hệ thống xử lý đơn hàng đa AZ, dựa trên hàng đợi, kèm ranh giới lỗi và bảo đảm delivery."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Bài toán và phạm vi
+
+[SOURCE FACT] Nguồn được cung cấp là [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/). Tài liệu đã xác minh được cung cấp cùng bài viết không mô tả một hệ thống production cụ thể, traffic, schema cơ sở dữ liệu hay chi tiết triển khai nào.
+
+[ANALYSIS] Giới hạn này quyết định những gì có thể khẳng định. Một trang tập hợp bài viết về kiến trúc không phải bằng chứng cho topology nội bộ cụ thể của AWS. Câu hỏi kỹ thuật hữu ích là: làm thế nào áp dụng các chủ đề như well-architected design, triển khai multi-AZ, decoupling, queue và resilience vào một hệ thống chịu được partial failure mà không buộc caller đồng bộ chờ mọi downstream operation?
+
+[PROPOSED DESIGN] Bài viết dùng một nền tảng xử lý đơn hàng làm bài toán thiết kế cụ thể. Client gửi order, nhận response sau khi request đã được ghi durable, rồi đọc tiến độ fulfillment sau đó. Nền tảng phải giữ được intent của order, tránh duplicate side effect khi retry, đưa worker chậm ra khỏi request path, và tiếp tục nhận việc khi một availability zone hoặc worker pool bị suy giảm.
+
+Phần quan trọng nhất là xác định failure boundary và guarantee:
+
+- Synchronous path xác thực và ghi durable order.
+- Queue hấp thụ burst và tách admission khỏi processing.
+- Worker thực hiện fulfillment idempotent và phát hành thay đổi trạng thái.
+- Read path vẫn hoạt động khi async processing bị chậm.
+
+## 2. Ranh giới nguồn và hệ thống đề xuất
+
+[SOURCE FACT] Tài liệu đã xác minh được cung cấp cho bài viết không mô tả runtime system gốc nào. Nguồn duy nhất được xác minh là landing page của AWS Architecture Blog: https://aws.amazon.com/blogs/architecture/.
+
+[ANALYSIS] Vì vậy, sẽ không có cơ sở nếu nói AWS đã dùng queue, database, retry policy hay sơ đồ multi-AZ cụ thể dựa trên nguồn này. Các mẫu bên dưới là phân tích kỹ thuật và proposed design, không phải bản tái dựng một triển khai production của AWS.
+
+[PROPOSED DESIGN] Request service ghi order và outbox record trong cùng một database transaction. Outbox relay phát hành record vào durable queue. Fulfillment worker consume message, cập nhật order state và ghi nhận kết quả idempotency. Notification consumer riêng xử lý email hoặc webhook. Các consumer có thể được scale, pause hoặc repair độc lập.
+
+Do đó, accepted order chỉ có nghĩa nền tảng đã ghi request một cách durable. Nó không có nghĩa mọi downstream action đã hoàn tất. Contract này ngăn notification provider chậm kéo dài request latency của khách hàng.
+
+## 3. Kiến trúc
+
+[ANALYSIS] Nguồn được cung cấp không nêu runtime component nào, nên không component nào trong sơ đồ được hiểu là claim về AWS.
+
+[PROPOSED DESIGN] Topology dưới đây cố ý đánh dấu rõ các component được đề xuất:
+
+```mermaid
+flowchart LR
+    SRC["AWS Architecture Blog\n[Source-backed context]"]
+    C["Client"] --> G["API ingress\n[Proposed component]"]
+    G --> R["Order API\n[Proposed component]"]
+    R --> DB[("Orders + outbox\n[Proposed component]")]
+    DB --> O["Outbox relay\n[Proposed component]"]
+    O --> Q["Durable order queue\n[Proposed component]"]
+    Q --> W["Fulfillment workers\n[Proposed component]"]
+    W --> DB
+    W --> E["External fulfillment\n[Proposed component]"]
+    W --> NQ["Notification queue\n[Proposed component]"]
+    NQ --> N["Notification workers\n[Proposed component]"]
+    N --> P["Email/webhook provider\n[Proposed component]"]
+    R --> READ["Order status read API\n[Proposed component]"]
+    READ --> DB
+    SRC -. "focus only; not an implementation claim" .- R
+```
+
+[ANALYSIS] Multi-AZ deployment là thuộc tính bố trí, tự nó không phải availability guarantee. Theo proposed deployment choice, stateless API và worker pool nên được đặt ở ít nhất hai availability zone. Database, queue và load-balancing layer cần có failure behavior được hiểu và kiểm thử. Redundancy giữa các zone không loại bỏ dependency failure, deployment lỗi, connection pool cạn hay poison message.
+
+## 4. Request path và delivery guarantee
+
+[ANALYSIS] Thiết kế tách các mối quan tâm chính: admission bảo vệ user-facing path; durability bảo vệ intent đã được chấp nhận; async processing cô lập downstream latency biến động; idempotency bảo vệ tính đúng đắn khi delivery bị retry.
+
+[PROPOSED DESIGN] Order API nhận idempotency key do client cung cấp và scope theo customer. API validate request, kiểm tra key, rồi insert order và outbox event một cách atomic. Retry với cùng key và request hash sẽ trả về kết quả ban đầu. Dùng lại key với payload khác sẽ trả conflict.
+
+[ANALYSIS] Outbox đóng dual-write gap. Không có outbox, API có thể commit order rồi lỗi trước khi publish queue message, hoặc publish message rồi lỗi trước khi commit order. Relay có thể publish event nhiều hơn một lần, nên không được giả định exactly-once delivery. Consumer phải idempotent.
+
+[PROPOSED DESIGN] Dùng state transition có kiểm soát và đơn điệu:
+
+`PENDING -> PROCESSING -> FULFILLED`
+
+Đồng thời model rõ `FAILED_RETRYABLE` và `FAILED_FINAL`. Worker claim việc bằng lease, gọi external fulfillment system với idempotency token, rồi commit kết quả. Khi lease hết hạn, worker khác có thể retry message. External operation phải chịu được retry đó; local database lock không thể biến external side effect thành exactly-once.
+
+## 5. Data model
+
+[PROPOSED DESIGN] Relational model giúp order transition và outbox insert atomic. Unique constraint trên `(customer_id, idempotency_key)` thực thi request contract ở database boundary.
+
+```sql
+CREATE TABLE orders (
+  order_id          UUID PRIMARY KEY,
+  customer_id       UUID NOT NULL,
+  idempotency_key   TEXT NOT NULL,
+  request_hash      TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  result_json       JSONB,
+  created_at        TIMESTAMP NOT NULL,
+  updated_at        TIMESTAMP NOT NULL,
+  UNIQUE (customer_id, idempotency_key)
+);
+
+CREATE TABLE outbox (
+  event_id          UUID PRIMARY KEY,
+  aggregate_id      UUID NOT NULL,
+  event_type        TEXT NOT NULL,
+  payload_json      JSONB NOT NULL,
+  published_at      TIMESTAMP
+);
+```
+
+[ANALYSIS] Outbox relay nên claim các row chưa publish một cách an toàn, publish chúng, rồi đánh dấu published. Crash xảy ra giữa publish và update sẽ tạo duplicate, vì vậy queue consumer cần durable deduplication hoặc idempotency record. Giữ outbox row đến khi publication policy được đáp ứng cũng giúp recovery dễ chẩn đoán; retention policy là quyết định vận hành, không phải source fact.
+
+## 6. Xử lý failure
+
+[PROPOSED DESIGN] Đặt timeout cho database call và external call. Chỉ retry transient failure, dùng exponential backoff có giới hạn kèm jitter, và giới hạn số lần hoặc tổng thời gian retry. Retry không có timeout có thể giữ worker vô thời hạn; retry không giới hạn có thể làm dependency đang
+Rewrite both. Write:
+  /tmp/rt_1_aws-architecture-patterns/aws-architecture-patterns.en.md
+  /tmp/rt_1_aws-architecture-patterns/aws-architecture-patterns.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

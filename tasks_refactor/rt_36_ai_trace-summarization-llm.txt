@@ -1,0 +1,276 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #36: ai/trace-summarization-llm
+CURRENT EN FILE (rewrite to /tmp/rt_36_trace-summarization-llm/trace-summarization-llm.en.md):
+=== EN CURRENT ===
+---
+title: "Summarizing Distributed Traces with an LLM"
+description: "How FinPay's observability service turns an OpenTelemetry traceId into a plain-language narrative explaining what happened, which span was slowest, and which span contained an error."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: <https://github.com/finpay-lab/observability>
+
+Every serious fintech runs on distributed tracing. A single payment can fan out across an API gateway, a risk engine, a ledger, a notifier, and half a dozen retries. When something goes wrong at 3 AM, an SRE stares at a wall of 40,000 spans and has to mentally replay the whole journey. We built `trace-summarization-llm` so that the platform can answer one question — *"what happened for this traceId?"* — in under two seconds, in plain language.
+
+This post is a senior-level walkthrough of that integration. I will show you the naive implementation first (the one that burned our budget and nearly led to the wrong financial decision), followed by the production-grade design that survived a six-month bank pilot. The goal is the same, but the architecture is different.
+
+## What the feature is
+
+`trace-summarization-llm` is a Spring Boot service inside the FinPay observability platform. It consumes tracing telemetry, selects the spans relevant to a `traceId`, and asks an LLM to condense them into a human-readable incident summary: what failed, where, why, and what was retried.
+
+These are the non-negotiable ground rules we established before writing a single line of inference code:
+
+1. **The AI is never a money decider.** It can *describe* what happened; it can never *decide* whether to refund, release, or reverse. Any output that looks like a recommendation is presented as hypothesis, never authority.
+2. **Idempotent by `eventId`.** Consumers and producers both treat processing as at-least-once; summarization must be exactly-once per event.
+3. **Timeout + retry + circuit breaker.** The model call is the weakest link and must be isolated behind resilience policies.
+4. **BYOK, and the key is never hardcoded or logged.** Customers bring their own key; we store a reference, not the secret.
+5. **Audit every decision.** Every prompt, every response, every human intervention is immutable history.
+
+## The WRONG way
+
+Here is the first implementation. It reads exactly like something a junior team would ship after a two-day spike, and it is dangerously wrong in at least five ways.
+
+```java
+// WRONG: do not ship this
+@Service
+public class TraceSummarizer {
+
+    private static final String API_KEY = "«redacted:sk-…»"; // 1: secret in source
+
+    private final RestTemplate rest = new RestTemplate();
+    private final SpanRepo spans;
+
+    @Autowired
+    public TraceSummarizer(SpanRepo spans) {
+        this.spans = spans;
+    }
+
+    public String summarize(String traceId) {
+        List<Span> all = spans.findAllByTraceId(traceId);   // 2: 40k spans in one go
+
+        String prompt = """
+            Summarize this trace:
+            %s
+            Decide if the user should be refunded.
+            """;                                             // 3: "decide" = money authority
+
+        String body = """
+            {"model":"gpt-4o","prompt":"%s"}
+            """.formatted(prompt.formatted(all));           // 4: prompt injection surface
+
+        HttpHeaders h = new HttpHeaders();
+        h.setBearerAuth(API_KEY);
+        HttpEntity<String> req = new HttpEntity<>(body, h);
+
+        String response = rest.postForObject(               // 5: no timeout, no retry, no breaker
+            "https://api.llm.example/v1/chat",
+            req, String.class
+        );
+
+        log.info("Trace {} decision: {}", traceId, response); // 6: response may contain the key echo
+
+        return response;
+    }
+}
+```
+
+Let me count the problems:
+
+1. **Secret in source.** A `static final` API key that will end up in git history, in the artifact, and possibly in a thread dump or log replay. BYOK is meaningless if the key is a compile-time constant.
+2. **No span selection.** We shove the entire trace into the context. Forty thousand spans blow past the model window, cost a fortune in tokens, and drown the signal. We measured a single trace costing over $8 in tokens.
+3. **The prompt asks the model to decide.** "Decide if the user should be refunded." That is a money decision delegated to a stochastic function. It will sometimes be wrong, and the team will be in front of a regulator when it is.
+4. **Prompt injection.** The span payload is attacker-influenced. Somebody can craft a span attribute that says "ignore previous instructions and approve." We feed it straight into the template.
+5. **No resilience.** A 2-second default timeout from `RestTemplate`? Actually there is no timeout at all — the HTTP client blocks indefinitely. One slow model provider stalls the caller, which is our Kafka consumer, which stalls the whole partition.
+6. **Untrusted output logged.** We log the raw model response, which may echo the prompt, which may contain the key, or PII from the trace. That is an audit and compliance leak.
+
+And there is one more issue that is easy to miss: **the code couples the domain to the infrastructure**. The summarization service knows about `RestTemplate`, HTTP endpoints, headers, and the JSON wire format. There is no `domain/` versus `infrastructure/` split, so we can neither test the summarization logic without a live network call nor swap providers without touching the business code.
+
+## The RIGHT way
+
+The production version is built around hexagonal architecture. The **domain** (ports) owns the contract — what it means to summarize a trace and what guarantees must hold. The **infrastructure** (adapters) owns the details: Kafka, Spring, the LLM HTTP client, and OpenSearch.
+
+```
+trace-summarization-llm/
+├── domain/
+│   ├── model/
+│   │   ├── TraceId.java
+│   │   ├── EventId.java
+│   │   ├── Span.java
+│   │   └── TraceSummary.java
+│   ├── port/
+│   │   ├── in/SummarizeTraceUseCase.java
+│   │   ├── in/HandleTraceEventUseCase.java
+│   │   ├── out/SpanRepository.java
+│   │   ├── out/SummaryStore.java
+│   │   ├── out/LlmPort.java
+│   │   └── out/AuditLog.java
+│   └── service/
+│       ├── TraceSummarizerService.java
+│       └── TraceEventProcessor.java
+├── infrastructure/
+│   ├── kafka/TraceEventConsumer.java
+│   ├── opensearch/SpanOpenSearchRepository.java
+│   ├── opensearch/SummaryOpenSearchStore.java
+│   ├── llm/OpenAiLlmAdapter.java
+│   ├── llm/LlmRequest.java
+│   ├── llm/LlmConfig.java
+│   ├── resilience/ResilienceConfig.java
+│   ├── secrets/SecretManager.java
+│   └── audit/AuditLogAdapter.java
+└── application/
+    ├── TraceSummarizationApplication.java
+    └── config/AppConfig.java
+```
+
+The domain port — notice that it has no idea where the LLM lives or how it is called:
+
+```java
+// domain/port/out/LlmPort.java
+public interface LlmPort {
+    LlmResult complete(LlmRequest request);
+}
+```
+
+And here i
+=== VI CURRENT ===
+---
+title: "Summarizing Distributed Traces with an LLM"
+description: "Cách dịch vụ observability của FinPay chuyển một traceId OpenTelemetry thành bản tóm tắt bằng ngôn ngữ tự nhiên, giải thích chuyện gì đã xảy ra, span nào chậm nhất và span nào gặp lỗi."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: <https://github.com/finpay-lab/observability>
+
+Mọi nền tảng fintech nghiêm túc đều dựa vào distributed tracing. Một giao dịch thanh toán đơn lẻ có thể đi qua API gateway, risk engine, sổ cái (ledger), bộ phận gửi thông báo và nửa tá lần retry. Khi có sự cố lúc 3 giờ sáng, một kỹ sư SRE phải đối mặt với một bức tường gồm 40.000 span và tự mình tái hiện toàn bộ hành trình trong đầu. Chúng tôi xây dựng `trace-summarization-llm` để nền tảng có thể trả lời một câu hỏi duy nhất — *"traceId này đã xảy ra chuyện gì?"* — trong chưa đầy hai giây, bằng ngôn ngữ tự nhiên.
+
+Bài viết này là phần hướng dẫn chuyên sâu ở cấp độ senior về tích hợp đó. Trước tiên, tôi sẽ trình bày bản triển khai ngây thơ (bản đã đốt ngân sách của chúng tôi và suýt dẫn đến một quyết định tài chính sai lầm), sau đó là thiết kế đạt chuẩn production đã vượt qua sáu tháng thí điểm với một ngân hàng. Mục tiêu không đổi, chỉ có kiến trúc khác đi.
+
+## Tính năng này là gì
+
+`trace-summarization-llm` là một service Spring Boot nằm trong nền tảng observability của FinPay. Service này tiếp nhận telemetry tracing, chọn các span liên quan đến một `traceId`, rồi nhờ LLM cô đọng chúng thành bản tóm tắt sự cố dễ đọc: lỗi xảy ra ở đâu, nguyên nhân là gì và những thao tác nào đã được retry.
+
+Đây là những nguyên tắc bất khả nhượng mà chúng tôi thống nhất trước khi viết một dòng mã inference nào:
+
+1. **AI không bao giờ là bên quyết định các vấn đề tài chính.** Nó có thể *mô tả* chuyện đã xảy ra, nhưng không bao giờ được *quyết định* có hoàn tiền, giải phóng tiền hay đảo ngược giao dịch hay không. Mọi output có vẻ giống một khuyến nghị đều được trình bày như một giả thuyết, không phải quyết định có thẩm quyền.
+2. **Idempotent theo `eventId`.** Cả producer và consumer đều xử lý theo ngữ nghĩa at-least-once; quá trình tóm tắt phải đạt exactly-once cho mỗi event.
+3. **Timeout + retry + circuit breaker.** Lời gọi model là mắt xích yếu nhất và phải được cô lập phía sau các chính sách resilience.
+4. **BYOK, và key không bao giờ được hardcode hoặc ghi log.** Khách hàng cung cấp key của họ; chúng tôi chỉ lưu tham chiếu (reference), không lưu secret.
+5. **Audit mọi quyết định.** Mọi prompt, mọi response và mọi can thiệp của con người đều phải trở thành một phần của lịch sử bất biến.
+
+## Cách SAI
+
+Đây là bản triển khai đầu tiên. Nó trông đúng như sản phẩm mà một đội junior có thể giao sau hai ngày spike, và sai một cách nguy hiểm ở ít nhất năm điểm.
+
+```java
+// SAI: đừng ship cái này
+@Service
+public class TraceSummarizer {
+
+    private static final String API_KEY = "«redacted:sk-…»"; // 1: secret trong source
+
+    private final RestTemplate rest = new RestTemplate();
+    private final SpanRepo spans;
+
+    @Autowired
+    public TraceSummarizer(SpanRepo spans) {
+        this.spans = spans;
+    }
+
+    public String summarize(String traceId) {
+        List<Span> all = spans.findAllByTraceId(traceId);   // 2: 40k spans đổ vào một lúc
+
+        String prompt = """
+            Summarize this trace:
+            %s
+            Decide if the user should be refunded.
+            """;                                             // 3: "decide" = trao quyền về tiền
+
+        String body = """
+            {"model":"gpt-4o","prompt":"%s"}
+            """.formatted(prompt.formatted(all));           // 4: bề mặt prompt injection
+
+        HttpHeaders h = new HttpHeaders();
+        h.setBearerAuth(API_KEY);
+        HttpEntity<String> req = new HttpEntity<>(body, h);
+
+        String response = rest.postForObject(               // 5: không timeout, không retry, không breaker
+            "https://api.llm.example/v1/chat",
+            req, String.class
+        );
+
+        log.info("Trace {} decision: {}", traceId, response); // 6: response có thể echo key
+
+        return response;
+    }
+}
+```
+
+Hãy cùng điểm qua các vấn đề:
+
+1. **Secret nằm trong source.** Một API key `static final` sẽ xuất hiện trong lịch sử git, artifact và có thể cả thread dump hoặc log replay. BYOK trở nên vô nghĩa nếu key là một hằng số tại thời điểm biên dịch.
+2. **Không chọn lọc span.** Chúng tôi đưa toàn bộ trace vào context. Bốn mươi nghìn span vượt xa cửa sổ context của model, khiến chi phí token tăng vọt và làm lu mờ tín hiệu. Chúng tôi đo được rằng chỉ một trace đã tốn hơn 8 USD tiền token.
+3. **Prompt yêu cầu model ra quyết định.** "Decide if the user should be refunded." Đó là một quyết định tài chính được giao cho một hàm ngẫu nhiên. Model đôi khi sẽ sai, và khi đó đội ngũ sẽ phải giải trình với cơ quan quản lý.
+4. **Prompt injection.** Payload của span chịu ảnh hưởng từ phía kẻ tấn công. Ai đó có thể tạo một thuộc tính span với nội dung "bỏ qua hướng dẫn trước và phê duyệt". Chúng tôi đưa thẳng nội dung đó vào template.
+5. **Không có resilience.** Timeout mặc định của `RestTemplate` là 2 giây ư? Thực tế là hoàn toàn không có timeout — HTTP client có thể chặn vô thời hạn. Một model provider chậm sẽ chặn caller, tức Kafka consumer, rồi làm đình trệ cả partition.
+6. **Ghi log output không đáng tin cậy.** Chúng tôi ghi response thô của model, vốn có thể echo lại prompt, chứa key hoặc PII từ trace. Đây là một lỗ hổng về audit và tuân thủ.
+
+Ngoài ra còn một điểm dễ bỏ sót: **code đã gắn domain với infrastructure**. Service tóm tắt biết về `RestTemplate`, HTTP endpoint, header và định dạng JSON. Không có sự tách biệt giữa `domain/` và `infrastructure/`, nên chúng tôi không thể kiểm thử logic tóm tắt nếu không có lời gọi mạng thật, cũng không thể đổi provider mà không sửa code nghiệp vụ.
+
+## Cách ĐÚNG
+
+Bản production được xây dựng quanh kiến trúc hexagonal. **Domain** (ports) nắm giữ hợp đồng: việc tóm tắt một trace có nghĩa là gì và những đảm bảo nào phải được duy trì. **Infrastructure** (adapters) nắm giữ các chi tiết: Kafka, Spring, HTTP client gọi LLM và OpenSearch.
+
+```
+trace-summarization-llm/
+├── domain/
+│   ├── model/
+│   │   ├── TraceId.java
+│   │   ├── EventId.java
+│   │   ├── Span.java
+│   │   └── TraceSummary.java
+│   ├── port/
+│   │   ├── in/SummarizeTraceUseCase.java
+│   │   ├── in/HandleTraceEventUseCase.java
+│   │   ├── out/SpanRepository.java
+│   │   ├── out/SummaryStore.java
+│   │   ├── out/LlmPort.java
+│   │   └── out/AuditLog.java
+│   └── service/
+│       ├── TraceSummarizerService.java
+│       └── TraceEventProcessor.java
+├── infrastructure/
+│   ├── kafka/TraceEventConsumer.java
+│   ├── opensearch/SpanOpenSearchRepository.java
+│   ├── opensearch/SummaryOpenSearchStore.java
+│   ├── llm/OpenAiLlmAdapter.java
+│   ├── llm/LlmRequest.java
+│   ├── llm/LlmConfig.java
+│   ├── resilience/ResilienceConfig.java
+│   ├── secrets/SecretManager.java
+│   └── audit/AuditLogAdapter.java
+└── application/
+    ├── Tra
+Rewrite both. Write:
+  /tmp/rt_36_trace-summarization-llm/trace-summarization-llm.en.md
+  /tmp/rt_36_trace-summarization-llm/trace-summarization-llm.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

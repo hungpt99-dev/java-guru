@@ -1,0 +1,137 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #42: interview/senior-mindset-senior
+CURRENT EN FILE (rewrite to /tmp/rt_42_senior-mindset-senior/senior-mindset-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #8: Senior Mindset & Behavioral — Junior to Senior"
+description: "Senior interviews test judgment and communication as much as code. How to present trade-offs, admit uncertainty, and tell stories that prove senior-level ownership."
+pubDatetime: 2026-08-10T10:35:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - career
+  - behavioral
+---
+
+Senior interviews are not won on code. Two engineers with identical Java depth get graded differently the moment the questions go soft — "tell me about a conflict", "what would you do Friday at 4 p.m. with a risky release?" — because what's actually being tested is judgment, ownership, and whether people can follow you in a crisis. This post walks the same ground from "how do I take ownership of a bug" to "here is how I cut our p99 from 800 ms to 120 ms and got the budget signed for it" — 50 questions, pick the level you are interviewing at, and read one above it.
+
+> Mindset: junior describes tasks completed; senior explains the decision made under uncertainty, the alternative rejected, the number that proves it worked, and what they'd do differently with the same information.
+
+## Junior — foundations
+
+**Q1. "Tell me about yourself." How do you answer without rambling?**
+A 90-second arc with three beats: what you are (stack + what you care about), one concrete thing shipped recently with a number attached ("I cut our service's p99 from 800 ms to 120 ms"), and why this role fits. No life story, no "I was born in…". Senior signal: you frame yourself around problems you like solving, not technologies you've touched — and every claim has a measurement behind it.
+
+**Q2. "What's your biggest weakness?" — how do you answer it honestly?**
+Pick a real, non-fatal one and show the _system_ you built to compensate. "I used to underestimate migration risk — two of my first five releases rolled back. Now I prototype the risky path first and my last four migrations shipped with zero rollbacks." Avoid fake weaknesses ("I work too hard"); interviewers hear that immediately. Honesty plus a mitigation plus a before/after count reads as self-aware, which is the senior trait.
+
+**Q3. "Where do you see yourself in 5 years?"**
+Answer around growth in scope and judgment, not a title wish-list. "I want to be the person a team trusts with its riskiest architectural calls — the one who owns a 10x scale-up and keeps p99 under 200 ms — and to have mentored four engineers into that range." It shows you're thinking about leverage and compounding, not just the next promotion.
+
+**Q4. "Why do you want this job?"**
+Tie it to something specific: the problem domain, the scale, the team's way of working. "Your payments system processes 4M transactions a day — exactly the distributed-consistency problem I want to go deeper on." Generic "great company" answers signal you didn't research — and research is a senior baseline. Name two specifics and a number you found; that's 30 seconds of homework that beats every prepared speech.
+
+**Q5. "Describe a bug you fixed."**
+Use a real one with a clear arc: symptom → how you reproduced it → root cause → fix → guard. "A cache bug made p99 spike from 120 ms to 800 ms for 3 days. I reproduced with a 200-line stress test, found a missing `expireAfterWrite` cap, fixed it, added an alert on cache size, and the p99 stayed under 130 ms for the next 6 months." Junior answers stop at "I fixed it." Senior answers end at "and here's the guard I added" — test, alert, invariant.
+
+**Q6. "What do you do when you're stuck?"**
+Show a repeatable method, not panic: 30-minute timebox to reproduce minimally, isolate (bisect or remove variables), read the actual error and source, then ask one specific question with the evidence gathered. "I give myself 3 attempts — each 15 minutes — then I escalate with the minimal repro attached; 90% of the time the person answers in 10 minutes." Senior signal: you unblock yourself with process before escalating.
+
+**Q7. "What would your first 90 days look like in this role?"**
+Concrete plan, not vibes: first 30 days read-only — the codebase, the on-call rotation, two incident reviews, deploy one trivial change. Days 30–60, shadow production traffic and fix one medium bug. Days 60–90, own one feature end-to-end. "I shipped a small fix in week 3 that cut error rate by 0.5% and earned the trust to touch the core service by week 8." Juniors say "learn the stack"; seniors name the milestones.
+
+**Q8. "When is it OK to ask for help?"**
+Before you burn the team's time — and never silently. A 15-minute solo rule: try, document what you tried, then ask a specific question with the failed attempt included. "I track that I only need help on ~1 in 10 blockers, and when I do ask, the question comes with 3 lines of 'here's what I tried' — so the answer takes 5 minutes, not 30." Asking well is a skill; it's how you turn 1 hour of stuck into 10 minutes.
+
+**Q9. "What does 'owning a bug' mean to you?"**
+It means the lifecycle: reproduce, fix, guard, communicate — until it can't happen again, not until it's out of your queue. "A data-corruption bug I owned took 6 hours to fix and another 2 to write the regression test and alert; it hasn't recurred in 18 months and the fix prevented the same class of bug in 2 other services." Ownership ends when the system is stronger than when you found it, not when the ticket closes.
+
+**Q10. "How do you say 'I don't know' in an interview?"**
+Cleanly and with a plan. "I don't know that off the top of my head — but I'd find out by checking X, and if I had to guess, my estimate is Y with a 30-minute verification." That's it: admit, method, bounded guess. Interviewers test this deliberately; engineers who bluff past "I don't know" get caught two questions later, and in production a bluff costs an on-call rotation. Saying it in 10 seconds beats deflecting for 2 minutes.
+
+**Q11. "What makes a good code review comment?"**
+One that teaches, not one that nits. Ask a question instead of rewriting ("why not bound this map at 10k entries?"), keep reviews under 400 lines so they get read within 24 hours, and cap feedback at 3–5 substantive comments per review — humans stop processing past that. "I moved from line-nits to one question per review and my team's review approval time dropped from 2 days to 4 hours." The review is the cheapest teaching tool you own; use it like a teacher, not a linter.
+
+**Q12. "How much testing do you write?"**
+Enough that the riskiest code has a net under it: 100% coverage on the money path, unit tests at ~80% on core logic, and one integration test per critical flow. "On my last service, the 3 files that move money had 100% branch coverage and we had zero production money bugs in 12 months; the boilerplate had ~20% and it was fine." Coverage is a risk budget, not a score — spend it where a failure costs money or sleep.
+
+**Q13. "How do you learn a codebase you've never seen?"**
+Trace one request end to end before touching anything: entry poin
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #8: Tư duy & Behavioral cấp Senior — Junior đến Senior"
+description: "Phỏng vấn senior test phán đoán và giao tiếp ngang với code. Cách trình bày trade-off, thừa nhận không chắc chắn, và kể những câu chuyện chứng minh ownership mức senior."
+pubDatetime: 2026-08-10T10:35:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - career
+  - behavioral
+---
+
+Vòng senior không thắng bằng code. Hai engineer có cùng độ sâu Java sẽ bị chấm khác nhau ngay khi câu hỏi bắt đầu mềm — "kể về một xung đột", "5 giờ chiều thứ Sáu, một release đầy rủi ro, bạn làm gì?" — bởi vì thứ thực sự bị test là phán đoán, ownership, và liệu người ta có theo bạn được trong khủng hoảng không. Bài này leo cùng một quãng đường từ "làm sao tôi own một cái bug" đến "đây là cách tôi cắt p99 từ 800 ms xuống 120 ms và xin được budget cho nó" — 50 câu hỏi, chọn đúng level bạn đang phỏng vấn, rồi đọc thêm một level phía trên nó.
+
+> Mindset: junior mô tả task đã hoàn thành; senior giải thích quyết định được đưa ra trong bất định, alternative bị loại bỏ, con số chứng minh nó hiệu quả, và điều họ sẽ làm khác nếu có cùng thông tin đó.
+
+## Junior — nền tảng
+
+**Q1. "Tell me about yourself." Trả lời không lan man thế nào?**
+Một arc 90 giây với ba nhịp: bạn là ai (stack + điều bạn quan tâm), một thứ cụ thể vừa ship kèm con số ("tôi cắt p99 của service từ 800 ms xuống 120 ms"), và vì sao role này hợp với bạn. Không life story, không "tôi sinh ra ở…". Senior signal: bạn frame mình quanh những problem bạn thích giải, không phải công nghệ bạn từng chạm — và mỗi claim đều có một phép đo đứng sau.
+
+**Q2. "Biggest weakness?" — trả lời trung thực thế nào?**
+Chọn một cái thật, không chết người, và show _hệ thống_ bạn dựng lên để bù. "Tôi từng underestimate rủi ro migration — 2 trong 5 release đầu của tôi bị rollback. Giờ tôi prototype đường rủi ro trước, và 4 migration gần nhất ship với zero rollback." Tránh weak giả ("tôi làm việc quá chăm chỉ") — interviewer nghe ra ngay. Honesty cộng mitigation cộng con số before/after đọc là self-aware, chính là senior trait.
+
+**Q3. "Where do you see yourself in 5 years?"**
+Trả lời quanh sự tăng trưởng về scope và judgment, không phải danh sách title mong muốn. "Tôi muốn là người team tin tưởng giao những quyết định kiến trúc rủi ro nhất — người own một scale-up 10x và giữ p99 dưới 200 ms — và đã mentor bốn engineer đạt tới tầm đó." Nó cho thấy bạn nghĩ về leverage và lãi kép, không chỉ promotion tiếp theo.
+
+**Q4. "Why do you want this job?"**
+Gắn nó vào thứ cụ thể: problem domain, scale, cách team làm việc. "Hệ thống payments của bạn xử lý 4 triệu giao dịch mỗi ngày — đúng bài distributed-consistency tôi muốn đào sâu." Trả lời generic kiểu "công ty tuyệt vời" báo hiệu bạn không research — và research là baseline của senior. Nêu hai điểm cụ thể và một con số bạn tìm được; 30 giây bài tập về nhà đó đánh bại mọi bài phát biểu thuộc lòng.
+
+**Q5. "Describe a bug you fixed."**
+Dùng một bug thật với arc rõ: symptom → cách bạn reproduce → root cause → fix → guard. "Một bug cache làm p99 tăng vọt từ 120 ms lên 800 ms suốt 3 ngày. Tôi reproduce bằng một stress test 200 dòng, tìm ra thiếu cap `expireAfterWrite`, sửa nó, thêm alert trên kích thước cache, và p99 nằm dưới 130 ms trong 6 tháng tiếp theo." Junior answer dừng ở "tôi sửa rồi." Senior answer kết ở "và đây là guard tôi thêm" — test, alert, invariant.
+
+**Q6. "What do you do when you're stuck?"**
+Show một method lặp lại được, không panic: timebox 30 phút để reproduce tối thiểu, isolate (bisect hoặc loại bỏ biến), đọc error thật và source, rồi hỏi một câu cụ thể kèm bằng chứng đã gom được. "Tôi tự cho mình 3 lần thử — mỗi lần 15 phút — rồi escalate kèm minimal repro; 90% thời gian người kia trả lời trong 10 phút." Senior signal: bạn tự unblock mình bằng process trước khi escalate.
+
+**Q7. "What would your first 90 days look like in this role?"**
+Kế hoạch cụ thể, không phải cảm xúc: 30 ngày đầu read-only — codebase, on-call rotation, hai incident review, deploy một thay đổi nhỏ. Ngày 30–60, shadow traffic production và sửa một bug tầm trung. Ngày 60–90, own trọn một feature từ đầu đến cuối. "Tôi ship một fix nhỏ ở tuần 3 giúp error rate giảm 0,5% và giành được niềm tin để chạm vào core service từ tuần 8." Junior nói "học stack"; senior nêu tên các mốc.
+
+**Q8. "When is it OK to ask for help?"**
+Trước khi bạn đốt thời gian của team — và không bao giờ hỏi trong im lặng. Quy tắc 15 phút solo: thử, ghi lại những gì đã thử, rồi hỏi một câu cụ thể kèm attempt thất bại. "Tôi theo dõi rằng mình chỉ cần giúp đỡ ~1 trên 10 blocker, và khi hỏi, câu hỏi luôn kèm 3 dòng 'đây là những gì tôi đã thử' — nên câu trả lời mất 5 phút, không phải 30." Hỏi cho tử tế là một kỹ năng; nó biến 1 giờ bí thành 10 phút.
+
+**Q9. "What does 'owning a bug' mean to you?"**
+Nghĩa là cả vòng đời: reproduce, fix, guard, communicate — cho đến khi nó không thể tái diễn, không phải cho đến khi nó rời khỏi queue của bạn. "Một bug hỏng dữ liệu tôi own mất 6 giờ để sửa và thêm 2 giờ viết regression test và alert; nó không tái phát trong 18 tháng và fix đó chặn được cùng class bug ở 2 service khác." Ownership kết thúc khi hệ thống khỏe hơn lúc bạn tìm ra nó, không phải khi ticket đóng.
+
+**Q10. "How do you say 'I don't know' in an interview?"**
+Sạch sẽ và kèm kế hoạch. "Tôi không nhớ chính xác điều đó — nhưng tôi sẽ tìm bằng cách kiểm tra X, và nếu phải đoán, ước lượng của tôi là Y với 30 phút kiểm chứng." Chỉ vậy thôi: thừa nhận, phương pháp, đoán có chặn. Interviewer test điều này có chủ đích; engineer bluff qua "tôi không biết" sẽ bị bắt hai câu sau, và ngoài production một lần bluff tốn cả một phiên on-call. Nói trong 10 giây thắng né tránh trong 2 phút.
+
+**Q11. "What makes a good code review comment?"**
+Một comment dạy được, không phải comment soi lỗi. Hỏi một câu hỏi thay vì viết lại ("sao không chặn map này ở 10k entries?"), giữ review dưới 400 dòng để được đọc trong 24 giờ, và giới hạn 3–5 comment có chất mỗi review — quá mức đó con người ngừng xử lý. "Tôi chuyển từ soi từng dòng sang một câu hỏi mỗi review và thời gian duyệt của team giảm từ 2 ngày xuống 4 giờ." Review là công cụ dạy rẻ nhất bạn có; hãy dùng nó như một giáo viên, không phải một cái linter.
+
+**Q12. "How much testing do you write?"**
+Đủ để code rủi ro nhất có lưới đỡ: 100% coverage trên đường tiền, unit test ~80% ở logic lõi, và một integration test cho mỗi luồng quan trọng. "Ở service cuối của tôi, 3 file xử lý tiền có 100% branch coverage và chúng tôi có zero bug về tiền trong 12 tháng; phần boilerplate thì ~20% và không sao cả." Coverage là ngân sách rủi ro, không phải điểm số — hãy chi nó nơi một lỗi tốn tiền hoặc tốn giấc ngủ.
+
+**Q13. "How do you learn a codebase you've never seen?"**
+Trace một request từ đầu đến cuối trước khi chạm vào thứ gì: entry point → service layer → data layer → response, chú thích những gì bạn tìm thấy. "Tôi chọn luồng nhỏ nhất người dùng thấy được, đi qua 5–6 lớp, vẽ một bản đồ 1 trang, rồi tìm 2–3 file nơi 80% bug sống. Fix đầu tiên đáp xuống tron
+Rewrite both. Write:
+  /tmp/rt_42_senior-mindset-senior/senior-mindset-senior.en.md
+  /tmp/rt_42_senior-mindset-senior/senior-mindset-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,229 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #23: system-design/stripe-online-migrations
+CURRENT EN FILE (rewrite to /tmp/rt_23_stripe-online-migrations/stripe-online-migrations.en.md):
+=== EN CURRENT ===
+---
+title: "Zero-Downtime Database Migrations at Scale: Stripe's Online Migration Pattern"
+description: "A source-backed analysis of dual-write migrations, backfill, shadow reads, cutover, and correctness under continuous production traffic."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+**[SOURCE FACT]** Stripe describes a migration involving hundreds of millions of Subscription objects while its API had to remain available and consistent. The old model stored a subscription alongside a Customer; the redesigned model stored active subscriptions in a separate table. Source: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** The old shape became expensive to evolve: changing subscriptions required updating the entire Customer record, and subscription queries scanned Customer objects. Source: https://stripe.com/blog/online-migrations
+
+**[ANALYSIS]** The hard problem is not copying rows. It is preserving the invariant that every read and mutation observes one coherent subscription state while old and new representations coexist. A maintenance window avoids this overlap, but the stated operating constraint disallows that option.
+
+**[ANALYSIS]** Three risks dominate: migration work competes with production work; an unhandled write path creates divergence; and a read cutover can expose stale or incomplete rows. A safe plan therefore needs a data-transfer phase, an observation phase, a controlled authority change, and a cleanup phase.
+
+## 2. What the Original System Did
+
+**[SOURCE FACT]** Stripe presents a four-step dual-writing pattern: write to old and new tables; change all read paths to the new table; change all write paths to only the new table; then remove old data and code that depends on the outdated model. Source: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** In the Subscription example, new writes first went to both the Customers and Subscriptions tables. Existing objects were copied lazily when updated, followed by a backfill of remaining subscriptions. Source: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** To find missing objects without repeatedly querying the live database, Stripe used database snapshots in Hadoop and MapReduce, managed with Scalding. A job emitted IDs to copy; a multi-threaded fleet copied them; the job ran again to check for omissions. Source: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** Stripe used Scientist to execute both read paths and compare results in production. Mismatches generated alerts and metrics, while an error in the experimental path did not affect the main application path. After results matched, reads moved to the new table. Source: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** For writes, Stripe reversed the order: write the new store first, then archive the data in the old store. It refactored subscription operations incrementally and used additional comparisons. It later stopped writing the old representation, removed the old field, and processed deletions lazily. Source: https://stripe.com/blog/online-migrations
+
+## 3. Architecture Diagram
+
+```mermaid
+flowchart LR
+    C[Client]
+    A[Application/API]
+    F[Feature flag / phase controller\n[Proposed component]]
+    O[(Old Customers store)]
+    N[(New Subscriptions store)]
+    B[Snapshot + MapReduce backfill\n[Source-backed component]]
+    S[Shadow read comparator\n[Source-backed component]]
+    V[Verifier and metrics\n[Proposed component]]
+    R[Retirement and lazy cleanup\n[Source-backed component]]
+
+    C --> A
+    A --> F
+    F -->|dual write| O
+    F -->|dual write| N
+    B --> N
+    A -->|primary read| N
+    A -.->|shadow read| O
+    A -.-> S
+    S --> V
+    A -->|new-primary write| N
+    N --> R
+    O --> R
+```
+
+**[SOURCE FACT]** The source-backed components are the old/new stores, snapshot-based distributed backfill, production read comparison, and lazy retirement. Source: https://stripe.com/blog/online-migrations
+
+**[PROPOSED DESIGN]** The feature flag, phase controller, and verifier are explicit control-plane additions in this diagram. They make rollout, pause, and rollback decisions operationally visible; the diagram does not claim that Stripe used these exact components.
+
+## 4. System Design Analysis
+
+**[ANALYSIS]** Dual-write is a transitional invariant, not a transaction boundary. If two independent databases are updated in separate transactions, a crash can leave one write missing. The design must make retries idempotent, record a migration version, and continuously detect divergence. A local transaction covering both representations is possible only when they share a transactional boundary; otherwise, a durable retry mechanism or reconciliation pass is required.
+
+**[SOURCE FACT]** Stripe mitigated the performance impact of extra writes by slowly ramping the percentage of duplicated objects while watching operational metrics. Source: https://stripe.com/blog/online-migrations
+
+**[ANALYSIS]** “Shadow reads” are valuable because they test semantic equivalence, not merely row counts. The comparator should normalize ordering, absent-versus-empty values, and fields intentionally changed by the new model. Raw object equality can create false alarms; over-normalization can hide correctness bugs.
+
+**[ANALYSIS]** Cutover should be treated as a proof obligation. Before making the new table authoritative, prove coverage for existing objects, compare representative reads, and demonstrate that every mutation path has been migrated. After cutover, keep the old representation as an archive or safety net until evidence supports deletion.
+
+**[PROPOSED DESIGN]** Use a per-object migration state such as `dual`, `new_primary`, and `retired`, and gate transitions by an atomic control-plane change. Route reads and writes by that state, but ensure a retry sees the same state and operation idempotency key. This is an extension for a generic system, not a claim about Stripe’s implementation.
+
+## 5. Data Model
+
+**[SOURCE FACT]** The original conceptual change was from one `subscription` field on Customer, then an array `subscriptions`, to active subscriptions in their own table. Source: https://stripe.com/blog/online-migrations
+
+**[PROPOSED DESIGN]** A generic relational target can make ownership and idempotency explicit:
+
+```sql
+CREATE TABLE customers (
+  customer_id    BIGINT PRIMARY KEY,
+  legacy_payload JSONB,
+  migration_state TEXT NOT NULL,
+  version        BIGINT NOT NULL
+);
+
+CREATE TABLE subscriptions (
+  subscription_id BIGINT PRIMARY KEY,
+  customer_id     BIGINT NOT NULL,
+  status          TEXT NOT NULL,
+  payload         JSONB NOT NULL,
+  source_version  BIGINT NOT NULL,
+  updated_at      TIMESTAMP NOT NULL
+);
+
+CREATE UNIQUE INDEX subscriptions_customer_id_id
+  ON subscriptions(customer_id, subscription_id);
+```
+
+**[PROPOSED DESIGN]** `source_version` prevents an older backfill or retry from
+=== VI CURRENT ===
+---
+title: "Di chuyển Cơ sở dữ liệu không Downtime ở Quy mô Lớn: Mẫu Online Migration của Stripe"
+description: "Phân tích dựa trên nguồn về dual-write, backfill, shadow read, cutover và tính đúng đắn khi lưu lượng production liên tục."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+**[SOURCE FACT]** Stripe mô tả một cuộc di chuyển liên quan đến hàng trăm triệu đối tượng Subscription, trong khi API phải duy trì tính sẵn sàng và nhất quán. Mô hình cũ lưu subscription cùng Customer; mô hình mới lưu các subscription đang hoạt động trong một bảng riêng. Nguồn: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** Mô hình cũ trở nên tốn kém khi phát triển: thay đổi subscription buộc phải cập nhật toàn bộ bản ghi Customer, còn các truy vấn subscription phải quét các đối tượng Customer. Nguồn: https://stripe.com/blog/online-migrations
+
+**[ANALYSIS]** Bài toán khó không phải là sao chép các dòng dữ liệu. Đó là duy trì invariant rằng mọi lần đọc và mutation đều thấy một trạng thái subscription nhất quán trong lúc hai biểu diễn cũ và mới cùng tồn tại. Maintenance window có thể tránh giai đoạn chồng lấn này, nhưng ràng buộc vận hành ở đây không cho phép lựa chọn đó.
+
+**[ANALYSIS]** Có ba rủi ro chính: công việc migration cạnh tranh tài nguyên với production; một write path bị bỏ sót tạo ra divergence; và read cutover có thể để lộ các dòng còn thiếu hoặc stale. Vì vậy kế hoạch an toàn cần có giai đoạn truyền dữ liệu, quan sát, đổi authority có kiểm soát và dọn dẹp.
+
+## 2. What the Original System Did
+
+**[SOURCE FACT]** Stripe trình bày một pattern dual-writing gồm bốn bước: ghi vào bảng cũ và mới; chuyển toàn bộ read path sang bảng mới; chuyển toàn bộ write path chỉ ghi vào bảng mới; sau đó xóa dữ liệu cũ và code phụ thuộc mô hình lỗi thời. Nguồn: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** Trong ví dụ Subscription, write mới ban đầu được ghi vào cả bảng Customers và Subscriptions. Các object hiện có được sao chép lazy khi được cập nhật, sau đó backfill các subscription còn lại. Nguồn: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** Để tìm các object thiếu mà không liên tục query live database, Stripe dùng database snapshot trong Hadoop và MapReduce, được quản lý bằng Scalding. Một job xuất ra các ID cần copy; một fleet đa luồng sao chép chúng; job được chạy lần nữa để kiểm tra thiếu sót. Nguồn: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** Stripe dùng Scientist để chạy cả hai read path và so sánh kết quả trong production. Mismatch tạo alert và metric, còn lỗi trong experimental path không ảnh hưởng main application path. Sau khi kết quả khớp, reads được chuyển sang bảng mới. Nguồn: https://stripe.com/blog/online-migrations
+
+**[SOURCE FACT]** Với writes, Stripe đảo thứ tự: ghi new store trước, rồi archive dữ liệu ở old store. Họ refactor các subscription operation theo từng bước và dùng thêm các phép so sánh. Sau đó họ dừng ghi biểu diễn cũ, xóa field cũ và xử lý deletion theo cách lazy. Nguồn: https://stripe.com/blog/online-migrations
+
+## 3. Architecture Diagram
+
+```mermaid
+flowchart LR
+    C[Client]
+    A[Application/API]
+    F[Feature flag / phase controller\n[Proposed component]]
+    O[(Old Customers store)]
+    N[(New Subscriptions store)]
+    B[Snapshot + MapReduce backfill\n[Source-backed component]]
+    S[Shadow read comparator\n[Source-backed component]]
+    V[Verifier and metrics\n[Proposed component]]
+    R[Retirement and lazy cleanup\n[Source-backed component]]
+
+    C --> A
+    A --> F
+    F -->|dual write| O
+    F -->|dual write| N
+    B --> N
+    A -->|primary read| N
+    A -.->|shadow read| O
+    A -.-> S
+    S --> V
+    A -->|new-primary write| N
+    N --> R
+    O --> R
+```
+
+**[SOURCE FACT]** Các component được source hỗ trợ là old/new store, distributed backfill dựa trên snapshot, so sánh read trong production và retirement lazy. Nguồn: https://stripe.com/blog/online-migrations
+
+**[PROPOSED DESIGN]** Feature flag, phase controller và verifier là các control-plane addition rõ ràng trong sơ đồ này. Chúng giúp rollout, pause và quyết định rollback có thể quan sát được; sơ đồ không khẳng định Stripe dùng chính xác các component này.
+
+## 4. System Design Analysis
+
+**[ANALYSIS]** Dual-write là invariant chuyển tiếp, không phải transaction boundary. Nếu hai database độc lập được cập nhật trong các transaction riêng, crash có thể khiến một write bị thiếu. Design phải làm cho retry idempotent, ghi nhận migration version và liên tục phát hiện divergence. Transaction cục bộ bao phủ cả hai biểu diễn chỉ khả thi khi chúng cùng transaction boundary; nếu không, cần cơ chế retry bền vững hoặc reconciliation.
+
+**[SOURCE FACT]** Stripe giảm tác động hiệu năng của write bổ sung bằng cách tăng dần tỷ lệ object được duplicate, đồng thời theo dõi cẩn thận các operational metric. Nguồn: https://stripe.com/blog/online-migrations
+
+**[ANALYSIS]** “Shadow read” hữu ích vì kiểm tra semantic equivalence, không chỉ số lượng dòng. Comparator nên normalize ordering, giá trị absent-versus-empty và các field được mô hình mới thay đổi có chủ ý. So sánh object thô có thể tạo false alarm; normalize quá mức có thể che giấu bug correctness.
+
+**[ANALYSIS]** Cutover nên được xem là một proof obligation. Trước khi biến bảng mới thành authority, cần chứng minh coverage của object hiện có, so sánh các read đại diện và chứng minh mọi mutation path đã được chuyển. Sau cutover, giữ biểu diễn cũ như archive hoặc safety net cho đến khi có đủ bằng chứng để xóa.
+
+**[PROPOSED DESIGN]** Dùng migration state theo object như `dual`, `new_primary` và `retired`, đồng thời gate transition bằng một thay đổi atomic ở control plane. Route reads và writes theo state đó, nhưng bảo đảm retry nhìn thấy cùng state và operation idempotency key. Đây là phần mở rộng cho một hệ thống generic, không phải khẳng định về implementation của Stripe.
+
+## 5. Data Model
+
+**[SOURCE FACT]** Thay đổi khái niệm ban đầu là từ field `subscription` đơn trên Customer, sau đó là array `subscriptions`, sang việc lưu active subscription trong bảng riêng. Nguồn: https://stripe.com/blog/online-migrations
+
+**[PROPOSED DESIGN]** Một target relational generic có thể làm ownership và idempotency rõ ràng:
+
+```sql
+CREATE TABLE customers (
+  customer_id    BIGINT PRIMARY KEY,
+  legacy_payload JSONB,
+  migration_state TEXT NOT NULL,
+  version        BIGINT NOT NULL
+);
+
+CREATE TABLE subscriptions (
+  subscription_id BIGINT PRIMARY KEY,
+  customer_id     BIGINT NOT NULL,
+  status          TEXT NOT NULL,
+  payload         JSONB NOT NULL,
+  source_version  BIGINT NOT NULL,
+  updated_at      TIMESTAMP NOT NULL
+);
+
+CREATE UNIQUE INDEX subscriptions_customer_id_id
+  ON subscriptions(customer_id, subscription_id);
+```
+
+**[PROPOSED DESIGN]** `source_version` ngăn backfill hoặc retry cũ ghi đè mutation mới hơn. Trong schema thực tế, comparator cũng phải định nghĩa cách biểu diễn delete, null, ordering và conc
+Rewrite both. Write:
+  /tmp/rt_23_stripe-online-migrations/stripe-online-migrations.en.md
+  /tmp/rt_23_stripe-online-migrations/stripe-online-migrations.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

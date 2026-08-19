@@ -1,0 +1,156 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #22: system-design/security-considerations-software-development
+CURRENT EN FILE (rewrite to /tmp/rt_22_security-considerations-software-development/security-considerations-software-development.en.md):
+=== EN CURRENT ===
+---
+title: "Security Considerations When Participating in Software Development Projects"
+description: "Comprehensive security best practices for developers, DevOps, QA, and project managers: from secure coding and secret management to threat modeling and SDL."
+pubDatetime: 2025-11-09T02:55:00+07:00
+featured: false
+draft: false
+tags:
+  - security
+  - career
+  - backend
+---
+
+"Security is everyone's responsibility."
+— A familiar saying, but in real projects, it's often forgotten.
+
+In today's software projects, security is not just the responsibility of the Security team but of the entire development team — from Developers, DevOps, QA, project managers, to the organization. Most security incidents don't come from super-sophisticated hackers but from basic human errors: accidentally committing API tokens to public repositories, sharing configuration files via email, opening test ports and forgetting to close them, or testing systems with real data without deleting it afterward.
+
+For security to become culture and habit, it must be integrated from the design phase and throughout the Software Development Lifecycle (SDLC). This article analyzes in detail the various roles, common risks, supporting tools, best practices, and prevention methods to build a truly secure software project.
+
+## 1. Developer — Security Responsibility in Code
+
+Developers are the front line of software security, because all data and system logic start from code. One insecure line of code can lead to serious risks affecting the entire application.
+
+### Don't Expose Sensitive Information
+
+Problem: Accidentally committing .env, appsettings.json, config.yml files containing database passwords, API keys, secret keys to GitHub is one of the most common and serious mistakes.
+
+Solutions:
+
+- Use .gitignore thoroughly to exclude configuration files.
+- Use environment variables on local machines and in CI/CD pipelines.
+- Use professional secret managers like AWS Secrets Manager, HashiCorp Vault, Azure Key Vault to store and manage sensitive information centrally and securely.
+- Regularly scan repositories with tools like GitGuardian or TruffleHog to detect accidentally committed credentials.
+
+### Validate Input Data
+
+Problem: Absolutely trusting user input is a disaster. SQL Injection and Cross-Site Scripting (XSS) errors both originate from here.
+
+Solutions:
+
+- Server-side: Always validate and sanitize data. Use Prepared Statements (Parameterized Queries) or ORMs (like Hibernate, Eloquent) to prevent SQL Injection.
+- Client & Server-side: Escape data before rendering to HTML to prevent XSS. Modern frameworks (React, Vue, Angular) often have automatic mechanisms, but don't rely on them blindly.
+- API: Validate request body schema (using libraries like Joi, Yup, Pydantic).
+
+### Use Safe Libraries
+
+Problem: "Supply Chain Attack" — attackers inject malicious code into a popular open-source library you're using.
+
+Solutions:
+
+- Scan dependencies periodically with tools like OWASP Dependency Check, Snyk, GitHub Dependabot. These tools will alert you immediately when new vulnerabilities appear in libraries you're using.
+- Prioritize well-maintained libraries with large communities.
+- Update versions (patches) immediately when security fixes are available.
+
+### Proper Logging
+
+Problem: Logging passwords, credit card numbers, or JWT tokens turns log files into treasure troves for hackers.
+
+Solutions:
+
+- Absolutely never log sensitive information (PII - Personally Identifiable Information).
+- Only return generic error messages to end users, never expose detailed stack traces (which can reveal code structure, database) in production environments.
+
+### Code Review and Security Review
+
+Solution: Every Pull Request/Merge Request should be reviewed by at least one other person, with a specific security checklist. Combine with Static Application Security Testing (SAST) tools like SonarQube, Checkmarx to automate finding potential vulnerabilities in code.
+
+## 2. DevOps / Infrastructure — Security Responsibility for Infrastructure and Pipeline
+
+### Secure Pipeline (CI/CD)
+
+Problem: Hardcoding secrets in CI/CD scripts.
+
+Solution: Use built-in secret storage of CI/CD systems (GitHub Secrets, GitLab CI Variables, Azure DevOps Secret Variables). Configure manual approval for deployment steps to production environments.
+
+### Environment Access Control (Principle of Least Privilege)
+
+Solutions:
+
+- Developers only have read/write access to Dev environments.
+- Only CI/CD systems and a few people (Team Lead) have deployment rights to Production.
+- Absolutely avoid using root/service accounts with overly broad permissions. Use Role-Based Access Control (RBAC) strictly.
+
+### Secure Containers and Infrastructure
+
+Solutions:
+
+- Scan container images before deployment with Trivy or Grype to find vulnerabilities.
+- Never run containers as root user. Create a specific non-root user.
+- Enable TLS/SSL for all connections. Configure Security Groups/Firewalls to only allow traffic from necessary sources.
+
+### Monitoring and Incident Response
+
+Solution: Deploy monitoring systems (Prometheus, Datadog) and centralized logging (ELK Stack). Set up alerts for abnormal behavior: repeated failed logins, sudden traffic spikes. Have an Incident Response Plan ready for when incidents occur.
+
+## 3. Project Management — Security Responsibility for Process and Personnel
+
+### Establish Security Processes
+
+Action: Make "Security Review" a mandatory part of the Definition of Done (DoD) for every user story. Create a simple, easy-to-understand security checklist for the entire team.
+
+### Personnel and Access Management
+
+Action: Apply Single Sign-On (SSO). Revoke access immediately when employees change teams or leave the company. Review access rights quarterly.
+
+### Training and Awareness
+
+Action: Organize internal sharing sessions on OWASP Top 10, how to identify phishing emails. Encourage a culture of reporting bugs without fear of punishment.
+
+## 4. QA / Tester — Security Responsibility for Testing and Data
+
+### Basic Security Testing
+
+Action: Play the role of an attacker. Try entering script snippets (`<script>alert('XSS')</script>`) into forms, or special SQL characters (`' OR '1'='1`) into search boxes. Use tools like OWASP ZAP to automate vulnerability scanning.
+
+### Role-Based Testing
+
+Action: Ensure User A cannot view User B's information by changing IDs in URLs (Insecure Direct Object Reference - IDOR). Thoroughly test admin/regular user permission features.
+
+### Environment Testing
+
+Action: Absolutely never use real data (especially customer information) in Staging/Test environments. Use generated fake data.
+
+## 5. Organization — Responsibility for Building Security Culture and Policies
+
+### Security Policies and Procedures
+
+Action: Build a clear Security Policy document, specifying password requirements, data handling, and incident response.
+
+### Periodic Audits and Assessments
+
+Action: Hire an independent third party to perform Penetration Testing at leas
+=== VI CURRENT ===
+(missing)
+Rewrite both. Write:
+  /tmp/rt_22_security-considerations-software-development/security-considerations-software-development.en.md
+  /tmp/rt_22_security-considerations-software-development/security-considerations-software-development.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

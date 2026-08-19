@@ -1,0 +1,275 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #16: system-design/notification-system
+CURRENT EN FILE (rewrite to /tmp/rt_16_notification-system/notification-system.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a Notification System at 1M Messages/Day"
+description: "An operational design for durable, idempotent, multi-channel notifications at one million messages per day."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building a notification platform used by product services such as billing, chat, security, and marketing. A producer submits an event and the platform renders a versioned template, evaluates the recipient's preferences, fans out to email, SMS, push, and in-app delivery, and retains a durable audit trail.
+
+The contract is **at least once**: an accepted notification is not silently lost. It is not exactly once, because a provider timeout can occur after the provider accepted a message. Every boundary therefore carries an idempotency key, and providers are called with a stable delivery ID where they support deduplication.
+
+Functional requirements:
+
+- Accept notification commands from many authenticated product services.
+- Render locale- and channel-specific templates with bounded, validated variables.
+- Apply user preferences, channel opt-outs, quiet hours, consent, and policy rules.
+- Fan out one logical notification into independently retried channel deliveries.
+- Support scheduled notifications, cancellation before dispatch, and in-app inbox reads.
+- Keep an immutable audit of acceptance, policy decision, attempts, provider result, and final state.
+
+Non-functional requirements:
+
+- Return an enqueue response in under 1 second at the 99th percentile.
+- Provide at-least-once processing, idempotent producer submission, retry with exponential backoff, and a dead-letter queue (DLQ).
+- Isolate slow or failing providers; apply backpressure rather than exhaust worker or database pools.
+- Target 99.95% monthly availability for acceptance and 99.9% successful dispatch within the channel's retry window.
+- Retain audit data for 13 months and support deletion of personal content under privacy policy.
+
+The platform acknowledges durable acceptance, not provider delivery, in the synchronous response. That distinction prevents a slow SMS provider from making every product request slow.
+
+## 2. Scale Estimation
+
+The seed workload is one million channel messages per day. A logical notification can fan out, so the sizing unit below is a channel message, not a producer event.
+
+| Quantity | Assumption and calculation | Result |
+|---|---|---:|
+| Daily messages | Given requirement | 1,000,000/day |
+| Average enqueue/dispatch rate | 1,000,000 / 86,400 | 11.6 messages/s |
+| Peak rate | 10x average for launches and billing runs | 116 messages/s |
+| Growth headroom | 3x peak for capacity and burst absorption | 350 messages/s |
+| Average message payload | 4 KB rendered body plus metadata | 4 GB/day raw |
+| Durable row footprint | 4 KB payload + 2 KB indexes/overhead | 6 GB/day |
+| Audit retention | 13 months, approximately 395 days | 2.37 TB before compression |
+| Delivery-attempt rows | 1.5 attempts/message, 2 KB each | 1.19 TB/year |
+| In-app reads | 20% of messages become inbox items; 5 reads/item | 1,000,000 reads/day |
+
+The 6 GB/day calculation is `1,000,000 x 6 KB`; with 3x replicas it consumes about 7.1 TB over 395 days. Cold audit storage can reduce cost, but the hot database should not carry all 13 months. Partitioning by month permits cheap retention and deletion.
+
+For bandwidth, 4 KB x 350 messages/s is 1.4 MB/s, or about 11.2 Mb/s of rendered payload before protocol overhead. Provider egress is separate: SMS and email may add provider responses, while push payloads are usually smaller. The service has roughly 5:1 read:write traffic for in-app inboxes, but the durable delivery path is write-heavy.
+
+Assume 2 million daily active users and 0.5 notifications per active user per day: `2,000,000 x 0.5 = 1,000,000`. This is an explicit product assumption, not a claim about all products. At 15% annual volume growth, year-one average is about 1.08M/day; 350 messages/s remains a reasonable initial envelope.
+
+Availability budgeting at 99.95% gives about 21.9 minutes of monthly downtime for the acceptance API. Dispatch can continue from the queue during a short API outage, so acceptance and delivery have separate SLOs.
+
+## 3. API Design
+
+All endpoints use TLS, service-to-service OAuth2/mTLS, and an `X-Request-Id`. Tenant authorization is checked before reading or mutating another tenant's data.
+
+### Submit a notification
+
+`POST /v1/notifications`
+
+Request:
+
+```json
+{
+  "idempotency_key": "billing:invoice:inv_928:due",
+  "recipient": {"user_id": "usr_42"},
+  "template": {"name": "invoice_due", "version": 3},
+  "variables": {"amount": "125.00", "currency": "USD", "due_date": "2026-08-20"},
+  "channels": ["email", "push", "in_app"],
+  "send_at": "2026-08-19T04:00:00Z",
+  "dedupe_window_seconds": 86400
+}
+```
+
+The producer is authenticated and the server derives `tenant_id` from its credential. Variables are schema-validated and size-limited; arbitrary HTML and URLs are not accepted by default.
+
+Response `202 Accepted`:
+
+```json
+{"notification_id":"ntf_01J...", "status":"accepted", "channels":["email","push","in_app"]}
+```
+
+The unique key `(tenant_id, idempotency_key)` makes a retried request return the original notification ID. A lost response is therefore safe to retry. `409 Conflict` means the same key was reused with a different request fingerprint.
+
+### Query status
+
+`GET /v1/notifications/{notification_id}` returns the logical state and per-channel state. It is eventually consistent by up to a few seconds while workers update attempts.
+
+### Preferences
+
+`GET /v1/users/{user_id}/notification-preferences` and `PUT /v1/users/{user_id}/notification-preferences` manage opt-outs and quiet hours. `PUT` is idempotent with an `If-Match` version; a stale version gets `412 Precondition Failed`. Product-critical channels can be policy-protected, but legal opt-outs always win.
+
+### In-app inbox
+
+`GET /v1/users/{user_id}/inbox?cursor=...&limit=50` reads a cursor-paginated list. `POST /v1/users/{user_id}/inbox/{message_id}/read` is idempotent and records `read_at`.
+
+Cancellation uses `POST /v1/notifications/{id}/cancel` with an idempotency key. It succeeds only while the channel delivery is `pending` or `scheduled`; a provider call already in progress may still win, so cancellation is not advertised as retraction.
+
+## 4. Data Model
+
+PostgreSQL is the source of truth for commands, preferences, and state transitions. Kafka carries work; it is not the audit database.
+
+```sql
+CREATE TABLE notifications (
+  tenant_id       bigint NOT NULL,
+  notification_id uuid NOT NULL,
+  idempotency_key  text NOT NULL,
+  request_hash     bytea NOT NULL,
+  user_id          bigint NOT NULL,
+  template_name    text NOT NULL,
+  template_version int NOT NULL,
+  variables_json   jsonb NOT NULL,
+  created_at       timestamptz NOT NULL,
+  send_at          timestamptz NOT NULL,
+  status           text NOT NULL,
+  PRIMARY KE
+=== VI CURRENT ===
+---
+title: "Thiết kế Hệ thống Thông báo (Notification) quy mô 1 triệu tin nhắn/ngày"
+description: "Thiết kế vận hành cho hệ thống thông báo đa kênh, bền vững và idempotent ở quy mô một triệu tin nhắn mỗi ngày."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng một nền tảng thông báo được các dịch vụ sản phẩm như billing, chat, bảo mật và marketing sử dụng. Producer gửi một sự kiện; nền tảng render template có phiên bản, đánh giá preference của người nhận, fan-out sang email, SMS, push và in-app, đồng thời lưu audit bền vững.
+
+Hợp đồng là **at-least-once**: một notification đã được chấp nhận không bị mất âm thầm. Đây không phải exactly-once, vì timeout của provider có thể xảy ra sau khi provider đã chấp nhận message. Vì vậy mọi boundary đều mang idempotency key, và provider được gọi bằng delivery ID ổn định khi provider hỗ trợ deduplication.
+
+Yêu cầu chức năng:
+
+- Nhận notification command từ nhiều product service đã xác thực.
+- Render template theo locale và channel với các biến được giới hạn, kiểm tra hợp lệ.
+- Áp dụng preference người dùng, opt-out theo channel, quiet hours, consent và các policy.
+- Fan-out một notification logic thành các channel delivery được retry độc lập.
+- Hỗ trợ notification lên lịch, hủy trước khi dispatch và đọc inbox in-app.
+- Lưu audit bất biến về acceptance, quyết định policy, attempt, kết quả provider và trạng thái cuối.
+
+Yêu cầu phi chức năng:
+
+- Trả về phản hồi enqueue dưới 1 giây ở p99.
+- Cung cấp xử lý at-least-once, producer submission idempotent, retry với exponential backoff và dead-letter queue (DLQ).
+- Cô lập provider chậm hoặc lỗi; tạo backpressure thay vì làm cạn worker pool hoặc database pool.
+- Mục tiêu availability hằng tháng 99.95% cho acceptance và 99.9% dispatch thành công trong retry window của channel.
+- Lưu dữ liệu audit 13 tháng và hỗ trợ xóa nội dung cá nhân theo privacy policy.
+
+Platform xác nhận durable acceptance, không xác nhận provider delivery, trong response đồng bộ. Phân biệt này ngăn provider SMS chậm làm mọi product request chậm theo.
+
+## 2. Scale Estimation
+
+Workload ban đầu là một triệu channel message mỗi ngày. Một logical notification có thể fan-out, nên đơn vị sizing dưới đây là channel message, không phải producer event.
+
+| Đại lượng | Giả định và phép tính | Kết quả |
+|---|---|---:|
+| Messages mỗi ngày | Yêu cầu đã cho | 1,000,000/ngày |
+| Tốc độ enqueue/dispatch trung bình | 1,000,000 / 86,400 | 11.6 messages/s |
+| Tốc độ đỉnh | 10x trung bình cho launch và billing run | 116 messages/s |
+| Dư địa tăng trưởng | 3x peak cho capacity và hấp thụ burst | 350 messages/s |
+| Payload message trung bình | Body đã render 4 KB cộng metadata | 4 GB/ngày raw |
+| Kích thước row bền vững | Payload 4 KB + index/overhead 2 KB | 6 GB/ngày |
+| Audit retention | 13 tháng, xấp xỉ 395 ngày | 2.37 TB trước compression |
+| Delivery-attempt row | 1.5 attempt/message, mỗi row 2 KB | 1.19 TB/năm |
+| In-app read | 20% message thành inbox item; 5 lần đọc/item | 1,000,000 read/ngày |
+
+Phép tính 6 GB/ngày là `1,000,000 x 6 KB`; với 3x replica, lượng dùng trong 395 ngày khoảng 7.1 TB. Có thể giảm chi phí bằng cold audit storage, nhưng hot database không nên giữ toàn bộ 13 tháng. Partition theo tháng giúp retention và deletion rẻ hơn.
+
+Về bandwidth, 4 KB x 350 messages/s là 1.4 MB/s, tương đương khoảng 11.2 Mb/s payload đã render trước protocol overhead. Provider egress là phần riêng: SMS và email có thể thêm response từ provider, còn push thường có payload nhỏ hơn. Dịch vụ có read:write khoảng 5:1 cho inbox in-app, nhưng durable delivery path thiên về write.
+
+Giả sử 2 triệu DAU và 0.5 notification trên mỗi active user mỗi ngày: `2,000,000 x 0.5 = 1,000,000`. Đây là giả định sản phẩm rõ ràng, không phải tuyên bố về mọi sản phẩm. Với tăng trưởng volume 15% mỗi năm, average năm đầu khoảng 1.08M/ngày; 350 messages/s vẫn là envelope khởi đầu hợp lý.
+
+Availability 99.95% cho phép khoảng 21.9 phút downtime mỗi tháng đối với acceptance API. Dispatch có thể tiếp tục từ queue trong một outage ngắn của API, nên acceptance và delivery có SLO riêng.
+
+## 3. API Design
+
+Mọi endpoint dùng TLS, OAuth2/mTLS service-to-service và `X-Request-Id`. Kiểm tra quyền tenant trước khi đọc hoặc sửa dữ liệu của tenant khác.
+
+### Submit a notification
+
+`POST /v1/notifications`
+
+Request:
+
+```json
+{
+  "idempotency_key": "billing:invoice:inv_928:due",
+  "recipient": {"user_id": "usr_42"},
+  "template": {"name": "invoice_due", "version": 3},
+  "variables": {"amount": "125.00", "currency": "USD", "due_date": "2026-08-20"},
+  "channels": ["email", "push", "in_app"],
+  "send_at": "2026-08-19T04:00:00Z",
+  "dedupe_window_seconds": 86400
+}
+```
+
+Producer được xác thực và server lấy `tenant_id` từ credential. Variables được kiểm tra theo schema và giới hạn kích thước; mặc định không chấp nhận HTML và URL tùy ý.
+
+Response `202 Accepted`:
+
+```json
+{"notification_id":"ntf_01J...", "status":"accepted", "channels":["email","push","in_app"]}
+```
+
+Unique key `(tenant_id, idempotency_key)` khiến request retry trả về notification ID gốc. Vì vậy response bị mất vẫn an toàn để retry. `409 Conflict` nghĩa là cùng key được dùng lại với request fingerprint khác.
+
+### Query status
+
+`GET /v1/notifications/{notification_id}` trả về trạng thái logical và trạng thái từng channel. Dữ liệu eventual consistent tối đa vài giây khi worker cập nhật attempt.
+
+### Preferences
+
+`GET /v1/users/{user_id}/notification-preferences` và `PUT /v1/users/{user_id}/notification-preferences` quản lý opt-out và quiet hours. `PUT` idempotent với version `If-Match`; version cũ nhận `412 Precondition Failed`. Channel quan trọng với sản phẩm có thể được policy bảo vệ, nhưng legal opt-out luôn được ưu tiên.
+
+### In-app inbox
+
+`GET /v1/users/{user_id}/inbox?cursor=...&limit=50` đọc danh sách phân trang bằng cursor. `POST /v1/users/{user_id}/inbox/{message_id}/read` idempotent và ghi `read_at`.
+
+Hủy dùng `POST /v1/notifications/{id}/cancel` cùng idempotency key. Chỉ thành công khi channel delivery còn `pending` hoặc `scheduled`; một provider call đang chạy có thể vẫn thắng, nên không quảng cáo cancellation là retraction.
+
+## 4. Data Model
+
+PostgreSQL là source of truth cho command, preference và state transition. Kafka vận chuyển work; nó không phải audit database.
+
+```sql
+CREATE TABLE notifications (
+  tenant_id       bigint NOT NULL,
+  notification_id uuid NOT NULL,
+  idempotency_key  text NOT NULL,
+  request_hash     bytea NOT NULL,
+  user_id          bigint NOT NULL,
+  template_name    text NOT NULL,
+  template_version int NOT NULL,
+  variables_json   jsonb NOT NULL,
+  created_at       timestamptz NOT NULL,
+  send_at          timestamptz NOT NULL,
+  status           text NOT NULL,
+  PRIMARY KEY (tenant_id, notification_id),
+  UNIQUE (tenant_id, idempotency_key)
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE deliveries (
+  tenant_id       bigint NOT NULL,
+  delivery_id     uuid NOT NULL,
+  notification_id  uuid NOT NULL,
+ 
+Rewrite both. Write:
+  /tmp/rt_16_notification-system/notification-system.en.md
+  /tmp/rt_16_notification-system/notification-system.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

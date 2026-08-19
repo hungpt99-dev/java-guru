@@ -1,0 +1,277 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #11: system-design/google-tail-at-scale
+CURRENT EN FILE (rewrite to /tmp/rt_11_google-tail-at-scale/google-tail-at-scale.en.md):
+=== EN CURRENT ===
+---
+title: "The Tail at Scale: Taming Latency Variance in Large Distributed Systems"
+description: "A source-disciplined system-design analysis of tail latency, hedged requests, tied requests, amplification, and variance."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] The supplied source is Google’s article “The Tail at Scale,” whose subject is latency behavior at scale. The verified excerpt supplied for this assignment is unavailable, so this article does not attribute a particular production topology, threshold, benchmark, quote, or capacity number to Google. ([Source](https://research.google/pubs/the-tail-at-scale/))
+
+[ANALYSIS] A distributed request often waits for several downstream operations. If the request completes only after all of them finish, the user-visible latency is close to the maximum of their latencies, not their average. A small slow fraction can therefore dominate the tail of the end-to-end distribution.
+
+[ANALYSIS] Fan-out makes the problem sharper. If one logical request contacts many replicas or shards, the probability that at least one child is slow increases with fan-out. Retries can then amplify load precisely when the system is already unhealthy. The design problem is not “make the mean faster”; it is to bound tail exposure without creating a feedback loop.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] The supplied material names the source article and its URL, but provides no extracted implementation details. It is therefore not valid to claim that the original article used a particular queue, RPC framework, database schema, retry budget, or deployment topology. ([Source](https://research.google/pubs/the-tail-at-scale/))
+
+[ANALYSIS] The engineering mechanisms discussed here are a reusable interpretation of the source topic: measure the tail, reduce variance, avoid synchronized retries, and use redundant work selectively. They should not be read as a reconstruction of Google’s internal system.
+
+[PROPOSED DESIGN] The rest of this article defines an interview-style service that uses deadlines, bounded hedging, cancellation, replica-aware placement, and request-level budgets. This is an extension proposed for system-design practice, not a claim about the source system.
+
+## 3. Architecture Diagram
+
+```mermaid
+flowchart LR
+    C[Client] --> G[API gateway\n[Proposed component]]
+    G --> O[Request orchestrator\n[Proposed component]]
+    O --> P[Parallel shard fan-out\n[Proposed component]]
+    P --> R1[Replica A\n[Proposed component]]
+    P --> R2[Replica B\n[Proposed component]]
+    P --> R3[Replica C\n[Proposed component]]
+    O --> H[Hedge controller\n[Proposed component]]
+    H -. delayed duplicate .-> R2
+    H -. delayed duplicate .-> R3
+    R1 --> Q[First acceptable response\n[Proposed component]]
+    R2 --> Q
+    R3 --> Q
+    Q --> O
+    O --> G
+    G --> C
+    M[Latency/variance measurement\n[Source-backed concept]] -. informs .-> H
+    M -. informs .-> O
+```
+
+[SOURCE FACT] The source title explicitly concerns “tail at scale”; that is the only source-backed component-level assertion made here. No diagram in the supplied material establishes the specific gateway, orchestrator, replicas, or controller shown above. ([Source](https://research.google/pubs/the-tail-at-scale/))
+
+[PROPOSED DESIGN] The orchestrator sends work to independent replicas or shards, accepts the first response satisfying the request’s correctness policy, and cancels losing work. The hedge controller starts a duplicate only after a policy-defined delay and only if budget remains.
+
+## 4. System Design Analysis
+
+[ANALYSIS] **Tail latency.** Let child latency be a random variable `L`. For a fan-out of `n` independent children, the maximum is slower as `n` grows. Independence is an approximation: shared hosts, networks, locks, and garbage collection can correlate slowdowns, making the tail worse than an ideal calculation suggests.
+
+[ANALYSIS] **Variance.** Two replicas with the same mean can have very different user experience if one has a heavier tail. Track percentiles, timeout rate, and latency by operation, replica, zone, payload class, and queue depth. A single global percentile hides the source of variance.
+
+[ANALYSIS] **Hedged requests.** A hedge is a delayed duplicate sent when the first attempt has not completed. It can reduce waiting behind a transiently slow replica, but it consumes capacity and may worsen congestion. The delay must be based on observed latency and constrained by a concurrency or load budget, not fired immediately for every request.
+
+[ANALYSIS] **Tied requests.** A tied request lets equivalent attempts share cancellation and completion state. When one attempt wins, the others stop as quickly as the transport and backend permit. Without this tie, a hedge is a retry that continues doing work after the user has received an answer.
+
+[ANALYSIS] **Amplification.** Fan-out multiplies work per logical request. Hedging multiplies it again for the subset that crosses the hedge delay. Retries after timeouts add another multiplier, often during overload. The control plane must expose these multipliers as metrics: logical requests, child attempts, hedges, cancellations, and completed backend operations.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] A request context can be represented as:
+
+```text
+RequestContext {
+  request_id: string
+  deadline_at: timestamp
+  operation: string
+  shard_ids: list<string>
+  attempt_budget: integer
+  hedge_budget: integer
+  cancellation_token: token
+  idempotency_key: string?
+}
+```
+
+[PROPOSED DESIGN] Each child attempt records an immutable event:
+
+```text
+Attempt {
+  request_id: string
+  shard_id: string
+  replica_id: string
+  attempt_no: integer
+  started_at: timestamp
+  finished_at: timestamp?
+  outcome: enum { success, timeout, error, cancelled }
+  hedge: boolean
+}
+```
+
+[ANALYSIS] These records are operational telemetry, not the business source of truth. They support attribution of tail latency and amplification. The idempotency key is required only when duplicate execution could mutate state; read-only hedging is safer than hedging writes.
+
+## 6. API Design
+
+[PROPOSED DESIGN] An internal RPC should carry a deadline and a causal request identity:
+
+```json
+{
+  "request_id": "r-123",
+  "deadline_ms": 80,
+  "attempt_no": 0,
+  "hedge": false,
+  "idempotency_key": "k-456"
+}
+```
+
+[PROPOSED DESIGN] The response should distinguish a valid result from a partial or deadline failure:
+
+```json
+{
+  "status": "ok",
+  "result": {},
+  "attempts": 2,
+  "hedge_used": true
+}
+```
+
+[ANALYSIS] Deadlines must propagate downward. A child should not receive the original client timeout after upstream work has already consumed part of it. The API should also make cancellation explicit. “First response wins” is correct only when responses are equivalent, or when the service has a deterministic quorum/version rule.
+
+## 7. Scaling Str
+=== VI CURRENT ===
+---
+title: "The Tail at Scale: Khắc phục Độ trễ Đuôi trong Hệ thống Phân tán Lớn"
+description: "Phân tích thiết kế hệ thống dựa trên nguồn về độ trễ đuôi, yêu cầu đầu cơ, yêu cầu liên kết, khuếch đại và phương sai."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] Nguồn được cung cấp là bài viết “The Tail at Scale” của Google, với chủ đề là hành vi độ trễ ở quy mô lớn. Phần trích xuất đã xác minh được cung cấp cho bài này không có nội dung, vì vậy bài viết không gán cho Google bất kỳ topology sản xuất, ngưỡng, số liệu, trích dẫn hay con số năng lực cụ thể nào. ([Nguồn](https://research.google/pubs/the-tail-at-scale/))
+
+[ANALYSIS] Một yêu cầu phân tán thường phải chờ nhiều thao tác downstream. Nếu yêu cầu chỉ hoàn tất sau khi tất cả thao tác con hoàn thành, độ trễ người dùng nhìn thấy gần với giá trị lớn nhất trong các độ trễ, không phải giá trị trung bình. Vì vậy, một tỷ lệ nhỏ thao tác chậm cũng có thể chi phối phần đuôi của phân phối end-to-end.
+
+[ANALYSIS] Fan-out làm vấn đề rõ hơn. Nếu một yêu cầu logic liên hệ với nhiều replica hoặc shard, xác suất có ít nhất một tác vụ con bị chậm tăng theo fan-out. Retry sau đó có thể khuếch đại tải đúng lúc hệ thống đang không khỏe. Bài toán không phải là “làm trung bình nhanh hơn”, mà là giới hạn mức phơi nhiễm với đuôi mà không tạo vòng lặp phản hồi.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] Tài liệu được cung cấp chỉ nêu tên bài viết nguồn và URL, không có chi tiết triển khai được trích xuất. Do đó, không hợp lệ khi khẳng định bài viết gốc dùng queue, RPC framework, schema cơ sở dữ liệu, ngân sách retry hay topology triển khai cụ thể nào. ([Nguồn](https://research.google/pubs/the-tail-at-scale/))
+
+[ANALYSIS] Các cơ chế kỹ thuật được thảo luận ở đây là diễn giải có thể tái sử dụng từ chủ đề của nguồn: đo phần đuôi, giảm phương sai, tránh retry đồng bộ và chỉ sử dụng công việc dư thừa có chọn lọc. Không nên xem đây là bản tái dựng hệ thống nội bộ của Google.
+
+[PROPOSED DESIGN] Phần còn lại định nghĩa một dịch vụ kiểu phỏng vấn thiết kế hệ thống, sử dụng deadline, hedging có giới hạn, cancellation, placement-aware theo replica và ngân sách ở cấp yêu cầu. Đây là phần mở rộng đề xuất để luyện system design, không phải khẳng định về hệ thống trong nguồn.
+
+## 3. Architecture Diagram
+
+```mermaid
+flowchart LR
+    C[Client] --> G[API gateway\n[Proposed component]]
+    G --> O[Request orchestrator\n[Proposed component]]
+    O --> P[Parallel shard fan-out\n[Proposed component]]
+    P --> R1[Replica A\n[Proposed component]]
+    P --> R2[Replica B\n[Proposed component]]
+    P --> R3[Replica C\n[Proposed component]]
+    O --> H[Hedge controller\n[Proposed component]]
+    H -. delayed duplicate .-> R2
+    H -. delayed duplicate .-> R3
+    R1 --> Q[First acceptable response\n[Proposed component]]
+    R2 --> Q
+    R3 --> Q
+    Q --> O
+    O --> G
+    G --> C
+    M[Latency/variance measurement\n[Source-backed concept]] -. informs .-> H
+    M -. informs .-> O
+```
+
+[SOURCE FACT] Tiêu đề nguồn nói rõ bài viết tập trung vào “tail at scale”; đó là khẳng định duy nhất ở cấp thành phần được hỗ trợ bởi nguồn trong sơ đồ này. Tài liệu được cung cấp không xác lập gateway, orchestrator, replica hay controller cụ thể như trên. ([Nguồn](https://research.google/pubs/the-tail-at-scale/))
+
+[PROPOSED DESIGN] Orchestrator gửi công việc tới các replica hoặc shard độc lập, nhận phản hồi đầu tiên đáp ứng chính sách đúng đắn của yêu cầu và hủy công việc thua. Hedge controller chỉ tạo bản sao sau một khoảng trễ do chính sách quy định và khi ngân sách còn đủ.
+
+## 4. System Design Analysis
+
+[ANALYSIS] **Độ trễ đuôi.** Gọi độ trễ của tác vụ con là biến ngẫu nhiên `L`. Với fan-out gồm `n` tác vụ con độc lập, giá trị lớn nhất sẽ chậm hơn khi `n` tăng. Tính độc lập chỉ là xấp xỉ: host, mạng, lock và garbage collection dùng chung có thể tạo tương quan, khiến đuôi tệ hơn phép tính lý tưởng.
+
+[ANALYSIS] **Phương sai.** Hai replica có cùng trung bình vẫn có trải nghiệm người dùng rất khác nếu một replica có đuôi nặng hơn. Hãy theo dõi percentile, timeout và độ trễ theo operation, replica, zone, loại payload và độ sâu queue. Một percentile toàn cục sẽ che khuất nguồn phương sai.
+
+[ANALYSIS] **Hedged request.** Hedge là bản sao bị trì hoãn, được gửi khi lần thử đầu chưa hoàn tất. Nó có thể giảm thời gian chờ một replica tạm thời chậm, nhưng tiêu tốn năng lực và làm congestion xấu hơn. Khoảng trễ phải dựa trên độ trễ quan sát được và bị giới hạn bởi ngân sách concurrency hoặc tải, không được gửi ngay cho mọi yêu cầu.
+
+[ANALYSIS] **Tied request.** Tied request cho phép các lần thử tương đương dùng chung trạng thái cancellation và completion. Khi một lần thử thắng, các lần còn lại dừng sớm nhất có thể theo khả năng của transport và backend. Nếu không liên kết như vậy, hedge chỉ là retry tiếp tục làm việc sau khi người dùng đã nhận kết quả.
+
+[ANALYSIS] **Khuếch đại.** Fan-out nhân số công việc trên mỗi yêu cầu logic. Hedging lại nhân thêm cho nhóm vượt qua hedge delay. Retry sau timeout thêm một hệ số nữa, thường đúng lúc quá tải. Control plane phải đưa các hệ số này thành metric: yêu cầu logic, số lần thử con, hedge, cancellation và số thao tác backend thực sự hoàn tất.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] Context của một yêu cầu có thể biểu diễn như sau:
+
+```text
+RequestContext {
+  request_id: string
+  deadline_at: timestamp
+  operation: string
+  shard_ids: list<string>
+  attempt_budget: integer
+  hedge_budget: integer
+  cancellation_token: token
+  idempotency_key: string?
+}
+```
+
+[PROPOSED DESIGN] Mỗi lần thử con ghi một event bất biến:
+
+```text
+Attempt {
+  request_id: string
+  shard_id: string
+  replica_id: string
+  attempt_no: integer
+  started_at: timestamp
+  finished_at: timestamp?
+  outcome: enum { success, timeout, error, cancelled }
+  hedge: boolean
+}
+```
+
+[ANALYSIS] Các record này là telemetry vận hành, không phải source of truth nghiệp vụ. Chúng hỗ trợ quy nguyên nhân của độ trễ đuôi và khuếch đại. Idempotency key chỉ bắt buộc khi việc thực thi trùng có thể làm thay đổi trạng thái; hedge đọc an toàn hơn hedge ghi.
+
+## 6. API Design
+
+[PROPOSED DESIGN] RPC nội bộ nên mang deadline và identity nhân quả của yêu cầu:
+
+```json
+{
+  "request_id": "r-123",
+  "deadline_ms": 80,
+  "attempt_no": 0,
+  "hedge": false,
+  "idempotency_key": "k-456"
+}
+```
+
+[PROPOSED DESIGN] Response nên phân biệt kết quả hợp lệ với lỗi partial hoặc deadline:
+
+```json
+{
+  "status": "ok",
+  "result": {},
+  "attempts": 2,
+  "hedge_used": true
+}
+```
+
+[ANALYSIS] Deadline phải được truyền xuống. Child không nên nhận timeout gốc của client khi upstream đã tiêu tốn một phần thời gian. API cũng phải biểu đạt cancellation rõ ràng. “Phản hồi đầu tiên thắng” chỉ đúng khi các response tương đương, hoặc khi service có quy tắc quorum/version xác định.
+
+## 7. Scaling Strategy
+
+[PROPOSED DESIGN] Bắt đầu khi chưa bật hedging và thiết lập baseline độ trễ. Bật hedging cho một read operation
+Rewrite both. Write:
+  /tmp/rt_11_google-tail-at-scale/google-tail-at-scale.en.md
+  /tmp/rt_11_google-tail-at-scale/google-tail-at-scale.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

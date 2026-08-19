@@ -1,0 +1,300 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #27: system-design/url-shortener
+CURRENT EN FILE (rewrite to /tmp/rt_27_url-shortener/url-shortener.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a URL Shortener at 1 Billion Redirects per Day"
+description: "A production design for low-latency, durable URL shortening with global redirects, custom aliases, expiry, and asynchronous analytics."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building a URL-shortening service for people and applications that turn a long destination into a stable short link. A link may be created automatically or with a requested custom alias, then served as an HTTP 301 (permanent) or 302 (temporary) redirect. Owners can inspect click analytics and set a time-to-live (TTL).
+
+The service must preserve permanent links: once an alias is published, it must not silently point somewhere else. Redirect traffic is the critical path, while analytics is deliberately off that path. We assume 100:1 redirect-to-create traffic, global users, and clients that may retry requests after a timeout.
+
+Non-functional targets:
+
+- Redirect p99 below 50 ms at the service edge, excluding the user's network and destination fetch.
+- 99.99% monthly availability for redirect serving; creation and analytics may have separate, lower SLOs.
+- Collision-free generated keys and linearizable ownership for custom aliases.
+- No loss of committed mappings; analytics may be delayed but not silently duplicated in reports.
+- A read path that remains useful during a write-region or analytics outage.
+
+## 2. Scale Estimation
+
+The numbers below are planning assumptions, not claims about a particular existing product.
+
+- Assume 100 million daily active redirecting clients. At 10 redirects per client per day: `100M x 10 = 1B redirects/day`.
+- Average redirect rate is `1B / 86,400 = 11,574 requests/s`.
+- A 10x diurnal and campaign peak gives `115,740 requests/s`; provision for 150,000 requests/s to leave headroom.
+- With a 100:1 read:write ratio, creates are `10M/day`, or `116 writes/s` average and about `1,160 writes/s` at peak.
+- If a mapping row averages 600 bytes including indexes and replication metadata, seven years of non-expiring links require `10M x 365 x 7 x 600 = 15.33 TB` before replicas and compaction. With three copies, plan for about 46 TB.
+- A redirect response is roughly 1 KB including headers. Peak egress is `150,000 x 1 KB x 8 = 1.2 Gb/s`; edge providers need additional room for TLS and cache misses.
+- A click event is about 200 bytes. At one event per redirect, raw event ingress is `1B x 200 = 200 GB/day`, or roughly 73 TB/year before Kafka replication and warehouse storage.
+- Use a 1.2 cumulative planning factor for link growth: seven-year retained mappings are approximately `10M x 1.2 x 365 x 7 = 30.66B` rows, or 18.4 TB of primary row bytes at the same 600-byte estimate.
+- The availability budget for a 99.99% monthly SLO is about 4.32 minutes per 30-day month. Redirects therefore fail open to cache where safe, but never invent a destination.
+
+The key consequence is that a database sized for writes is not enough: the read fleet, edge cache, and cross-region replication must absorb two orders of magnitude more traffic.
+
+## 3. API Design
+
+### Create a link
+
+`POST /v1/links`
+
+```json
+{
+  "destination": "https://example.com/articles/very-long-path",
+  "alias": "launch-2026",
+  "status_code": 302,
+  "expires_at": "2027-01-01T00:00:00Z"
+}
+```
+
+`alias` is optional. The authenticated owner is taken from the access token, not the body. The client supplies `Idempotency-Key`; the server stores the request fingerprint and result for 24 hours.
+
+```json
+{
+  "id": "01K2...",
+  "alias": "launch-2026",
+  "short_url": "https://s.example/launch-2026",
+  "status_code": 302,
+  "expires_at": "2027-01-01T00:00:00Z"
+}
+```
+
+Return `201` for a new link, `200` for an idempotent replay, `409` for an occupied custom alias, `422` for an invalid destination or TTL, and `429` for an owner or IP rate limit. A custom alias is never reassigned, including after expiry.
+
+### Redirect
+
+`GET /{alias}` returns `301` for a permanent mapping or `302` for a temporary mapping, with a `Location` header. Unknown, expired, disabled, and malformed aliases return `404`, without revealing whether a deleted alias once existed. The edge may cache a negative response briefly, but must respect a short negative TTL.
+
+### Analytics
+
+`GET /v1/links/{id}/analytics?from=...&to=...&bucket=hour` returns aggregated counts and a freshness timestamp. It is eventually consistent. `POST /v1/links/{id}/disable` is authenticated and idempotent; disabling is a strongly ordered state transition.
+
+## 4. Data Model
+
+The source of truth is a sharded, strongly consistent key-value/SQL-compatible store. SQL notation makes constraints explicit; the physical implementation can use a distributed SQL service or a key-value service with equivalent conditional writes.
+
+```sql
+CREATE TABLE links (
+  link_id       UUID PRIMARY KEY,
+  alias         VARCHAR(32) NOT NULL UNIQUE,
+  owner_id      BIGINT NOT NULL,
+  destination   TEXT NOT NULL,
+  redirect_code SMALLINT NOT NULL CHECK (redirect_code IN (301, 302)),
+  state         VARCHAR(12) NOT NULL CHECK (state IN ('active', 'disabled', 'expired')),
+  created_at    TIMESTAMP NOT NULL,
+  expires_at    TIMESTAMP NULL,
+  version       BIGINT NOT NULL,
+  shard_key     BIGINT NOT NULL
+);
+
+CREATE INDEX links_owner_created ON links (owner_id, created_at DESC);
+CREATE INDEX links_expiry ON links (expires_at) WHERE state = 'active';
+
+CREATE TABLE idempotency_records (
+  owner_id      BIGINT NOT NULL,
+  idempotency_key VARCHAR(128) NOT NULL,
+  request_hash  CHAR(64) NOT NULL,
+  response_json JSON NOT NULL,
+  created_at    TIMESTAMP NOT NULL,
+  PRIMARY KEY (owner_id, idempotency_key)
+);
+```
+
+`alias` is the redirect lookup key, so its unique index is the authoritative collision check. `(owner_id, created_at)` supports the owner's list view without scanning aliases. The partial expiry index feeds a sweeper; expiry is also checked synchronously on reads, so the sweeper is not a correctness dependency. The shard key is a stable hash of the alias, not a sequential ID: it distributes hot popular aliases and avoids a monotonically increasing write partition.
+
+Analytics is separate:
+
+```sql
+CREATE TABLE click_hourly (
+  link_id       UUID NOT NULL,
+  hour          TIMESTAMP NOT NULL,
+  country       CHAR(2) NOT NULL,
+  device_class  VARCHAR(16) NOT NULL,
+  clicks        BIGINT NOT NULL,
+  PRIMARY KEY (link_id, hour, country, device_class)
+);
+```
+
+The event stream, not the redirect database, is the source for this aggregate. The aggregate key makes a link/time query efficient; retention and rollups prevent unbounded analytics storage.
+
+## 5. High-Level Architecture
+
+```mermaid
+flowchart LR
+  U[Clients] --> DNS[Global DNS / Anycast]
+  DNS --> E[Edge CDN + WAF]
+  E --> R[Regional Redirect Service]
+  R --> C[(L1/L2 Cache)]
+  R --> M[(Replicated Link Store)]
+  R --> K[Click Event Log]
+  K --> Q[Analytics Consumers]
+  Q --> A[(Analytics Store)]
+  W[Create API] --
+=== VI CURRENT ===
+---
+title: "Thiết kế Hệ thống Rút ngắn URL quy mô 1 tỷ lượt chuyển hướng/ngày"
+description: "Thiết kế production cho dịch vụ rút ngắn URL có độ trễ thấp, liên kết bền vững, chuyển hướng toàn cầu, alias tùy chỉnh, hết hạn và phân tích bất đồng bộ."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng một dịch vụ rút ngắn URL cho người dùng và ứng dụng, biến một đích đến dài thành liên kết ngắn ổn định. Liên kết có thể được tạo tự động hoặc bằng alias tùy chỉnh; sau đó phục vụ chuyển hướng HTTP 301 (vĩnh viễn) hoặc 302 (tạm thời). Chủ sở hữu có thể xem phân tích lượt nhấp và đặt thời gian sống (TTL).
+
+Dịch vụ phải giữ các liên kết vĩnh viễn: sau khi alias được công bố, nó không được âm thầm trỏ sang nơi khác. Lưu lượng chuyển hướng là đường đi quan trọng, còn phân tích được cố ý tách khỏi đường đi đó. Ta giả định tỷ lệ đọc:tạo là 100:1, người dùng toàn cầu và client có thể retry sau timeout.
+
+Mục tiêu phi chức năng:
+
+- p99 chuyển hướng dưới 50 ms tại edge dịch vụ, không tính mạng của người dùng và việc tải đích đến.
+- Availability hàng tháng 99.99% cho việc phục vụ chuyển hướng; tạo liên kết và phân tích có thể có SLO thấp hơn riêng.
+- Key sinh tự động không va chạm và quyền sở hữu alias tùy chỉnh được tuyến tính hóa.
+- Không mất mapping đã commit; phân tích có thể trễ nhưng không bị nhân đôi âm thầm trong báo cáo.
+- Đường đọc vẫn hoạt động trong thời gian region ghi hoặc hệ thống phân tích gặp sự cố.
+
+## 2. Scale Estimation
+
+Các con số dưới đây là giả định lập kế hoạch, không phải tuyên bố về một sản phẩm hiện hữu cụ thể.
+
+- Giả định 100 triệu client hoạt động hằng ngày tạo chuyển hướng. Với 10 chuyển hướng/client/ngày: `100M x 10 = 1B redirects/day`.
+- Tốc độ chuyển hướng trung bình là `1B / 86,400 = 11,574 requests/s`.
+- Đỉnh theo ngày và chiến dịch tăng 10x cho `115,740 requests/s`; cấp năng lực 150,000 requests/s để có dư địa.
+- Với tỷ lệ đọc:ghi 100:1, tạo liên kết là `10M/day`, trung bình `116 writes/s` và khoảng `1,160 writes/s` lúc đỉnh.
+- Nếu một row mapping trung bình 600 byte, gồm index và metadata replication, bảy năm liên kết không hết hạn cần `10M x 365 x 7 x 600 = 15.33 TB` trước replica và compaction. Với ba bản sao, lập kế hoạch khoảng 46 TB.
+- Một response chuyển hướng khoảng 1 KB, gồm header. Băng thông egress đỉnh là `150,000 x 1 KB x 8 = 1.2 Gb/s`; edge provider cần thêm dư địa cho TLS và cache miss.
+- Một click event khoảng 200 byte. Với một event cho mỗi chuyển hướng, ingress thô là `1B x 200 = 200 GB/day`, tương đương khoảng 73 TB/năm trước replication Kafka và lưu trữ warehouse.
+- Dùng hệ số lập kế hoạch tích lũy 1.2 cho tăng trưởng link: mapping giữ bảy năm xấp xỉ `10M x 1.2 x 365 x 7 = 30.66B` row, hay 18.4 TB byte row chính với ước tính 600 byte.
+- Ngân sách availability cho SLO 99.99% là khoảng 4.32 phút mỗi tháng 30 ngày. Vì vậy redirect fail-open về cache khi an toàn, nhưng tuyệt đối không tự tạo destination.
+
+Hệ quả chính là database được sizing theo ghi vẫn chưa đủ: read fleet, edge cache và replication liên vùng phải hấp thụ lưu lượng lớn hơn hai bậc độ lớn.
+
+## 3. API Design
+
+### Tạo liên kết
+
+`POST /v1/links`
+
+```json
+{
+  "destination": "https://example.com/articles/very-long-path",
+  "alias": "launch-2026",
+  "status_code": 302,
+  "expires_at": "2027-01-01T00:00:00Z"
+}
+```
+
+`alias` là tùy chọn. Chủ sở hữu đã xác thực được lấy từ access token, không lấy từ body. Client gửi `Idempotency-Key`; server lưu request fingerprint và kết quả trong 24 giờ.
+
+```json
+{
+  "id": "01K2...",
+  "alias": "launch-2026",
+  "short_url": "https://s.example/launch-2026",
+  "status_code": 302,
+  "expires_at": "2027-01-01T00:00:00Z"
+}
+```
+
+Trả `201` cho link mới, `200` cho replay idempotent, `409` khi alias tùy chỉnh đã có người dùng, `422` cho destination hoặc TTL không hợp lệ và `429` khi vượt rate limit của owner hoặc IP. Alias tùy chỉnh không bao giờ được gán lại, kể cả sau khi hết hạn.
+
+### Chuyển hướng
+
+`GET /{alias}` trả `301` cho mapping vĩnh viễn hoặc `302` cho mapping tạm thời, kèm header `Location`. Alias không tồn tại, hết hạn, bị vô hiệu hóa hoặc sai định dạng trả `404`, không tiết lộ alias đã xóa từng tồn tại hay chưa. Edge có thể cache response âm trong thời gian ngắn nhưng phải tôn trọng negative TTL ngắn.
+
+### Phân tích
+
+`GET /v1/links/{id}/analytics?from=...&to=...&bucket=hour` trả các bộ đếm tổng hợp và timestamp độ mới. Dữ liệu nhất quán cuối cùng. `POST /v1/links/{id}/disable` yêu cầu xác thực và idempotent; việc vô hiệu hóa là một state transition có thứ tự mạnh.
+
+## 4. Data Model
+
+Source of truth là một kho key-value/SQL-compatible được sharding và nhất quán mạnh. Ký hiệu SQL làm rõ constraint; triển khai vật lý có thể dùng distributed SQL hoặc key-value với các conditional write tương đương.
+
+```sql
+CREATE TABLE links (
+  link_id       UUID PRIMARY KEY,
+  alias         VARCHAR(32) NOT NULL UNIQUE,
+  owner_id      BIGINT NOT NULL,
+  destination   TEXT NOT NULL,
+  redirect_code SMALLINT NOT NULL CHECK (redirect_code IN (301, 302)),
+  state         VARCHAR(12) NOT NULL CHECK (state IN ('active', 'disabled', 'expired')),
+  created_at    TIMESTAMP NOT NULL,
+  expires_at    TIMESTAMP NULL,
+  version       BIGINT NOT NULL,
+  shard_key     BIGINT NOT NULL
+);
+
+CREATE INDEX links_owner_created ON links (owner_id, created_at DESC);
+CREATE INDEX links_expiry ON links (expires_at) WHERE state = 'active';
+
+CREATE TABLE idempotency_records (
+  owner_id      BIGINT NOT NULL,
+  idempotency_key VARCHAR(128) NOT NULL,
+  request_hash  CHAR(64) NOT NULL,
+  response_json JSON NOT NULL,
+  created_at    TIMESTAMP NOT NULL,
+  PRIMARY KEY (owner_id, idempotency_key)
+);
+```
+
+`alias` là key tra cứu redirect, nên unique index là nơi kiểm tra va chạm có thẩm quyền. `(owner_id, created_at)` hỗ trợ màn hình danh sách của owner mà không quét alias. Partial expiry index cung cấp dữ liệu cho sweeper; expiry cũng được kiểm tra đồng bộ lúc đọc nên sweeper không phải dependency của tính đúng. `shard_key` là hash ổn định của alias, không phải ID tăng dần: nó phân bổ alias nóng và tránh write partition đơn điệu.
+
+Analytics tách riêng:
+
+```sql
+CREATE TABLE click_hourly (
+  link_id       UUID NOT NULL,
+  hour          TIMESTAMP NOT NULL,
+  country       CHAR(2) NOT NULL,
+  device_class  VARCHAR(16) NOT NULL,
+  clicks        BIGINT NOT NULL,
+  PRIMARY KEY (link_id, hour, country, device_class)
+);
+```
+
+Event stream, không phải redirect database, là nguồn của aggregate này. Aggregate key làm truy vấn link/time hiệu quả; retention và rollup ngăn storage analytics tăng vô hạn.
+
+## 5. High-Level Architecture
+
+```mermaid
+flowchart LR
+  U[Clients] --> DNS[Global DNS / Anycast]
+  DNS --> E[Edge CDN + WAF]
+  E --> R[Regional Redirect Service]
+  R --> C[(L1/L2 Cache)]
+  R --> M[(Replicated Link Store)]
+  R --> K[Click Event Log]
+  K --> Q[Analytics Consumers]
+  Q --> A[(Analytics Store)]
+  W[Create API] --> Auth[Auth + Rate Limiter]
+  Auth --> P[Write Service]
+  P --> M
+  P --> O[Outbox / Change Strea
+Rewrite both. Write:
+  /tmp/rt_27_url-shortener/url-shortener.en.md
+  /tmp/rt_27_url-shortener/url-shortener.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

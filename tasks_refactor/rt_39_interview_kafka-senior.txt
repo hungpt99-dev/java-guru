@@ -1,0 +1,227 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #39: interview/kafka-senior
+CURRENT EN FILE (rewrite to /tmp/rt_39_kafka-senior/kafka-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #5: Apache Kafka — Junior to Senior"
+description: "Event-driven systems with Kafka: delivery semantics, replication, partitioning for ordering, consumer lag, and the dead-letter queue every production consumer needs. Includes producer and consumer code, plus real numbers."
+pubDatetime: 2026-08-10T10:20:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - kafka
+  - event-driven
+---
+
+Kafka is the topic that separates "I've sent a message" from "I understand a distributed log." Junior developers produce and consume; senior developers reason about ordering, exactly-once processing, and what happens when a consumer falls behind, with the configuration and code to prove it. This post moves from topics to delivery guarantees to lag at scale: 50 questions. Choose the level you are interviewing for, then read one level above it.
+
+> Mindset: a junior sends a record and hopes it arrives; a senior can explain exactly what "arrives" means and what they built to ensure that a poison message can never take down the pipeline.
+
+## Junior — foundations
+
+**Q1. What are topics, partitions, and offsets?**
+A topic is a named log split into **partitions**, which are ordered, append-only logs. Each record gets a sequential **offset** within its partition. More partitions mean more parallelism, but also more open files (each partition is a directory of approximately 1 GB segment files) and slightly longer rebalances. A topic with 50 partitions on a 3-broker cluster is a reasonable starting point:
+
+```bash
+kafka-topics --create --topic orders --partitions 50 --replication-factor 3 \
+  --bootstrap-server broker-1:9092
+```
+
+Each partition has one leader and (RF−1) followers; 50 partitions × RF 3 = 150 replica assignments to spread across the brokers.
+
+**Q2. Producer vs consumer, and consumer groups?**
+A producer appends to a topic; a consumer in a **consumer group** gets exclusive access to a subset of the partitions. With 12 partitions and 4 consumers, each consumer handles 3 partitions. Adding a fifth consumer leaves one idle because you cannot have more active consumers than partitions. The `group.id` is what lets Kafka scale horizontally: every instance with the same ID shares the load:
+
+```java
+props.put(ConsumerConfig.GROUP_ID_CONFIG, "orders-service"); // all instances split the partitions
+props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+```
+
+Two different groups reading the same topic are fully independent: each keeps its own offsets and reads at its own pace.
+
+**Q3. What is `acks` and why does it matter?**
+`acks=0` (fire-and-forget, approximately no guarantee), `acks=1` (the leader acknowledges; data can be lost if the leader dies before replication), and `acks=all` (all in-sync replicas acknowledge; the strongest option, but with approximately 2–5× higher latency: ~20–50 ms versus ~2–5 ms). This is the durability-versus-latency tradeoff in concrete terms:
+
+```java
+props.put(ProducerConfig.ACKS_CONFIG, "all");
+props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true"); // no duplicates on retry
+props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000"); // how long to keep trying
+```
+
+The leader can tell followers to "commit" only after the record is in every ISR member's log; `acks=all` simply means that you wait for this decision instead of guessing.
+
+**Q4. What is a keyed message and why use one?**
+A key routes all records with the same key to the **same partition** (using a murmur2 hash), providing **per-key ordering**. Records without a key are distributed in round-robin fashion (since Kafka 2.4, a sticky partitioner fills one batch before moving on), so there is no ordering guarantee:
+
+```java
+// same key -> same partition -> in order. Critical for "all events for user 42 in order"
+producer.send(new ProducerRecord<>("orders", user.getId(), orderEvent));
+```
+
+The follow-up question interviewers often ask is about the hot-key problem: one hot key (for example, a celebrity user) makes one partition hot. Keying buys order at the cost of skew.
+
+**Q5. Queue vs Kafka log?**
+A queue removes a message once it is consumed; Kafka is an append-only log. Every consumer reads the history from its own offset, and messages expire through **retention** (for example, after 7 days), not when they are read. Seven days of retention at 10 GB of writes per day requires approximately 70 GB of disk per topic:
+
+```bash
+kafka-configs --alter --entity-type topics --entity-name orders \
+  --add-config retention.ms=604800000   # 7 days in milliseconds
+```
+
+That is also why "who read it?" is the wrong question for Kafka: the log keeps the record until retention deletes it, regardless of whether it has been consumed.
+
+**Q6. What does a consumer group do on a crash?**
+When a member dies, its partitions are **reassigned** to surviving members in a rebalance. During a rebalance, all group members briefly stop consuming. Frequent rebalances, often caused by delayed polling or missed heartbeats, create severe throughput drops. Three settings determine whether you are removed from the group:
+
+```java
+props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "45000");    // default 45 s since Kafka 2.3
+props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, "3000");  // must be well under the timeout
+props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "300000"); // 5 min to finish a poll cycle
+```
+
+**Q7. Where are committed offsets stored?**
+Committed offsets live in an internal compacted topic called `__consumer_offsets` (50 partitions by default), not on the consumer. Every `commitSync()` writes to that topic; on restart, the group resumes from there. One command shows the group state, per-partition offsets, and lag:
+
+```bash
+kafka-consumer-groups --bootstrap-server broker-1:9092 --describe --group orders-service
+```
+
+Pitfall: offsets expire after `offsets.retention.minutes` (7 days by default) when a group remains empty. A group that has been silent for a long time then falls back to `auto.offset.reset` instead of its previous position.
+
+**Q8. What are serializers and where do they break?**
+Brokers store bytes; serializers are a client-side contract. String for keys, JSON/`String` for values, Avro + Schema Registry for evolving schemas. The classic 3 a.m. crash: a JSON consumer without `trusted.packages` rejects every record produced by another service:
+
+```java
+props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.acme.orders.*");
+props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, OrderEvent.class);
+```
+
+Serializer and deserializer must match on both ends — a `StringSerializer` writer against a JSON reader yields a `JsonMappingException` on every record and the group falls behind.
+
+**Q9. What is `bootstrap.servers` really for?**
+It lists brokers for the initial **metadata handshake** only — the client then connects directly to each partition's leader. One broker is technically enough; you list 3+ so a metadata fetch survives a dead broker, a
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #5: Apache Kafka — Junior đến Senior"
+description: "Hệ thống hướng sự kiện với Kafka: semantics giao nhận, replication, partitioning để đảm bảo thứ tự, consumer lag và dead-letter queue mà mọi consumer production đều cần. Bao gồm code producer/consumer và các số liệu thực tế."
+pubDatetime: 2026-08-10T10:20:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - kafka
+  - event-driven
+---
+
+Kafka là chủ đề phân biệt câu "tôi đã gửi một message" với câu "tôi hiểu distributed log". Junior biết produce và consume; senior biết phân tích thứ tự, exactly-once và điều gì xảy ra khi consumer tụt hậu, với config và code để chứng minh. Bài viết đi từ topic đến delivery guarantee rồi đến lag ở quy mô lớn: 50 câu hỏi, hãy chọn đúng level bạn đang phỏng vấn và đọc thêm một level cao hơn.
+
+> Mindset: junior gửi một record và hy vọng nó đến nơi; senior giải thích chính xác "đến nơi" có nghĩa gì và đã xây dựng gì để một poison message không bao giờ quật ngã pipeline.
+
+## Junior — nền tảng
+
+**Q1. Topic, partition, và offset là gì?**
+Topic là một log có tên, được chia thành các **partition** — những log có thứ tự và chỉ ghi nối tiếp. Mỗi record nhận một **offset** tuần tự trong partition của nó. Nhiều partition hơn đồng nghĩa với nhiều parallelism hơn, nhưng cũng có nhiều file đang mở hơn (mỗi partition là một directory chứa các segment file khoảng 1 GB) và thời gian rebalance dài hơn một chút. Một topic có 50 partition trên cluster 3 broker là điểm khởi đầu hợp lý:
+
+```bash
+kafka-topics --create --topic orders --partitions 50 --replication-factor 3 \
+  --bootstrap-server broker-1:9092
+```
+
+Mỗi partition có một leader và (RF−1) follower; 50 partition × RF 3 = 150 replica assignment được phân bổ trên các broker.
+
+**Q2. Producer vs consumer, và consumer group?**
+Producer append vào topic; consumer trong **consumer group** được độc quyền xử lý một tập con partition. Với 12 partition và 4 consumer, mỗi consumer xử lý 3 partition. Thêm consumer thứ 5 thì một consumer sẽ không có việc, vì không thể có nhiều active consumer hơn số partition. `group.id` là thứ giúp Kafka scale ngang: mọi instance cùng ID sẽ chia sẻ tải:
+
+```java
+props.put(ConsumerConfig.GROUP_ID_CONFIG, "orders-service"); // mọi instance cùng chia các partition
+props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+```
+
+Hai group khác nhau đọc cùng một topic hoàn toàn độc lập: mỗi group giữ offset riêng và đọc theo tốc độ riêng.
+
+**Q3. `acks` là gì và tại sao quan trọng?**
+`acks=0` (fire-and-forget, gần như không có đảm bảo), `acks=1` (leader acknowledge; có thể mất dữ liệu nếu leader chết trước khi kịp replicate), và `acks=all` (mọi in-sync replica cùng acknowledge; mạnh nhất nhưng latency cao hơn khoảng 2–5 lần: ~20–50 ms so với ~2–5 ms). Đây là đánh đổi giữa durability và latency, thể hiện bằng số liệu:
+
+```java
+props.put(ProducerConfig.ACKS_CONFIG, "all");
+props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true"); // không duplicate khi retry
+props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000"); // thử trong bao lâu thì bỏ cuộc
+```
+
+Leader chỉ có thể báo cho follower "commit" sau khi record đã nằm trong log của mọi member ISR; `acks=all` nghĩa là bạn chờ quyết định đó thay vì phỏng đoán.
+
+**Q4. Keyed message là gì và tại sao dùng?**
+Một key định tuyến mọi record có cùng key về **cùng partition** (bằng murmur2 hash), nhờ đó đảm bảo **per-key ordering**. Record không có key được phân phối theo round-robin (từ Kafka 2.4, sticky partitioner gom record vào một batch trước khi chuyển sang partition khác), nên không có đảm bảo về thứ tự:
+
+```java
+// cùng key -> cùng partition -> đúng thứ tự. Tối quan trọng cho "mọi event của user 42 theo thứ tự"
+producer.send(new ProducerRecord<>("orders", user.getId(), orderEvent));
+```
+
+Hệ quả mà interviewer thường đào sâu là vấn đề hot key: một hot key (chẳng hạn user nổi tiếng) làm một partition bị quá tải. Keying mang lại thứ tự, nhưng phải đánh đổi bằng skew.
+
+**Q5. Queue vs Kafka log?**
+Queue xóa message sau khi được consume; Kafka là append-only log. Mỗi consumer đọc lịch sử từ offset riêng, còn message hết hạn theo **retention** (ví dụ 7 ngày), chứ không phải khi được đọc. Retention 7 ngày với lượng ghi 10 GB/ngày nghĩa là bạn phải dự trù khoảng 70 GB disk cho mỗi topic:
+
+```bash
+kafka-configs --alter --entity-type topics --entity-name orders \
+  --add-config retention.ms=604800000   # 7 ngày, tính bằng mili giây
+```
+
+Đó cũng là lý do "ai đã đọc nó?" là câu hỏi sai đối với Kafka: log giữ record cho đến khi retention xóa nó, bất kể record đã được consume hay chưa.
+
+**Q6. Consumer group làm gì khi crash?**
+Khi một member chết, partition của nó được **reassigned** cho các member còn lại trong một đợt rebalance. Trong thời gian đó, mọi member của group tạm dừng consume. Rebalance thường xuyên, thường do poll hoặc heartbeat bị chậm, khiến throughput sụt mạnh. Ba thiết lập quyết định bạn có bị loại khỏi group hay không:
+
+```java
+props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "45000");    // mặc định 45 s từ Kafka 2.3
+props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, "3000");  // phải nhỏ hơn timeout nhiều
+props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "300000"); // 5 phút để xong một poll cycle
+```
+
+**Q7. Offset đã commit được lưu ở đâu?**
+Offset đã commit được lưu trong một internal compacted topic tên `__consumer_offsets` (mặc định 50 partition), không phải trên consumer. Mỗi `commitSync()` ghi vào topic này; khi restart, group tiếp tục từ đó. Một lệnh cho thấy trạng thái group, offset của từng partition và lag:
+
+```bash
+kafka-consumer-groups --bootstrap-server broker-1:9092 --describe --group orders-service
+```
+
+Cạm bẫy: offset hết hạn sau `offsets.retention.minutes` (mặc định 7 ngày) nếu group bị bỏ trống quá lâu. Khi đó, một group im lặng lâu ngày sẽ quay về `auto.offset.reset` thay vì tiếp tục từ vị trí cũ.
+
+**Q8. Serializer là gì và chúng hỏng ở đâu?**
+Broker chỉ lưu bytes; serializer là hợp đồng phía client. String cho key, JSON/`String` cho value, Avro + Schema Registry cho schema tiến hóa. Crash 3 giờ sáng kinh điển: một JSON consumer không có `trusted.packages` từ chối mọi record do service khác produce:
+
+```java
+props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.acme.orders.*");
+props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, OrderEvent.class);
+```
+
+Serializer và deserializer hai đầu phải khớp — writer dùng `StringSerializer` mà reader dùng JSON thì mọi record đều ném `JsonMappingException` và group tụt hậu.
+
+**Q9. `bootstrap.servers` thực sự dùng để làm gì?**
+Nó chỉ liệt kê broker cho **metadata handshake** ban đầu — sau đó client kết nối thẳng tới leader của từng partition. Một broker về lý thuyết là đủ; bạn liệt kê 3+ để metadata fetch sống sót khi một broker chết, và client re-fetch metadata mỗi 5 phút:
+
+```java
+props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "broker-1:9092,broker-2:9092,broker-3:9092");
+props.put(ProducerConfig.METADATA_MAX_AGE_CONFIG, "300000"); // re-fetch bố cục pa
+Rewrite both. Write:
+  /tmp/rt_39_kafka-senior/kafka-senior.en.md
+  /tmp/rt_39_kafka-senior/kafka-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

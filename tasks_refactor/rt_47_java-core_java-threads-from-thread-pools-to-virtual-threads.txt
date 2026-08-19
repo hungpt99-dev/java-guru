@@ -1,0 +1,197 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #47: java-core/java-threads-from-thread-pools-to-virtual-threads
+CURRENT EN FILE (rewrite to /tmp/rt_47_java-threads-from-thread-pools-to-virtual-threads/java-threads-from-thread-pools-to-virtual-threads.en.md):
+=== EN CURRENT ===
+---
+title: "Java Threads: From Thread Pools to Virtual Threads"
+description: "A deep, production-oriented guide to Java concurrency with 31 runnable examples: what threads really are, why shared state breaks, how thread pools and backpressure work, why more threads can be slower, and what Virtual Threads actually change under the hood."
+pubDatetime: 2026-08-09T00:00:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - java-core
+  - backend
+---
+
+Imagine a service that receives 10,000 requests at once.
+
+Some of those requests need the CPU — parsing JSON, hashing, compressing.
+Some wait for a database query.
+Some wait for an external HTTP API that takes 300 ms to answer.
+
+The first question every engineer asks: _should we create 10,000 threads?_
+
+If not, why not? And the follow-up that confuses everyone: _if Java
+Virtual Threads let us create millions of threads, why can't we make the
+application infinitely concurrent?_
+
+This article answers those questions. But instead of starting with a
+definition of a thread, it starts with the stack of machinery that decides
+everything about concurrency:
+
+```text
+Application Code
+       ↓
+Java Threads
+       ↓
+JVM
+       ↓
+Operating System Scheduler
+       ↓
+CPU Cores
+       ↓
+External Resources (databases, APIs, files)
+```
+
+Every question in this article is really about one thing: **where does your
+system actually bottleneck, and does adding threads address that bottleneck or
+just move it somewhere else?**
+
+This is the mental model we will use again and again:
+
+> **Before adding threads, ask: what is actually limiting the system?**
+> CPU? Database connections? An external API rate limit? Network? Memory?
+> Lock contention? The thread pool itself? Queue capacity?
+> Increasing concurrency is only useful if it addresses the actual
+> bottleneck. Otherwise it may simply move the bottleneck elsewhere.
+
+Here are the four questions this article answers in depth:
+
+- Why can adding more threads make an application **slower**?
+- Why does a thread pool with hundreds of threads not improve CPU utilization?
+- Why can Virtual Threads handle massive concurrency but not make CPU-bound code faster?
+- Why do concurrency bugs almost always **only appear in production**?
+
+Every claim is backed by a real, runnable example. The article is designed to
+be read next to the companion repository [`java-lab`](https://github.com/hungpt99-dev/java-lab/tree/lab/thread),
+a plain Maven project with **31 small, independent examples**, zero frameworks,
+and pure JDK concurrency APIs. Each section maps a concept to an actual class,
+shows the real code, and tells you exactly what to run and what to observe.
+
+All examples compile with Java 21+ (`maven.compiler.release` is set to `21` in
+the `pom.xml`; Virtual Threads require Java 21). Every measurement quoted in
+this article was produced by running the examples on a 12-core machine with
+JDK 21 — treat them as sample data, not universal benchmark results.
+
+**How to read this article:** every concept names its repository class; run it
+with the commands in the "Try It Yourself" boxes and compare your observation
+with the recorded outputs shown here. The structure is always the same: a
+problem, an intuition, the code, what actually happens, why, what happens
+under the hood, the trade-offs, and when it matters in production.
+
+---
+
+## 1. The Real Problem: 10,000 Requests
+
+Let us go back to the opening scenario. A normal program executes
+instructions **sequentially** — one thing finishes before the next starts:
+
+```text
+Task A
+  ↓
+Task B
+  ↓
+Task C
+```
+
+But a real backend rarely looks like that. At any instant it has requests in
+completely different phases:
+
+```text
+Request A ───── waiting for database
+Request B ───── calculating
+Request C ───── waiting for HTTP API
+Request D ───── processing file
+```
+
+Here is the wasted opportunity: while Request A waits for the database,
+the CPU is idle. A sequential program cannot start Request B until A is
+finished — so the machine spends most of its time doing nothing, waiting
+on external resources that are thousands of times slower than the CPU.
+
+A CPU core executes billions of instructions per second. A database round
+trip takes milliseconds — millions of instructions worth of time. _Waiting_
+is not a rare event in a backend; it is the default state.
+
+This gap between "the CPU is fast" and "everything else is slow" is the
+original reason threads exist. Threads let one program keep the CPU busy
+on other work while some of its work is blocked on something slow.
+
+But threads bring a new set of problems: they are not free to create, they
+share memory, they can corrupt each other's state, and they do not create
+CPU capacity. The rest of this article walks through that trade — each
+concept, its mechanism, and its price.
+
+---
+
+## 2. Concurrency and Parallelism: Two Different Tools
+
+Before looking at Java at all, we need the distinction that the whole
+article is built on.
+
+### 2.1. Concurrency is about structure; parallelism is about execution
+
+- **Concurrency**: multiple tasks make progress during _overlapping_ time
+  periods, interleaved on the same CPU. It is a way to _structure_ a program
+  that has waiting in it.
+- **Parallelism**: multiple tasks physically _execute at the same instant_,
+  on different CPU cores. It is a property of the _hardware_ doing the
+  execution.
+
+A helpful but technically honest analogy: concurrency is one chef switching
+between multiple dishes on one stove — no dish cooks faster, but all of them
+make progress while each waits. Parallelism is multiple chefs cooking at the
+same time — actual throughput, but only because there are multiple stoves.
+
+```text
+Concurrency (interleaved on 1 core):
+  Thread A:  |--A1--|        |--A2--|        |--A3--|
+  Thread B:        |--B1--|        |--B2--|        |--B3--|
+
+Parallelism (simultaneous on 2 cores):
+  Core 1:    |------A1------|------A2------|
+  Core 2:    |------B1------|------B2------|
+```
+
+The deeper point: **concurrency is often about dealing with waiting, while
+parallelism is about using multiple execution resources.** If your task never
+waits, concurrency buys you almost nothing — only parallelism (more cores)
+helps. If your task waits a lot, concurrency lets other tasks use the time
+you would otherwise waste.
+
+Concurrency does not require multiple cores. Parallelism requires them. If
+your machine has 4 cores and you create 1000 threads, at most **4 tasks run
+at the same instant** — the other 996 are waiting, sleeping, or being
+context-switched. **Creating threads does not create cores.**
+
+### 2.2. The two workload types that decide everything
+
+There is one question to ask about any task: _what is it waiting for?_
+
+- **CPU-bound**: the task spends its time computing — parsing, hashing,
+  crypto, compression. Speed is limited by CPU cores, not by thread count.
+- **I/O-bound**: the task spends most of its time _waiting_ — for a database,
+  an HTTP response, a file read. Speed is limited by latency and concurrency.
+
+`
+=== VI CURRENT ===
+(missing)
+Rewrite both. Write:
+  /tmp/rt_47_java-threads-from-thread-pools-to-virtual-threads/java-threads-from-thread-pools-to-virtual-threads.en.md
+  /tmp/rt_47_java-threads-from-thread-pools-to-virtual-threads/java-threads-from-thread-pools-to-virtual-threads.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

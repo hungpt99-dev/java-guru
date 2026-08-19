@@ -1,0 +1,145 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #46: java-core/how-java-works-internally
+CURRENT EN FILE (rewrite to /tmp/rt_46_how-java-works-internally/how-java-works-internally.en.md):
+=== EN CURRENT ===
+---
+title: "How Java Actually Works: Inside the JVM from Bytecode to Garbage Collection"
+description: "Follow the journey of a Java program from source code into the JVM — method calls, object allocation, JIT optimization, and garbage collection explained at a deeper level than typical stack-vs-heap tutorials."
+pubDatetime: 2026-08-10T10:00:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - java-core
+  - jvm
+  - garbage-collection
+  - performance
+---
+
+You probably write code like this every day:
+
+```java
+public static void main(String[] args) {
+    User user = new User("Hung");
+    process(user);
+}
+```
+
+At first glance, this looks simple. Create an object. Pass it to a method. Done.
+
+But here is where the JVM becomes interesting. Between the moment you press Enter and the moment this code actually executes on your CPU, an entire machinery comes to life: a compiler produces intermediate instructions, a runtime environment verifies, loads, and links classes, a machine interprets your code while secretly profiling it, a just-in-time compiler rewrites it into native instructions, memory is allocated from arenas you never see, and eventually, a garbage collector decides — according to its own schedule — when the `User` object is allowed to die.
+
+This article is a field trip inside that machinery. We are going to follow one tiny program from source code to CPU, answering one question at every step:
+
+> What really happens from the moment Java code starts running until objects are created, used, and eventually garbage collected?
+
+You already know Java syntax. This article is about what runs underneath it.
+
+Every claim in this article can be verified by running real code. It is designed
+to be read together with the companion repository
+[`java-lab`](https://github.com/hungpt99-dev/java-lab/tree/lab/jvm) (branch
+`lab/jvm`) — a plain, framework-free Maven project with **16 small, independent
+experiments** on bytecode, class loading, stack frames, references, GC
+reachability, escape analysis, and the boxed-type traps. Each section below maps
+a concept to a concrete class: follow the link to the example file, run it with
+the command next to it, and compare your observation with the one recorded here.
+
+## 1. The Big Picture — What Happens When You Run a Java Program?
+
+### The journey in one diagram
+
+```
+  .java source
+      │
+      │  javac (the compiler)
+      ▼
+  .class file  ────  bytecode: platform-independent instructions
+      │
+      │  java <Main>  (the launcher starts the JVM)
+      ▼
+  ┌────────────────────────── JVM ──────────────────────────┐
+  │  Class loading  →  Bytecode verification  →  Linking   │
+  │                                                         │
+  │  Execution engine:                                      │
+  │    Interpreter ──(hot method detected)──► JIT compiler  │
+  │        │                                   │            │
+  │        └─────────► native machine code ◄────┘            │
+  │                                                         │
+  │  Runtime services: GC  ·  Threads  ·  Exceptions  · ... │
+  └──────────────────────────┬──────────────────────────────┘
+                             │
+                             ▼
+                           CPU
+```
+
+### What Java bytecode actually is
+
+When you run `javac Main.java`, the compiler does **not** produce machine code for your laptop's x86 or ARM processor. It produces a `.class` file containing **bytecode** — an instruction set defined by the Java Virtual Machine Specification, not by any real hardware.
+
+Each bytecode instruction is one byte long (hence the name), and there are only a few hundred of them. Instructions like:
+
+- `new` — allocate an object
+- `invokespecial` — call a constructor or private method
+- `invokestatic` — call a static method
+- `aload_1` — load a reference from a local variable slot
+- `iadd` — add two integers from the operand stack
+
+You can see the bytecode of any compiled class with a tool you already have:
+
+```bash
+javap -c Main
+```
+
+> 🧪 **Experiment:** [`BytecodeExample.java`](https://github.com/hungpt99-dev/java-lab/blob/lab/jvm/src/main/java/com/example/javalab/jvminternals/BytecodeExample.java) in `java-lab` (branch `lab/jvm`) contains exactly the line `User user = new User("Hung")`; after `mvn clean compile`, run `javap -c -p target/classes/com/example/javalab/jvminternals/BytecodeExample.class` and you get the exact `new dup ldc invokespecial astore_1` sequence that Section 3 reads instruction by instruction.
+
+Later in this article we will literally read the bytecode of our example program. This is the first reason Java "runs everywhere": the compiler targets a fictional machine, and it is the job of each platform's JVM to make that fictional machine real.
+
+### Why Java can run on different operating systems
+
+"Write once, run anywhere" is not magic — it is an act of delegation. Java code is compiled once, to bytecode. The **JVM is the execution environment** that interprets or compiles that bytecode into the native instructions of whatever OS and CPU it happens to be running on: macOS needs one JVM build, Linux another, Windows another — but they all run the identical `.class` file.
+
+In other words, the JVM is the compatibility layer. Your program never talks to the operating system directly for memory, threads, or code execution; it talks to the JVM, and the JVM talks to the OS. The portable unit is not the program — it is the runtime contract.
+
+### Class loading at a high level
+
+Before any code executes, the JVM must find and load the classes it needs. This is done by **class loaders**, organized in a hierarchy:
+
+```
+                     ┌──────────────────────────────┐
+                     │  Bootstrap class loader      │  JDK core classes
+                     │  (java.base, java.lang, ...) │  (java/lang/String, ...)
+                     └──────────────┬───────────────┘
+                                    │  parent
+                     ┌──────────────▼───────────────┐
+                     │  Platform class loader        │  JDK modules
+                     └──────────────┬───────────────┘
+                                    │  parent
+                     ┌──────────────▼───────────────┐
+                     │  Application class loader     │  your classes on the
+                     │  (classpath)                  │  classpath
+                     └──────────────────────────────┘
+```
+
+When a class is needed, the JVM's loading process asks its class loader, which normally first **delegates to its parent** — a model that ensures, for example, that `java.lang.String` always comes from the JDK and can never be replaced by a classpath copy.
+
+Once a class file is found, it is **verified** (the JVM checks the bytecode is well-formed and type-safe — this is why garbage bytecode cannot crash a conforming JVM the way garbage machine code can crash your OS), then **linked**, then — only when first actively used — **initialized** (static initializers run). Classe
+=== VI CURRENT ===
+(missing)
+Rewrite both. Write:
+  /tmp/rt_46_how-java-works-internally/how-java-works-internally.en.md
+  /tmp/rt_46_how-java-works-internally/how-java-works-internally.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

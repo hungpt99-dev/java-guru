@@ -1,0 +1,267 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #21: system-design/search-autocomplete
+CURRENT EN FILE (rewrite to /tmp/rt_21_search-autocomplete/search-autocomplete.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a Search Autocomplete System"
+description: "A practical design for low-latency, personalized, typo-tolerant search suggestions at high QPS."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building the suggestion service behind a search box. A user types a prefix such as `phot`, and the service returns a short, ordered list of useful completions such as “photo printer”, “photo editor”, and “photography”. The same service powers web, mobile, and voice-assisted clients.
+
+The users are anonymous visitors, signed-in customers, and internal ingestion jobs. The interactive path must support:
+
+- Prefix suggestions from the global catalog.
+- Personalized suggestions based on a user’s recent searches and preferences.
+- Trending suggestions that react to recent demand without allowing one noisy event to dominate.
+- Typo tolerance for common edit-distance-one mistakes.
+- Category-aware ranking, such as products, people, places, or help articles.
+- Partial results when personalization, trending, or one index replica is unavailable.
+
+The user-visible SLO is p99 under 50 ms at the service boundary, excluding client network time. We target 99.99% monthly availability for the core prefix path. A stale but safe result is preferable to an error; suggestions must not expose private queries, blocked terms, or data from another tenant. A click or search event may be lost briefly, but a completed ingestion request must be idempotent and eventually indexed.
+
+## 2. Scale Estimation
+
+Assumptions are deliberately explicit so capacity can be replaced with production measurements:
+
+- 50 million daily active users (DAU). This represents a large consumer product, not a global web index.
+- Each user performs 20 autocomplete requests per day. This counts keystrokes that pass the client debounce, not every keypress.
+- `50,000,000 x 20 = 1,000,000,000 requests/day`.
+- Average request rate: `1,000,000,000 / 86,400 = 11,574 RPS`.
+- Traffic is bursty around launches and evening usage. A 10x peak gives about `116,000 RPS`; we provision 30% headroom, or `151,000 RPS` of read capacity.
+- An average response is 10 suggestions x 80 bytes plus JSON overhead, approximately 2 KB. Egress at peak is `116,000 x 2 KB = 232 MB/s`, or about 1.86 Gbit/s before protocol overhead.
+- The read path dominates. Assume 10 million accepted query/event writes per day: the read:write ratio is `100:1`.
+- An accepted event is about 500 bytes. Raw event storage for 30 days is `10,000,000 x 500 x 30 = 150 GB`; with three durable replicas, indexes, and 40% overhead, reserve about 630 GB. The event log is retained for 30 days and then compacted or deleted.
+- The serving vocabulary is 200 million unique phrases. A compact trie/FST entry, category metadata, counters, and ranking features average 120 bytes, or 24 GB raw. Five regional replicas plus temporary build space require roughly 150 GB.
+- We target 99.99% availability, allowing about 4 minutes 23 seconds of unavailability per 30-day month. The 50 ms p99 target applies to successful core responses; dependency degradation should produce a bounded partial response, not wait for a timeout.
+- Phrase growth is 5% monthly. Events grow with DAU and usage, so the event pipeline should support at least 2x the current peak before an expansion is scheduled.
+
+These numbers imply a read-optimized, memory-resident serving index, a separately scalable event pipeline, and bounded fan-out. The service should never query a relational database once per keystroke.
+
+## 3. API Design
+
+The public endpoint is:
+
+```http
+GET /v1/suggestions?q=phot&limit=8&category=all&locale=en-US
+Authorization: Bearer <token>       # optional for personalization
+X-Request-Id: 7f2c...
+```
+
+Response:
+
+```json
+{
+  "query": "phot",
+  "suggestions": [
+    {"text": "photo printer", "category": "product", "score": 0.94},
+    {"text": "photo editor", "category": "app", "score": 0.89}
+  ],
+  "complete": true,
+  "sources": ["global", "trending"],
+  "index_version": "2026-08-15T09:59:40Z",
+  "request_id": "7f2c..."
+}
+```
+
+`limit` is capped at 10, and the query is normalized (Unicode normalization, case folding, and bounded length) before lookup. The server returns `200` with `complete: false` if optional sources time out. It returns `400` for an invalid locale or query shape, `401` only when an explicitly requested authenticated feature requires identity, and `429` for a caller over its quota. A core index outage returns a cached result when available, otherwise `503` with `Retry-After`.
+
+Event ingestion is separate:
+
+```http
+POST /v1/query-events
+Idempotency-Key: 6b5d6b9e-...
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"query":"photo printer","selected_suggestion":"photo printer","locale":"en-US","occurred_at":"2026-08-15T03:00:02Z"}
+```
+
+The response is `202 Accepted` after durable queue admission. The idempotency key is scoped to tenant and endpoint and retained for 48 hours. The client must not retry a `4xx` except `429`; it may retry a lost response for the same key. Events carry a server-assigned producer timestamp and are not trusted for authorization or tenant identity.
+
+## 4. Data Model
+
+The source-of-truth metadata is relational because phrase ownership, moderation, and versioned publication need constraints and transactions.
+
+```sql
+CREATE TABLE phrases (
+  tenant_id       BIGINT NOT NULL,
+  phrase_id       BIGINT NOT NULL,
+  normalized_text  TEXT NOT NULL,
+  locale           TEXT NOT NULL,
+  category         TEXT NOT NULL,
+  status           TEXT NOT NULL,
+  base_score       DOUBLE PRECISION NOT NULL,
+  updated_at       TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, phrase_id),
+  UNIQUE (tenant_id, locale, normalized_text)
+);
+
+CREATE INDEX phrases_lookup
+  ON phrases (tenant_id, locale, status, normalized_text);
+
+CREATE TABLE query_events (
+  tenant_id       BIGINT NOT NULL,
+  event_id        UUID NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  user_id         BIGINT,
+  normalized_text TEXT NOT NULL,
+  category        TEXT,
+  occurred_at     TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, event_id),
+  UNIQUE (tenant_id, idempotency_key)
+);
+
+CREATE INDEX events_time ON query_events (tenant_id, occurred_at);
+```
+
+The phrase uniqueness constraint prevents duplicate catalog entries within a tenant and locale. The lookup index serves moderation and rebuild tools, not the hot suggestion path. Events use `(tenant_id, event_id)` for durable deduplication and a time index for windowed aggregation. Large event tables are range-partitioned by day; this makes 30-day retention a partition drop rather than a billion-row delete.
+
+The serving representation is an immutable, memory-mapped FST/trie snapshot. Each terminal stores phrase ID, category, base score, and compact feature references. A separate per-user list is keyed by `(tenant_id, user_id, locale)` and has a short TTL. The event stream is partitioned by `
+=== VI CURRENT ===
+---
+title: "Thiết kế Hệ thống Gợi ý Tìm kiếm (Search Autocomplete)"
+description: "Thiết kế thực tế cho các gợi ý tìm kiếm có độ trễ thấp, cá nhân hóa, chịu lỗi chính tả ở QPS cao."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Chúng ta xây dựng dịch vụ gợi ý phía sau ô tìm kiếm. Khi người dùng nhập tiền tố như `phot`, dịch vụ trả về một danh sách ngắn, có thứ tự, gồm các hoàn chỉnh hữu ích như “photo printer”, “photo editor” và “photography”. Cùng dịch vụ này phục vụ các client web, mobile và trợ lý giọng nói.
+
+Người dùng gồm khách truy cập ẩn danh, khách hàng đã đăng nhập và các job nạp dữ liệu nội bộ. Luồng tương tác phải hỗ trợ:
+
+- Gợi ý theo tiền tố từ catalog toàn cục.
+- Gợi ý cá nhân hóa dựa trên các tìm kiếm gần đây và tùy chọn của người dùng.
+- Gợi ý thịnh hành phản ứng với nhu cầu gần đây mà không để một sự kiện nhiễu chi phối.
+- Chịu lỗi chính tả thông thường với khoảng cách chỉnh sửa bằng một.
+- Xếp hạng theo danh mục, chẳng hạn sản phẩm, người, địa điểm hoặc bài trợ giúp.
+- Kết quả một phần khi cá nhân hóa, xu hướng hoặc một replica index không khả dụng.
+
+SLO hướng tới người dùng là p99 dưới 50 ms tại biên dịch vụ, không tính thời gian mạng phía client. Mục tiêu availability của đường dẫn tiền tố cốt lõi là 99.99% theo tháng. Kết quả cũ nhưng an toàn tốt hơn lỗi; gợi ý không được làm lộ truy vấn riêng tư, từ bị chặn hoặc dữ liệu của tenant khác. Một click hoặc sự kiện tìm kiếm có thể mất trong thời gian ngắn, nhưng request ingestion đã hoàn tất phải idempotent và cuối cùng được lập chỉ mục.
+
+## 2. Scale Estimation
+
+Các giả định được nêu rõ để có thể thay bằng số đo production:
+
+- 50 triệu người dùng hoạt động hằng ngày (DAU). Đây là một sản phẩm tiêu dùng lớn, không phải web index toàn cầu.
+- Mỗi người dùng thực hiện 20 request autocomplete mỗi ngày. Con số này tính các phím đi qua debounce phía client, không phải mọi lần nhấn phím.
+- `50,000,000 x 20 = 1,000,000,000 requests/day`.
+- Tốc độ trung bình: `1,000,000,000 / 86,400 = 11,574 RPS`.
+- Traffic tăng mạnh quanh thời điểm ra mắt và buổi tối. Peak 10x cho khoảng `116,000 RPS`; cấp thêm headroom 30%, tức công suất đọc `151,000 RPS`.
+- Response trung bình gồm 10 gợi ý x 80 byte cộng overhead JSON, xấp xỉ 2 KB. Egress lúc peak là `116,000 x 2 KB = 232 MB/s`, khoảng 1.86 Gbit/s trước overhead giao thức.
+- Read chiếm ưu thế. Giả định 10 triệu write sự kiện/query được chấp nhận mỗi ngày: tỷ lệ read:write là `100:1`.
+- Một event được chấp nhận khoảng 500 byte. Lưu raw event trong 30 ngày là `10,000,000 x 500 x 30 = 150 GB`; với ba replica bền vững, index và overhead 40%, cần dự phòng khoảng 630 GB. Event log giữ 30 ngày rồi compact hoặc xóa.
+- Serving vocabulary có 200 triệu phrase duy nhất. Một entry trie/FST nén, metadata danh mục, counter và feature xếp hạng trung bình 120 byte, tương đương 24 GB raw. Năm replica theo region cộng không gian build tạm cần khoảng 150 GB.
+- Mục tiêu availability là 99.99%, cho phép khoảng 4 phút 23 giây không khả dụng trong tháng 30 ngày. Mục tiêu p99 50 ms áp dụng cho response core thành công; suy giảm dependency phải tạo partial response có giới hạn, không chờ đến timeout.
+- Phrase tăng 5% mỗi tháng. Event tăng theo DAU và mức sử dụng, vì vậy pipeline event nên chịu được ít nhất 2x peak hiện tại trước khi lên lịch mở rộng.
+
+Các con số này dẫn đến một serving index tối ưu cho đọc và nằm trong memory, một event pipeline có thể scale độc lập, cùng fan-out có giới hạn. Dịch vụ không bao giờ query relational database một lần cho mỗi keystroke.
+
+## 3. API Design
+
+Endpoint public là:
+
+```http
+GET /v1/suggestions?q=phot&limit=8&category=all&locale=en-US
+Authorization: Bearer <token>       # optional for personalization
+X-Request-Id: 7f2c...
+```
+
+Response:
+
+```json
+{
+  "query": "phot",
+  "suggestions": [
+    {"text": "photo printer", "category": "product", "score": 0.94},
+    {"text": "photo editor", "category": "app", "score": 0.89}
+  ],
+  "complete": true,
+  "sources": ["global", "trending"],
+  "index_version": "2026-08-15T09:59:40Z",
+  "request_id": "7f2c..."
+}
+```
+
+`limit` bị giới hạn ở 10, còn query được chuẩn hóa (Unicode normalization, case folding và độ dài có giới hạn) trước khi lookup. Server trả `200` với `complete: false` nếu các source tùy chọn timeout. Trả `400` cho locale hoặc hình dạng query không hợp lệ, chỉ trả `401` khi một tính năng được yêu cầu rõ ràng cần danh tính xác thực, và trả `429` khi caller vượt quota. Core index outage trả kết quả cache nếu có; nếu không, trả `503` với `Retry-After`.
+
+Ingestion event tách riêng:
+
+```http
+POST /v1/query-events
+Idempotency-Key: 6b5d6b9e-...
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"query":"photo printer","selected_suggestion":"photo printer","locale":"en-US","occurred_at":"2026-08-15T03:00:02Z"}
+```
+
+Response là `202 Accepted` sau khi event được nhận vào durable queue. Idempotency key có phạm vi tenant và endpoint, được giữ 48 giờ. Client không được retry `4xx`, ngoại trừ `429`; có thể retry response bị mất với cùng key. Event mang producer timestamp do server cấp và không được tin cậy cho authorization hoặc tenant identity.
+
+## 4. Data Model
+
+Metadata nguồn sự thật là relational vì ownership của phrase, moderation và publication có version cần constraint và transaction.
+
+```sql
+CREATE TABLE phrases (
+  tenant_id       BIGINT NOT NULL,
+  phrase_id       BIGINT NOT NULL,
+  normalized_text  TEXT NOT NULL,
+  locale           TEXT NOT NULL,
+  category         TEXT NOT NULL,
+  status           TEXT NOT NULL,
+  base_score       DOUBLE PRECISION NOT NULL,
+  updated_at       TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, phrase_id),
+  UNIQUE (tenant_id, locale, normalized_text)
+);
+
+CREATE INDEX phrases_lookup
+  ON phrases (tenant_id, locale, status, normalized_text);
+
+CREATE TABLE query_events (
+  tenant_id       BIGINT NOT NULL,
+  event_id        UUID NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  user_id         BIGINT,
+  normalized_text TEXT NOT NULL,
+  category        TEXT,
+  occurred_at     TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, event_id),
+  UNIQUE (tenant_id, idempotency_key)
+);
+
+CREATE INDEX events_time ON query_events (tenant_id, occurred_at);
+```
+
+Unique constraint của phrase ngăn các entry catalog trùng trong một tenant và locale. Lookup index phục vụ công cụ moderation và rebuild, không phục vụ hot suggestion path. Event dùng `(tenant_id, event_id)` để deduplicate bền vững và time index cho aggregation theo cửa sổ. Bảng event lớn được partition theo ngày; nhờ vậy retention 30 ngày là drop partition thay vì xóa một tỷ row.
+
+Serving representation là FST/trie immutable, memory-mapped. Mỗi terminal lưu phrase ID, category, base score và tham chiếu feature nén. Một danh sách riêng theo user được key bằng `(tenant_id, user_id, locale)` và có TTL ngắn. Event stream được partition theo `hash(tenant_id, normalized_text)`: phrase là ordering key cho window aggregation xác định, còn tenant salt ngăn placement liên tena
+Rewrite both. Write:
+  /tmp/rt_21_search-autocomplete/search-autocomplete.en.md
+  /tmp/rt_21_search-autocomplete/search-autocomplete.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

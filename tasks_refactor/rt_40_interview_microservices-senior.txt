@@ -1,0 +1,306 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #40: interview/microservices-senior
+CURRENT EN FILE (rewrite to /tmp/rt_40_microservices-senior/microservices-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #6: Microservices — Junior to Senior"
+description: "Microservices at the senior level are mostly about knowing when NOT to use them — resilience patterns, service communication, and distributed transactions."
+pubDatetime: 2026-08-10T10:10:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - microservices
+  - resilience
+---
+
+Microservices are the topic where senior judgment matters most, because the wrong answer is "let's split the monolith." Junior developers draw service boxes; seniors explain why a monolith was the right call for years and what specifically forced the split. This post walks from service boundaries to the distributed-transaction trap: 50 questions, every answer code-first with real Spring. Pick the level you are interviewing for and read one level above it.
+
+> Mindset: a junior lists the benefits of microservices; a senior can name three concrete costs they introduce and the exact trigger that justifies paying them.
+
+## Junior — foundations
+
+**Q1. What is a microservice and how does it differ from a monolith?**
+A microservice is a small, independently deployable service that owns one business capability and its own data. A monolith is one deployable unit serving every capability. Microservices buy independent scaling, isolated failures, and team autonomy; they come with the costs of network calls, distributed data, and operational complexity. The cheapest form of a microservice is a Spring Boot app that does exactly one job:
+
+```java
+@SpringBootApplication
+public class OrderService {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderService.class, args);   // one capability, one deployable
+    }
+}
+```
+
+One deployable means one build, one rollout, one rollback. Twenty services mean twenty of each — that cost only pays off when the independence is real.
+
+**Q2. What is the difference between synchronous and asynchronous communication?**
+Sync (HTTP/RPC): the caller blocks until it gets an answer — tight coupling, and a slow callee stalls your thread. Async (events): the caller publishes and moves on — loose coupling and resilience, but eventual consistency and harder debugging. Choose sync when the user is waiting for the answer, and async for fire-and-forget side effects:
+
+```java
+// Sync — the caller waits
+OrderSummary summary = restClient.get()
+    .uri("http://order-service/api/orders/{id}", id)
+    .retrieve()
+    .body(OrderSummary.class);        // blocks until response or 3s timeout
+
+// Async — publish and continue
+kafkaTemplate.send("order.placed", new OrderPlaced(orderId));   // nobody waits
+```
+
+Rule of thumb: the happy-path request the user waits for is sync; anything that can tolerate a delay is async.
+
+**Q3. What is an API gateway and what does it do?**
+An API gateway is one entry point that routes, authenticates, rate-limits, and often aggregates. It hides the service topology so clients talk to one host instead of twenty, and cross-cutting policies live in one place. Spring Cloud Gateway is a reactive proxy; routes are just functions:
+
+```java
+@Bean
+public RouteLocator routes(RouteLocatorBuilder b) {
+    return b.routes()
+        .route("orders", r -> r.path("/api/orders/**")
+            .filters(f -> f.circuitBreaker(c -> c.setName("gatewayCB")
+                    .setFallbackUri("forward:/fallback/orders")))
+            .uri("lb://ORDER-SERVICE"))
+        .build();
+}
+```
+
+Without it, clients hardcode every service address, every team re-implements auth, and nobody can rate-limit anything centrally.
+
+**Q4. What is service discovery and why can't you hardcode URLs?**
+Instances scale, crash, and get rescheduled; a hardcoded IP is stale within minutes. Services register with a registry (Eureka, Consul, K8s DNS) and resolve one another by logical name. In Spring, `@LoadBalanced` turns the name into a real instance selected per request:
+
+```java
+@Bean
+@LoadBalanced
+public RestClient.Builder loadBalancedRestClientBuilder() {
+    return RestClient.builder();               // resolve lb://ORDER-SERVICE → instance IP:port
+}
+
+// Call by service name, not by IP:
+OrderSummary o = restClient.get().uri("http://ORDER-SERVICE/api/orders/{id}", id)
+    .retrieve().body(OrderSummary.class);
+```
+
+Hardcoded hostnames break the moment a pod reschedules; a registry makes scaling and restarts invisible to callers.
+
+**Q5. What is a circuit breaker and why do you need one?**
+Naive retries against a dying dependency pile up and exhaust your threads — one dead service can take down the whole chain. A breaker trips after N failures, fails fast during the cooldown, then half-opens to test recovery:
+
+```java
+@CircuitBreaker(name = "inventory", fallbackMethod = "fallback")
+public InventoryStatus check(String sku) {
+    return restClient.get().uri("http://inventory-service/api/stock/{sku}", sku)
+            .retrieve().body(InventoryStatus.class);
+}
+
+public InventoryStatus fallback(String sku, Throwable t) {
+    return new InventoryStatus(sku, 0, "unavailable");   // degraded, not dead
+}
+```
+
+It contains the blast radius: fail fast at the breaker instead of waiting out every timeout.
+
+**Q6. What is the difference between an API and an event?**
+An API is a request — "do this and give me the result." An event is a fact — "order placed" — broadcast to whoever cares. APIs couple callers to callees; events decouple producers from consumers. The same business action expressed both ways:
+
+```java
+@RestController
+class OrderController {
+    @PostMapping("/api/orders")                       // API: imperative request
+    public Order create(@RequestBody CreateOrder cmd) { ... }
+}
+
+@Component
+class OrderEvents {
+    @KafkaListener(topics = "order.placed")           // Event: broadcast fact
+    public void onOrderPlaced(OrderPlaced e) { ... }
+}
+```
+
+Confusing the two produces chatty, fragile synchronous graphs where events would have been cleaner.
+
+**Q7. How do you write a REST client in Spring and which one do you pick?**
+There are three eras: `RestTemplate` (blocking, legacy, discouraged), `WebClient` (reactive, brings in Reactor), and `RestClient` (Spring 6.1+) — the modern synchronous client with the same fluent API. For 95% of request/response services, use `RestClient`:
+
+```java
+var requestFactory = new JdkClientHttpRequestFactory();
+requestFactory.setReadTimeout(Duration.ofSeconds(3));
+
+RestClient client = RestClient.builder()
+    .baseUrl("http://order-service/api")
+    .requestFactory(requestFactory)
+    .build();
+
+OrderSummary order = client.get().uri("/orders/{id}", id)
+    .retrieve()
+    .onStatus(HttpStatusCode::is5xxServerError,
+        (req, res) -> { throw new DownstreamException(res.getStatusCode()); })
+    .body(OrderSummary.class);
+```
+
+Pick `RestClient` for synchronous calls and `WebClient` only when you are already reactive end to end — mixing Reactor into a blocking service buys nothing but complexity.
+
+**Q8. What does `@RestController` actually do?**
+It is `@Controller` + `@Res
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #6: Microservices — Junior đến Senior"
+description: "Microservices ở cấp senior chủ yếu là biết khi NÀO KHÔNG nên dùng chúng — các resilience pattern, service communication và distributed transaction."
+pubDatetime: 2026-08-10T10:10:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - microservices
+  - resilience
+---
+
+Microservices là chủ đề đòi hỏi khả năng phán đoán của senior nhiều nhất, vì câu trả lời sai thường là "chia monolith ra đi". Junior vẽ các ô service; senior giải thích vì sao monolith đã là lựa chọn đúng trong nhiều năm và điều gì cụ thể buộc phải tách nó ra. Bài này đi từ service boundary đến cái bẫy distributed transaction: 50 câu hỏi, mỗi câu trả lời theo hướng code-first với Spring thực tế. Hãy chọn cấp độ bạn đang phỏng vấn và đọc thêm một cấp cao hơn.
+
+> Mindset: junior liệt kê lợi ích của microservices; senior nêu được ba cái giá cụ thể chúng tạo ra và trigger chính xác biện minh cho việc trả những cái giá đó.
+
+## Junior — nền tảng
+
+**Q1. Microservice là gì và khác monolith thế nào?**
+Một microservice là một service nhỏ có thể deploy độc lập, sở hữu một business capability và data riêng. Monolith là một đơn vị deploy duy nhất phục vụ mọi capability. Microservices mang lại khả năng scale độc lập, cô lập lỗi và quyền tự chủ cho team, nhưng phải trả giá bằng network call, distributed data và độ phức tạp vận hành. Hình thức rẻ nhất của một microservice là một Spring Boot app chỉ làm đúng một việc:
+
+```java
+@SpringBootApplication
+public class OrderService {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderService.class, args);   // một capability, một khối deploy được
+    }
+}
+```
+
+Một khối deploy được nghĩa là một build, một rollout và một rollback. Hai mươi service nghĩa là hai mươi lần cho mỗi việc — cái giá đó chỉ đáng trả khi sự độc lập là có thật.
+
+**Q2. Khác nhau giữa synchronous và asynchronous communication là gì?**
+Sync (HTTP/RPC): caller block cho tới khi nhận được câu trả lời — coupling chặt, callee chậm sẽ làm thread của bạn bị kẹt. Async (event): caller publish rồi tiếp tục — coupling lỏng và có resilience, nhưng phải chấp nhận eventual consistency và việc debug khó hơn. Chọn sync khi user phải chờ câu trả lời, async cho các side effect kiểu fire-and-forget:
+
+```java
+// Sync — caller chờ
+OrderSummary summary = restClient.get()
+    .uri("http://order-service/api/orders/{id}", id)
+    .retrieve()
+    .body(OrderSummary.class);        // block tới khi có response hoặc timeout 3s
+
+// Async — publish và tiếp tục
+kafkaTemplate.send("order.placed", new OrderPlaced(orderId));   // không ai chờ
+```
+
+Nguyên tắc kinh nghiệm: request trên happy path mà user phải chờ là sync; bất cứ việc gì có thể chấp nhận độ trễ đều nên là async.
+
+**Q3. API gateway là gì và nó làm gì?**
+Đó là một entry point duy nhất để route, xác thực, rate-limit và thường là aggregate. Nó che giấu service topology để client chỉ nói chuyện với một host thay vì hai mươi, đồng thời gom các policy cross-cutting vào một chỗ. Spring Cloud Gateway là một reactive proxy; route chỉ là các hàm:
+
+```java
+@Bean
+public RouteLocator routes(RouteLocatorBuilder b) {
+    return b.routes()
+        .route("orders", r -> r.path("/api/orders/**")
+            .filters(f -> f.circuitBreaker(c -> c.setName("gatewayCB")
+                    .setFallbackUri("forward:/fallback/orders")))
+            .uri("lb://ORDER-SERVICE"))
+        .build();
+}
+```
+
+Không có nó, client phải hardcode mọi địa chỉ service, mỗi team tự viết lại auth, và không thể rate-limit tập trung.
+
+**Q4. Service discovery là gì và vì sao không thể hardcode URL?**
+Các instance scale, crash và bị reschedule; một IP hardcode có thể lỗi thời chỉ sau vài phút. Service đăng ký với registry (Eureka, Consul, K8s DNS) và phân giải lẫn nhau qua tên logic. Trong Spring, `@LoadBalanced` biến tên đó thành một instance thật, được chọn cho từng request:
+
+```java
+@Bean
+@LoadBalanced
+public RestClient.Builder loadBalancedRestClientBuilder() {
+    return RestClient.builder();               // phân giải lb://ORDER-SERVICE → IP:port của instance
+}
+
+// Gọi theo tên service, không phải theo IP:
+OrderSummary o = restClient.get().uri("http://ORDER-SERVICE/api/orders/{id}", id)
+    .retrieve().body(OrderSummary.class);
+```
+
+Hostname hardcode hỏng ngay khi một pod được reschedule; registry khiến việc scale và restart trở nên vô hình với caller.
+
+**Q5. Circuit breaker là gì và vì sao bạn cần nó?**
+Retry ngây thơ tới một dependency đang hấp hối sẽ chất đống và làm cạn thread — một service chết có thể kéo cả chuỗi xuống. Breaker trip sau N lần lỗi, fail fast trong thời gian cooldown, rồi chuyển sang half-open để kiểm tra khả năng phục hồi:
+
+```java
+@CircuitBreaker(name = "inventory", fallbackMethod = "fallback")
+public InventoryStatus check(String sku) {
+    return restClient.get().uri("http://inventory-service/api/stock/{sku}", sku)
+            .retrieve().body(InventoryStatus.class);
+}
+
+public InventoryStatus fallback(String sku, Throwable t) {
+    return new InventoryStatus(sku, 0, "unavailable");   // degraded, không phải chết
+}
+```
+
+Nó giới hạn blast radius: fail fast ngay tại breaker thay vì chờ hết từng timeout.
+
+**Q6. Khác nhau giữa API và event là gì?**
+API là một yêu cầu — "làm việc này và trả kết quả cho tôi". Event là một sự kiện đã xảy ra — "order placed" — được phát tới bất kỳ ai quan tâm. API tạo coupling giữa caller và callee; event decouple producer khỏi consumer. Cùng một hành động nghiệp vụ được thể hiện theo cả hai cách:
+
+```java
+@RestController
+class OrderController {
+    @PostMapping("/api/orders")                       // API: yêu cầu mệnh lệnh
+    public Order create(@RequestBody CreateOrder cmd) { ... }
+}
+
+@Component
+class OrderEvents {
+    @KafkaListener(topics = "order.placed")           // Event: sự thật phát sóng
+    public void onOrderPlaced(OrderPlaced e) { ... }
+}
+```
+
+Nhầm lẫn hai thứ này tạo ra một đồ thị synchronous chatty và mong manh, trong khi event sẽ phù hợp hơn nhiều.
+
+**Q7. Viết REST client trong Spring thế nào và chọn cái nào?**
+Có ba thế hệ: `RestTemplate` (blocking, legacy, không khuyến khích), `WebClient` (reactive, kéo theo Reactor), và `RestClient` (Spring 6.1+) — synchronous client hiện đại với cùng fluent API. Với 95% service request/response, hãy dùng `RestClient`:
+
+```java
+var requestFactory = new JdkClientHttpRequestFactory();
+requestFactory.setReadTimeout(Duration.ofSeconds(3));
+
+RestClient client = RestClient.builder()
+    .baseUrl("http://order-service/api")
+    .requestFactory(requestFactory)
+    .build();
+
+OrderSummary order = client.get().uri("/orders/{id}", id)
+    .retrieve()
+    .onStatus(HttpStatusCode::is5xxServerError,
+        (req, res) -> { throw new DownstreamException(res.getStatusCode()); })
+    .body(OrderSummary.class);
+```
+
+Chọn `RestClient` cho synchronous call, và chỉ chọn `WebClient` khi toàn bộ luồng đã reactive từ đầu đến cuối — trộn Reactor vào một service blocking chỉ làm tăng độ phức tạp.
+
+**Q8. `@RestController` thực
+Rewrite both. Write:
+  /tmp/rt_40_microservices-senior/microservices-senior.en.md
+  /tmp/rt_40_microservices-senior/microservices-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

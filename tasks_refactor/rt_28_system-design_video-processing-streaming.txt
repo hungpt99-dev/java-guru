@@ -1,0 +1,281 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #28: system-design/video-processing-streaming
+CURRENT EN FILE (rewrite to /tmp/rt_28_video-processing-streaming/video-processing-streaming.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a Video Processing & Streaming Pipeline"
+description: "A production design for ingesting, transcoding, protecting, packaging, and delivering video at predictable latency and cost."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building a multi-tenant video platform for creators, education providers, and internal media teams. A user uploads a source video, watches processing progress, receives thumbnails, and publishes the result. Viewers stream published assets on phones, browsers, and connected TVs.
+
+Functional requirements:
+
+- Resumable upload of video and optional captions.
+- Transcode into an adaptive-bitrate (ABR) ladder: 240p, 360p, 480p, 720p, 1080p, and 4K when the source supports it.
+- Generate a poster and a contact sheet of thumbnails.
+- Package HLS and DASH manifests and segments.
+- Encrypt content with per-title keys and enforce entitlement through DRM/license services.
+- Report durable processing progress and publish only a complete, validated asset.
+- Support private, tenant-visible, and public playback.
+
+Non-functional requirements:
+
+- Process at least 25,000 source hours per hour during the normal peak window.
+- Time to first playable frame under 8 seconds for a warm CDN path and under 30 seconds after a new upload is published.
+- 99.95% monthly control-plane availability and 99.99% manifest/segment delivery availability.
+- Preserve source and derived media durably, while bounding storage growth and egress cost.
+- Scale workers horizontally, tolerate a worker, queue, database, cache, or region failure, and avoid duplicate billing or publication.
+
+The key boundary is intentional: the API owns authorization, metadata, workflow state, and progress; object storage and the CDN carry the large immutable media objects. A request must not wait for transcoding.
+
+## 2. Scale Estimation
+
+The following is a capacity target, not a claim about an existing product. Each assumption is chosen to expose a design constraint.
+
+| Quantity | Assumption and calculation | Result |
+|---|---|---:|
+| Daily active users | Given product target | 5,000,000 DAU |
+| API requests | 5,000,000 users x 20 requests/day | 100,000,000 requests/day |
+| Average API RPS | 100,000,000 / 86,400 | 1,157 RPS |
+| Peak API RPS | 1,157 x 10 for launches and evening viewing | 11,570 RPS |
+| Uploads | 300,000/day x 20 minutes average | 100,000 source hours/day |
+| Processing peak | 25,000 source hours/hour | 25,000 source hours/hour |
+| Source storage/day | 300,000 x 1.5 GB average source | 450 TB/day |
+| Derived storage/day | 450 TB x 0.9 (ladder plus manifests and thumbnails) | 405 TB/day |
+| Storage retained | (450 + 405) TB x 30 days hot retention | 25.65 PB hot |
+| Viewer egress | 5,000,000 x 2 hours/day x 1.5 Mbps average | 6.75 PB/day |
+| Read:write ratio | 100,000,000 API requests versus 300,000 upload sessions | about 333:1 |
+
+The 1.5 GB source is plausible for a 20-minute mixed-quality upload: roughly 10 Mbps including container overhead. The 1.5 Mbps viewing rate is a population average across mobile and broadband, not the top rung of the ladder. Egress is deliberately much larger than ingest, so CDN cache hit ratio and origin shielding dominate cost.
+
+At 25,000 source hours/hour, a 20-minute source creates 75,000 jobs/hour. If one normalized transcode job consumes 12 worker-minutes (parallel renditions are grouped into a job), steady compute is 15,000 worker-hours/hour, or 15,000 concurrent worker equivalents. A 30% headroom target makes the fleet 19,500 equivalents. This is capacity planning input; the benchmark must measure codec, resolution, and hardware mix.
+
+A 450 TB/day source ingest rate means 13.5 PB/month before replication. With three-way object durability handled by the storage service, the application should budget logical bytes separately from physical copies. Hot retention is 25.65 PB; after 30 days, move originals and rarely watched derivatives to cheaper storage, subject to legal hold and tenant policy.
+
+Availability targets imply a monthly error budget of about 21.9 minutes for the 99.95% control plane and 4.4 minutes for 99.99% playback delivery. A single-region synchronous design cannot credibly meet the latter during a regional outage; media is replicated cross-region and the CDN has origins in at least two regions.
+
+## 3. API Design
+
+The API uses short-lived bearer tokens, tenant authorization, and an idempotency key on every mutating endpoint. Upload bytes go directly to object storage through a multipart session; application servers never proxy them.
+
+### Create an upload
+
+`POST /v1/uploads`
+
+Request:
+
+```json
+{
+  "filename": "lecture-01.mov",
+  "size_bytes": 2147483648,
+  "content_sha256": "optional-full-file-hash",
+  "visibility": "private"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "upload_id": "upl_01J...",
+  "asset_id": "ast_01J...",
+  "part_size_bytes": 67108864,
+  "parts": [{"part_number": 1, "url": "https://object.example/..."}],
+  "expires_at": "2026-08-15T04:00:00Z"
+}
+```
+
+The client sends `Idempotency-Key: <tenant-id>/<client-upload-id>`. Repeating the request returns the original IDs and does not create another asset. Per-part checksum validation and a final compose operation protect against incomplete or reordered uploads.
+
+### Complete an upload
+
+`POST /v1/uploads/{upload_id}/complete`
+
+Request:
+
+```json
+{"parts":[{"part_number":1,"etag":"..."},{"part_number":2,"etag":"..."}]}
+```
+
+Response `202`:
+
+```json
+{"upload_id":"upl_01J...","asset_id":"ast_01J...","state":"INSPECTING"}
+```
+
+The endpoint verifies the object manifest, writes an outbox event in the same transaction as state `UPLOADED`, and returns `202`. A lost response is safe: the idempotency record and state can be read again.
+
+### Read status
+
+`GET /v1/assets/{asset_id}` returns state, percentage, completed renditions, errors, and a version. Clients poll with `If-None-Match` every 2 seconds while active, then back off. The API never reports `PUBLISHED` until manifest validation, encryption, and authorization metadata are complete.
+
+### Publish and playback
+
+`POST /v1/assets/{asset_id}/publish` changes a validated asset to `PUBLISHED` after an entitlement check. `GET /v1/assets/{asset_id}/playback` returns a short-lived signed manifest URL and DRM license configuration; it does not return media bytes. The playback token contains tenant, asset, expiry, and policy claims. License requests are authenticated separately and are rate limited by viewer and device.
+
+### Operational contracts
+
+Mutations return a stable `request_id`. `409` means a legal state transition is impossible; `429` includes `Retry-After`; `503` is retryable. Clients retry only idempotent operations with exponential backoff and jitter. Upload URLs are scoped to one object prefix, part, checksum, and expiry.
+
+## 4. Data Model
+
+The source of truth is PostgreSQL-compatible SQL. Media bytes live in object storage, keyed by immutable
+=== VI CURRENT ===
+---
+title: "Thiết kế Hệ thống Xử lý và Phát Video (Video Processing & Streaming)"
+description: "Thiết kế production cho việc tiếp nhận, chuyển mã, bảo vệ, đóng gói và phân phối video với độ trễ và chi phí có thể dự đoán."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng một nền tảng video multi-tenant cho nhà sáng tạo, đơn vị giáo dục và các đội ngũ truyền thông nội bộ. Người dùng tải video nguồn lên, theo dõi tiến độ xử lý, nhận thumbnail và xuất bản kết quả. Người xem stream tài sản đã xuất bản trên điện thoại, trình duyệt và TV kết nối.
+
+Yêu cầu chức năng:
+
+- Upload video và phụ đề tùy chọn, có thể tiếp tục khi bị gián đoạn.
+- Chuyển mã thành adaptive-bitrate (ABR) ladder: 240p, 360p, 480p, 720p, 1080p và 4K khi nguồn hỗ trợ.
+- Tạo poster và contact sheet thumbnail.
+- Đóng gói manifest và segment HLS, DASH.
+- Mã hóa nội dung bằng key theo từng title và thực thi quyền xem qua DRM/license service.
+- Báo cáo tiến độ xử lý bền vững và chỉ xuất bản tài sản hoàn chỉnh, đã kiểm tra.
+- Hỗ trợ playback private, theo tenant và public.
+
+Yêu cầu phi chức năng:
+
+- Xử lý tối thiểu 25.000 giờ video nguồn mỗi giờ trong khung peak thông thường.
+- Time to first playable frame dưới 8 giây trên đường CDN warm và dưới 30 giây sau khi upload mới được xuất bản.
+- Availability monthly 99,95% cho control plane và 99,99% cho manifest/segment delivery.
+- Lưu bền vững source và media dẫn xuất, đồng thời giới hạn tăng trưởng storage và chi phí egress.
+- Scale worker theo chiều ngang, chịu được lỗi worker, queue, database, cache hoặc region, và tránh tính phí hoặc xuất bản trùng.
+
+Ranh giới chính được đặt có chủ ý: API sở hữu authorization, metadata, workflow state và progress; object storage và CDN vận chuyển các media object lớn, bất biến. Request không được chờ transcoding hoàn tất.
+
+## 2. Scale Estimation
+
+Các con số sau là mục tiêu capacity, không phải tuyên bố về một sản phẩm hiện hữu. Mỗi giả định nhằm làm lộ một ràng buộc thiết kế.
+
+| Đại lượng | Giả định và phép tính | Kết quả |
+|---|---|---:|
+| Người dùng hoạt động hằng ngày | Mục tiêu sản phẩm cho trước | 5.000.000 DAU |
+| API request | 5.000.000 người dùng x 20 request/ngày | 100.000.000 request/ngày |
+| API RPS trung bình | 100.000.000 / 86.400 | 1.157 RPS |
+| API RPS peak | 1.157 x 10 cho launch và giờ xem buổi tối | 11.570 RPS |
+| Upload | 300.000/ngày x trung bình 20 phút | 100.000 giờ nguồn/ngày |
+| Processing peak | 25.000 giờ nguồn/giờ | 25.000 giờ nguồn/giờ |
+| Source storage/ngày | 300.000 x trung bình 1,5 GB source | 450 TB/ngày |
+| Derived storage/ngày | 450 TB x 0,9 (ladder cộng manifest và thumbnail) | 405 TB/ngày |
+| Storage retention | (450 + 405) TB x 30 ngày hot retention | 25,65 PB hot |
+| Viewer egress | 5.000.000 x 2 giờ/ngày x trung bình 1,5 Mbps | 6,75 PB/ngày |
+| Tỷ lệ read:write | 100.000.000 API request so với 300.000 upload session | khoảng 333:1 |
+
+Source 1,5 GB là hợp lý cho upload hỗn hợp chất lượng, 20 phút: khoảng 10 Mbps gồm overhead container. Tốc độ xem 1,5 Mbps là trung bình toàn bộ người dùng trên mobile và broadband, không phải bitrate rung cao nhất. Egress lớn hơn ingest nhiều, vì vậy CDN cache hit ratio và origin shielding quyết định phần lớn chi phí.
+
+Ở mức 25.000 giờ nguồn/giờ, source 20 phút tạo 75.000 job/giờ. Nếu một normalized transcode job tiêu thụ 12 worker-phút (các rendition song song được gom thành một job), compute ổn định là 15.000 worker-giờ/giờ, tức 15.000 worker equivalent đồng thời. Với headroom 30%, fleet cần 19.500 equivalent. Đây là đầu vào capacity planning; benchmark phải đo theo codec, độ phân giải và loại hardware.
+
+Ingest source 450 TB/ngày tương đương 13,5 PB/tháng trước replication. Nếu object storage đã cung cấp durability ba bản, ứng dụng vẫn phải lập ngân sách logical bytes tách khỏi physical copies. Hot retention là 25,65 PB; sau 30 ngày, chuyển original và derivative ít được xem sang storage rẻ hơn, tuân theo legal hold và policy tenant.
+
+Availability target tương đương error budget khoảng 21,9 phút/tháng cho control plane 99,95% và 4,4 phút cho playback delivery 99,99%. Thiết kế synchronous một region không thể đáng tin cậy đạt mục tiêu sau trong outage cấp region; media được replicate cross-region và CDN có origin ở ít nhất hai region.
+
+## 3. API Design
+
+API dùng bearer token ngắn hạn, tenant authorization và idempotency key trên mọi endpoint ghi. Byte upload đi thẳng tới object storage qua multipart session; application server không proxy chúng.
+
+### Tạo upload
+
+`POST /v1/uploads`
+
+Request:
+
+```json
+{
+  "filename": "lecture-01.mov",
+  "size_bytes": 2147483648,
+  "content_sha256": "optional-full-file-hash",
+  "visibility": "private"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "upload_id": "upl_01J...",
+  "asset_id": "ast_01J...",
+  "part_size_bytes": 67108864,
+  "parts": [{"part_number": 1, "url": "https://object.example/..."}],
+  "expires_at": "2026-08-15T04:00:00Z"
+}
+```
+
+Client gửi `Idempotency-Key: <tenant-id>/<client-upload-id>`. Gọi lại request trả về các ID ban đầu và không tạo asset khác. Kiểm tra checksum từng part và thao tác compose cuối bảo vệ khỏi upload thiếu hoặc sai thứ tự.
+
+### Hoàn tất upload
+
+`POST /v1/uploads/{upload_id}/complete`
+
+Request:
+
+```json
+{"parts":[{"part_number":1,"etag":"..."},{"part_number":2,"etag":"..."}]}
+```
+
+Response `202`:
+
+```json
+{"upload_id":"upl_01J...","asset_id":"ast_01J...","state":"INSPECTING"}
+```
+
+Endpoint kiểm tra object manifest, ghi outbox event trong cùng transaction với state `UPLOADED`, rồi trả `202`. Nếu response mất, idempotency record và state vẫn có thể đọc lại.
+
+### Đọc trạng thái
+
+`GET /v1/assets/{asset_id}` trả state, phần trăm, rendition đã hoàn thành, lỗi và version. Client poll với `If-None-Match` mỗi 2 giây khi đang chạy, rồi back off. API không báo `PUBLISHED` cho tới khi manifest validation, encryption và authorization metadata hoàn tất.
+
+### Xuất bản và playback
+
+`POST /v1/assets/{asset_id}/publish` chuyển asset đã kiểm tra sang `PUBLISHED` sau entitlement check. `GET /v1/assets/{asset_id}/playback` trả signed manifest URL ngắn hạn và cấu hình DRM license; nó không trả media bytes. Playback token chứa tenant, asset, expiry và policy claims. License request được authenticate riêng và rate limit theo viewer và device.
+
+### Hợp đồng vận hành
+
+Mutation trả `request_id` ổn định. `409` nghĩa là state transition không hợp lệ; `429` có `Retry-After`; `503` có thể retry. Client chỉ retry operation idempotent với exponential backoff và jitter. Upload URL bị giới hạn vào một object prefix, part, checksum và expiry.
+
+## 4. Data Model
+
+Source of truth là PostgreSQL-compatible SQL. Media bytes nằm trong object storage, với key theo asset ID và rendition ID bất biến.
+
+```sql
+CREATE TABLE assets (
+  tenant_id       BIGINT NOT NULL,
+  asset_id        UUID NOT NULL,
+  source_object   TEXT NOT NULL,
+  state           TEXT NOT NULL CHECK (state IN ('UPLOADING','INSPECTING','PROCESSING','READY','PUBLISHED','FAILED')),
+  visibility 
+Rewrite both. Write:
+  /tmp/rt_28_video-processing-streaming/video-processing-streaming.en.md
+  /tmp/rt_28_video-processing-streaming/video-processing-streaming.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,295 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #29: ai/ai-ops-incident-triage
+CURRENT EN FILE (rewrite to /tmp/rt_29_ai-ops-incident-triage/ai-ops-incident-triage.en.md):
+=== EN CURRENT ===
+---
+title: "AI Ops: Turning Alerts and Traces into Root-Cause Hypotheses"
+description: "How FinPay's observability stack uses an LLM to summarize Prometheus alerts and OpenTelemetry traces into a root-cause hypothesis, complete with a runbook link."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: https://github.com/finpay-lab/observability
+
+## The 3 a.m. pager problem
+
+FinPay runs payments. When a settlement batch is delayed, hundreds of alerts fire within minutes: latency spikes, error rates plunge, and dead-letter queues fill up. By the time an on-call engineer wades through the noise, the *real* incident — the one that only a fraction of those alerts were actually about — has already burned through the SLO budget.
+
+We built **ai-ops-incident-triage**, the fourth feature in our observability platform, to answer one question as early as possible: *"Is this one incident or many? What broke, and does it touch money?"* The AI handles the reading, correlation, and first-pass classification. It never makes the money decision.
+
+This post covers the complete design: the architecture, the Spring Boot + Kafka + OpenSearch wiring, and the WRONG → RIGHT code we wrote along the way, including the five guardrails that make an LLM safe inside a fintech control plane.
+
+> Repo: https://github.com/finpay-lab/observability
+
+## What we built
+
+`ai-ops-incident-triage` is a Spring Boot service that:
+
+1. Consumes alert events and correlated distributed traces from Kafka.
+2. Enriches each alert with its trace context (queried from OpenSearch).
+3. Sends a redacted, schema-forced prompt to a BYOK LLM to get severity, root cause, and a recommendation.
+4. Applies the guardrails (idempotency, timeouts, retries, circuit breaking, human approval for money-related actions, and full auditing).
+5. Publishes the triage decision and audit entry to Kafka → OpenSearch.
+
+## Architecture map
+
+The service follows a hexagonal architecture. The domain core knows nothing about Kafka, Spring AI, or OpenSearch; it only knows about ports. Adapters live in `infrastructure/`:
+
+```
+com.finpay.observability
+├── domain
+│   ├── model        IncidentContext, TriageOutcome, Severity, Recommendation
+│   ├── port         IncidentTriagePort, IdempotencyPort, AuditPort, ApprovalPort
+│   └── service      TriageOrchestrator (pure orchestration, zero framework deps)
+├── infrastructure
+│   ├── kafka        IncidentConsumer, AuditProducer
+│   ├── ai           OpenAiIncidentTriageAdapter, LlmProperties
+│   ├── opensearch   OpenSearchIdempotencyStore, OpenSearchTraceEnricher
+│   └── config       Resilience4jConfig
+```
+
+```
+                        ┌───────────────────────────────────────────┐
+ alerts + traces ──▶ Kafka ──▶ IncidentConsumer ──▶ domain (TriageOrchestrator)
+                                                          │
+                                          IncidentTriagePort (LLM) ──▶ BYOK model
+                                                          │
+                                     fallback ──▶ rules engine (no LLM)
+                                                          │
+                             money recommendation? ──▶ human ApprovalTask
+                                                          │
+                                   audit ──▶ Kafka("finpay.observability.audit") ──▶ OpenSearch
+                        └───────────────────────────────────────────┘
+```
+
+The domain model consists of deliberately boring, immutable records — exactly what you want when an LLM's output has to flow through an audit trail.
+
+## The five guardrails
+
+These are not optional decorations. They are the contract that allows us to run an LLM inside a payments company.
+
+1. **AI is not a money decider.** The model may *suggest* a refund or compensation; only a human (or a fully deterministic rule) may execute it. The ledger, not the prompt, moves money.
+2. **Idempotent by `eventId`.** Any retry, redelivery, or replay must produce the same outcome. We claim the `eventId` atomically in OpenSearch; duplicate processing is skipped.
+3. **Timeout, retry, circuit breaker.** The LLM call is time-boxed, retried with backoff, and protected by a circuit breaker. When the breaker opens, we degrade to a deterministic rule engine instead of failing the triage or, worse, blocking the alert pipeline.
+4. **BYOK key, never hardcoded, never logged.** The customer's key is injected at runtime via Kubernetes Secret/Vault, and the only key-shaped string that may ever reach a log is the masked preview.
+5. **Audit every decision.** Every triage, fallback, retry, and human approval produces an append-only audit entry keyed by `eventId`, with the exact model, version, trace ID, and outcome.
+
+## WRONG then RIGHT
+
+### 1. Secrets & BYOK
+
+**WRONG.** The key lives in a constant, so it ends up in git history, IDEs, and log dumps. It cannot be rotated without a deployment.
+
+```java
+// WRONG — the key is in code, therefore in git history and everyone's IDE.
+public class OpenAiClient {
+    private static final String BYOK_KEY = "«redacted:sk-…»...";
+    private static final String MODEL = "gpt-4o";
+
+    public String triage(String prompt) {
+        // key read from a constant, sent in headers, never rotated, never masked
+    }
+}
+```
+
+**RIGHT.** The key is injected at runtime and can only be printed in masked form.
+
+```java
+// infrastructure/config/LlmProperties.java
+@Configuration
+@ConfigurationProperties(prefix = "app.llm")
+public record LlmProperties(String endpoint, String model, String byokKey) {
+
+    /** The masked form is the ONLY representation of the key allowed in logs. */
+    public String maskedKey() {
+        if (byokKey == null || byokKey.isBlank()) return "<unset>";
+        return byokKey.substring(0, 3) + "..." + byokKey.substring(byokKey.length() - 4);
+    }
+}
+```
+
+```yaml
+# application.yml — no key here. Injected from a Kubernetes Secret (Vault) at runtime.
+app:
+  llm:
+    endpoint: ${LLM_ENDPOINT:https://api.example-llm.com/v1}
+    model: ${LLM_MODEL:gpt-4o}
+    byok-key: ${LLM_BYOK_KEY}   # never commit, never print
+```
+
+```java
+// infrastructure/config/LlmConfig.java
+@Configuration
+public class LlmConfig {
+
+    @Bean
+    public ChatModel chatModel(LlmProperties props) {
+        OpenAiApi api = new OpenAiApi(props.endpoint(), props.byokKey());
+        return OpenAiChatModel.builder()
+                .openAiApi(api)
+                .defaultOptions(OpenAiChatOptions.builder()
+                        .model(props.model())
+                        .temperature(0.0)   // triage must be as deterministic as possible
+                        .responseFormat(new ResponseFormat(ResponseFormat.Type.JSON_SCHEMA))
+                        .build())
+                .build();
+    }
+}
+```
+
+We also have a CI check that greps the module for `sk-`-shaped literals, plus a log filter that redacts anything that *looks* like a key — defense in depth.
+
+### 2. Timeout, retry, circuit breaker
+
+
+=== VI CURRENT ===
+---
+title: "AI Ops: Turning Alerts and Traces into Root-Cause Hypotheses"
+description: "Tầng observability của FinPay sử dụng LLM để tóm tắt các cảnh báo Prometheus và trace OpenTelemetry thành giả thuyết về nguyên nhân gốc, kèm liên kết đến runbook."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: https://github.com/finpay-lab/observability
+
+## Bài toán chiếc pager lúc 3 giờ sáng
+
+FinPay xử lý các giao dịch thanh toán. Khi một lô quyết toán bị chậm, hàng trăm cảnh báo có thể bùng lên chỉ trong vài phút: độ trễ tăng vọt, tỷ lệ lỗi lao dốc và các hàng đợi dead-letter đầy lên. Đến khi kỹ sư trực ca lần qua được mớ nhiễu đó, sự cố *thật sự* — vấn đề mà chỉ một phần nhỏ trong số các cảnh báo kia thực sự phản ánh — đã tiêu tốn ngân sách SLO từ lâu.
+
+Chúng tôi xây dựng **ai-ops-incident-triage**, tính năng thứ tư trong nền tảng observability của mình, để trả lời một câu hỏi sớm nhất có thể: *"Đây là một sự cố hay nhiều sự cố? Điều gì đã hỏng, và sự cố có liên quan đến tiền không?"* AI đảm nhiệm việc đọc dữ liệu, đối chiếu tương quan và phân loại bước đầu. Nó **không bao giờ** đưa ra quyết định liên quan đến tiền.
+
+Bài viết này trình bày toàn bộ thiết kế: kiến trúc, cách kết nối Spring Boot + Kafka + OpenSearch và các đoạn code WRONG → RIGHT được viết trong quá trình xây dựng, cùng năm rào chắn an toàn (guardrails) giúp LLM vận hành an toàn bên trong hệ thống kiểm soát tài chính.
+
+> Repo: https://github.com/finpay-lab/observability
+
+## Chúng tôi đã xây dựng gì
+
+`ai-ops-incident-triage` là một dịch vụ Spring Boot có nhiệm vụ:
+
+1. Tiêu thụ các sự kiện cảnh báo và các trace đã được tương quan từ Kafka.
+2. Làm giàu mỗi cảnh báo bằng ngữ cảnh trace của nó (truy vấn từ OpenSearch).
+3. Gửi một prompt đã khử dữ liệu nhạy cảm (redacted) và được ràng buộc theo schema tới LLM BYOK để nhận mức độ nghiêm trọng, nguyên nhân gốc và khuyến nghị.
+4. Áp dụng các rào chắn an toàn (idempotency, timeout, retry, circuit breaker, phê duyệt của con người đối với các thao tác liên quan đến tiền và kiểm toán đầy đủ).
+5. Xuất bản quyết định triage và bản ghi kiểm toán lên Kafka → OpenSearch.
+
+## Bản đồ kiến trúc
+
+Dịch vụ tuân theo kiến trúc hexagonal. Lõi domain không biết gì về Kafka, Spring AI hay OpenSearch; nó chỉ biết các cổng (ports). Các bộ điều hợp (adapters) nằm trong `infrastructure/`:
+
+```
+com.finpay.observability
+├── domain
+│   ├── model        IncidentContext, TriageOutcome, Severity, Recommendation
+│   ├── port         IncidentTriagePort, IdempotencyPort, AuditPort, ApprovalPort
+│   └── service      TriageOrchestrator (điều phối thuần túy, không phụ thuộc framework)
+├── infrastructure
+│   ├── kafka        IncidentConsumer, AuditProducer
+│   ├── ai           OpenAiIncidentTriageAdapter, LlmProperties
+│   ├── opensearch   OpenSearchIdempotencyStore, OpenSearchTraceEnricher
+│   └── config       Resilience4jConfig
+```
+
+```
+                        ┌───────────────────────────────────────────┐
+ alerts + traces ──▶ Kafka ──▶ IncidentConsumer ──▶ domain (TriageOrchestrator)
+                                                          │
+                                          IncidentTriagePort (LLM) ──▶ BYOK model
+                                                          │
+                                     fallback ──▶ rules engine (không LLM)
+                                                          │
+                             khuyến nghị chạm tiền? ──▶ ApprovalTask (con người)
+                                                          │
+                                   audit ──▶ Kafka("finpay.observability.audit") ──▶ OpenSearch
+                        └───────────────────────────────────────────┘
+```
+
+Mô hình domain gồm những record bất biến, cố ý đơn giản — chính xác là thứ bạn cần khi đầu ra của LLM phải đi qua một vết kiểm toán.
+
+## Năm rào chắn an toàn
+
+Đây không phải những chi tiết trang trí tùy chọn. Đây là các nguyên tắc cho phép chúng tôi vận hành LLM bên trong một công ty thanh toán.
+
+1. **AI không phải người quyết định tiền.** Mô hình có thể *gợi ý* hoàn tiền hoặc bồi thường; chỉ con người (hoặc một quy tắc hoàn toàn xác định) mới được phép thực hiện. Sổ cái, không phải prompt, mới là nơi quyết định việc chuyển tiền.
+2. **Idempotent theo `eventId`.** Mọi lần retry, redelivery hoặc replay phải cho ra cùng một kết quả. Chúng tôi claim `eventId` một cách nguyên tử trong OpenSearch; các lần xử lý trùng lặp sẽ bị bỏ qua.
+3. **Timeout, retry, circuit breaker.** Lời gọi LLM được giới hạn thời gian, retry với backoff và bảo vệ bằng circuit breaker. Khi breaker mở, hệ thống chuyển sang một rule engine xác định thay vì làm triage thất bại hoặc, tệ hơn, chặn đường ống cảnh báo.
+4. **Khóa BYOK, không hardcode, không ghi log.** Khóa của khách hàng được tiêm lúc runtime qua Kubernetes Secret/Vault, và chuỗi duy nhất có dạng khóa được phép xuất hiện trong log là bản xem trước đã che.
+5. **Kiểm toán mọi quyết định.** Mỗi lần triage, fallback, retry và phê duyệt của con người đều tạo ra một bản ghi kiểm toán append-only, được định danh bằng `eventId` và chứa chính xác model, phiên bản, trace ID cùng kết quả.
+
+## WRONG rồi RIGHT
+
+### 1. Bí mật & BYOK
+
+**WRONG.** Khóa nằm trong một hằng số, nên sẽ xuất hiện trong lịch sử git, IDE và các bản dump log. Không thể xoay vòng (rotate) khóa nếu không triển khai lại.
+
+```java
+// WRONG — khóa nằm trong code, nên nằm trong lịch sử git và IDE của mọi người.
+public class OpenAiClient {
+    private static final String BYOK_KEY = "«redacted:sk-…»...";
+    private static final String MODEL = "gpt-4o";
+
+    public String triage(String prompt) {
+        // khóa được đọc từ hằng số, gửi trong header, không bao giờ rotate, không che giấu
+    }
+}
+```
+
+**RIGHT.** Khóa được tiêm lúc runtime và chỉ có thể được in dưới dạng đã che.
+
+```java
+// infrastructure/config/LlmProperties.java
+@Configuration
+@ConfigurationProperties(prefix = "app.llm")
+public record LlmProperties(String endpoint, String model, String byokKey) {
+
+    /** Dạng đã che là biểu diễn DUY NHẤT của khóa được phép xuất hiện trong log. */
+    public String maskedKey() {
+        if (byokKey == null || byokKey.isBlank()) return "<unset>";
+        return byokKey.substring(0, 3) + "..." + byokKey.substring(byokKey.length() - 4);
+    }
+}
+```
+
+```yaml
+# application.yml — không có khóa ở đây. Được tiêm từ Kubernetes Secret (Vault) lúc runtime.
+app:
+  llm:
+    endpoint: ${LLM_ENDPOINT:https://api.example-llm.com/v1}
+    model: ${LLM_MODEL:gpt-4o}
+    byok-key: ${LLM_BYOK_KEY}   # không bao giờ commit, không bao giờ in ra
+```
+
+```java
+// infrastructure/config/LlmConfig.java
+@Configuration
+public class LlmConfig {
+
+    @Bean
+    public ChatModel chatModel(LlmProperties props) {
+        OpenAiApi api = new OpenAiApi(props.endpoint(), props.byokKey());
+        return OpenAiChatModel.builder()
+                .openAiApi(api)
+                .defaultOptions(OpenAiChatOptions.builder()
+                        .model(props.model())
+                 
+Rewrite both. Write:
+  /tmp/rt_29_ai-ops-incident-triage/ai-ops-incident-triage.en.md
+  /tmp/rt_29_ai-ops-incident-triage/ai-ops-incident-triage.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,339 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #34: ai/platform-ai-core-library
+CURRENT EN FILE (rewrite to /tmp/rt_34_platform-ai-core-library/platform-ai-core-library.en.md):
+=== EN CURRENT ===
+---
+title: "Building a Shared AI Core Library for a Microservice Fleet"
+description: "How FinPay's platform team ships a shared AI library with BYOK clients, retries and circuit breakers, and audit logging consumed by every AI feature."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/platform>
+
+## Why a Shared AI Library
+
+Every FinPay team had built its own LLM integration: one called OpenAI directly from a controller, another baked the API key into `application.yml`, and a third retried failures by sending the event back to the dead-letter queue without a timeout. Three services, three different ways of parsing `JsonObject`, no shared telemetry, and an audit trail that was essentially `logger.info("done")`.
+
+We shipped `platform-ai-core-library` to make AI usage boring, safe, and observable across the platform. It is a Spring Boot module built around hexagonal architecture: `domain/` holds the ports and use cases, while `infrastructure/` holds the adapters (Kafka, model providers, OpenSearch, and Vault). The repository link also appears at the bottom: <https://github.com/finpay-lab/platform>.
+
+## Non-Negotiable Guardrails
+
+Before writing any code, here are the rules that shape everything:
+
+1. **AI is not a money decider.** An LLM output can *enrich* a decision — a fraud score, a suggested limit, or a risk label — but the decision to move or block money is made by deterministic rules and humans. The library never returns "approve/reject"; it returns a scored, labeled, auditable observation.
+2. **Idempotent by `eventId`.** Every AI call is keyed by a caller-supplied `eventId`. Redelivery, retry, double-click — one event produces exactly one decision.
+3. **Timeout, retry, circuit breaker.** No HTTP call may block without a time limit. A time limit, bounded retries with backoff, and a circuit breaker enable graceful degradation instead of hammering a failing provider.
+4. **BYOK — the key never lives in our code or logs.** Each tenant brings its own key (`BYOK`), held in Vault/secret manager, resolved by reference, rotated, and *never* serialized into logs, traces, or audit records.
+5. **Audit every decision.** The prompt hash, model, latency, cost, key ID, and verdict are persisted to OpenSearch for queryable forensic analysis.
+
+## Architecture in one picture
+
+```
+                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
+  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
+  tx.risk      │            │              ▲                   ▲                ▲
+               │            │              │ adapters          │ adapters       │ adapter
+               ▼            ▼              │                   │                │
+          infrastructure/ ─┼───────────────┴───────────────────┴────────────────┘
+                 │
+                 ├── ModelProviderAdapter (OpenAI / Anthropic / Bedrock)
+                 ├── RedisOutcomeStore            (dedup + short TTL)
+                 ├── OpenSearchDecisionAudit      (long-term forensics)
+                 └── VaultCredentialResolver      (BYOK by reference)
+```
+
+The use case in `domain/` depends only on ports. Swapping OpenAI for Bedrock requires changing only one adapter file.
+
+## WRONG, then RIGHT: credentials (BYOK)
+
+### WRONG
+
+```java
+// Hardcoded key — committed to git, copied into tickets, forever.
+public class MoneyFairyService {
+    private static final String OPENAI_KEY = "«redacted:sk-…»...";
+
+    public String label(String text) {
+        OpenAIClient client = new OpenAIClient(OPENAI_KEY);
+        // Worse: logging the key so "debugging is easier"
+        log.info("Calling provider with key={}", OPENAI_KEY);
+        return client.complete(systemPrompt + text);
+    }
+}
+```
+
+What's wrong: the key is in the repository, appears in classpath scans and every log line, cannot be rotated without a deployment, and shows up in GitHub's secret-scanner output for the entire internet.
+
+### RIGHT
+
+```java
+// application.yml  (only a reference, never a secret)
+ai:
+  provider: anthropic
+  key-ref: vault://finpay/ai/tenant-42/anthropic-key
+  model: claude-sonnet-4-5
+  timeout: 4s
+  max-retries: 3
+```
+
+```java
+@ConfigurationProperties(prefix = "ai")
+@Validated
+public record AiProperties(
+        @NotBlank String provider,
+        @NotBlank String keyRef,
+        @NotBlank String model,
+        @DurationMin(seconds = 1) Duration timeout,
+        @Min(0) int maxRetries) {
+}
+```
+
+```java
+// domain/ — the port. The use case never sees a key.
+public interface CredentialResolver {
+    KeyCredentials resolve(String keyRef);
+}
+
+public record KeyCredentials(String id, char[] secret) { }
+```
+
+```java
+// infrastructure/ — the adapter talks to Vault.
+@Component
+public class VaultCredentialResolver implements CredentialResolver {
+    private final VaultTemplate vault;
+
+    public KeyCredentials resolve(String keyRef) {
+        VaultResponse response = vault.readSecret(keyRef);
+        return new KeyCredentials(response.getKeyId(),
+                response.getData().get("api_key").toCharArray());
+    }
+}
+```
+
+```java
+// infrastructure/ — provider adapter resolves the key in-memory per call and
+// never exposes it. char[] and toString() masking keep it out of logs.
+@Component
+public class AnthropicModelAdapter implements ModelProvider {
+    private final CredentialResolver credentials;
+    private final AiProperties props;
+
+    public ModelResult complete(AiRequest request) {
+        KeyCredentials creds = credentials.resolve(props.keyRef());
+        try (AnthropicClient client = new AnthropicClient(creds)) {
+            return client.complete(props.model(), request);
+        } finally {
+            Arrays.fill(creds.secret(), 'x');  // scrub from memory
+        }
+    }
+}
+```
+
+The key exists only inside the adapter's scope, as a `char[]` that is scrubbed after the call. Nothing logs it, nothing persists it.
+
+## WRONG, then RIGHT: timeout, retry, circuit breaker
+
+### WRONG
+
+```java
+public String callLlm(String prompt) throws IOException, InterruptedException {
+    HttpClient client = HttpClient.newHttpClient();
+    HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+            .timeout(Duration.ofMinutes(30))   // effectively unbounded
+            .POST(...)
+            .build();
+    HttpResponse<String> res = client.send(req, BodyHandlers.ofString());
+    if (res.statusCode() == 500) {
+        // "retry": just block again, hope it passes
+        return callLlm(prompt);
+    }
+    return res.body();
+}
+```
+
+What's wrong: each call holds a thread for up to 30 minutes, recursive retries double the latency with every failure, and there is no circuit state. When the provider is down, we exhaust the entire thread pool waiting on a dead endpoint.
+
+### RIGHT
+
+```java
+@Component
+public class ResilientModelPort {
+    private final Retry retry;
+    private final CircuitBreaker circuitBreake
+=== VI CURRENT ===
+---
+title: "Building a Shared AI Core Library for a Microservice Fleet"
+description: "Đội ngũ platform của FinPay phát hành thư viện AI dùng chung với client BYOK, cơ chế retry và circuit breaker, cùng tính năng ghi audit được mọi tính năng AI sử dụng."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/platform>
+
+## Vì Sao Cần Một Thư Viện AI Dùng Chung
+
+Mỗi đội ngũ của FinPay đều tự xây dựng một cách tích hợp LLM riêng: đội này gọi OpenAI trực tiếp từ controller, đội kia nhét API key vào `application.yml`, còn đội nọ xử lý lỗi bằng cách gửi event trở lại dead-letter queue mà không có timeout. Ba service, ba cách parse `JsonObject` khác nhau, không có telemetry dùng chung, và audit trail gần như chỉ là một dòng `logger.info("done")`.
+
+Chúng tôi đã phát hành `platform-ai-core-library` để việc sử dụng AI trở nên nhàm chán, an toàn và có thể quan sát trên toàn nền tảng. Đây là một module Spring Boot được xây dựng theo kiến trúc hexagonal: `domain/` chứa các port và use case, còn `infrastructure/` chứa các adapter (Kafka, nhà cung cấp model, OpenSearch và Vault). Link repository cũng xuất hiện ở cuối bài: <https://github.com/finpay-lab/platform>.
+
+## Guardrails Không Thể Thỏa Hiệp
+
+Trước khi viết bất kỳ dòng code nào, đây là những quy tắc định hình mọi thứ:
+
+1. **AI không phải là bên quyết định việc chuyển tiền.** Output của LLM chỉ *bổ sung thông tin* cho một quyết định — điểm số gian lận, hạn mức đề xuất hoặc nhãn rủi ro — nhưng quyết định chuyển hoặc chặn tiền do các luật xác định (deterministic rules) và con người đưa ra. Thư viện không bao giờ trả về "approve/reject"; nó trả về một kết quả có điểm số, nhãn và có thể audit.
+2. **Idempotent theo `eventId`.** Mọi lời gọi AI đều được định danh bằng `eventId` do bên gọi cung cấp. Dù event được gửi lại (redelivery), retry hay người dùng nhấp đúp, một event vẫn chỉ tạo ra đúng một quyết định.
+3. **Timeout, retry, circuit breaker.** Không lời gọi HTTP nào được phép chờ vô hạn. Timeout, retry có giới hạn kèm backoff và circuit breaker giúp hệ thống hạ cấp một cách êm thấm thay vì liên tục gọi một provider đang gặp sự cố.
+4. **BYOK — key không bao giờ nằm trong code hay log của chúng ta.** Mỗi tenant mang key riêng của mình (BYOK), được giữ trong Vault/secret manager, được tra cứu theo reference, có thể xoay vòng, và *không bao giờ* bị serialize vào log, trace hay bản ghi audit.
+5. **Audit mọi quyết định.** Hash của prompt, model, latency, chi phí, ID của key và verdict được lưu vào OpenSearch để có thể truy vấn phục vụ điều tra.
+
+## Kiến trúc trong một hình
+
+```
+                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
+  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
+  tx.risk      │            │              ▲                   ▲                ▲
+               │            │              │ adapters          │ adapters       │ adapter
+               ▼            ▼              │                   │                │
+          infrastructure/ ─┼───────────────┴───────────────────┴────────────────┘
+                 │
+                 ├── ModelProviderAdapter (OpenAI / Anthropic / Bedrock)
+                 ├── RedisOutcomeStore            (dedup + TTL ngắn)
+                 ├── OpenSearchDecisionAudit      (forensics dài hạn)
+                 └── VaultCredentialResolver      (BYOK theo reference)
+```
+
+Use case trong `domain/` chỉ phụ thuộc vào các port. Đổi OpenAI sang Bedrock chỉ cần thay đổi một file adapter.
+
+## WRONG, rồi RIGHT: credentials (BYOK)
+
+### WRONG
+
+```java
+// Key cứng trong code — commit vào git, rò rỉ khắp nơi, tồn tại mãi mãi.
+public class MoneyFairyService {
+    private static final String OPENAI_KEY = "«redacted:sk-…»...";
+
+    public String label(String text) {
+        OpenAIClient client = new OpenAIClient(OPENAI_KEY);
+        // Tệ hơn: log cả key "để debug cho dễ"
+        log.info("Calling provider with key={}", OPENAI_KEY);
+        return client.complete(systemPrompt + text);
+    }
+}
+```
+
+Sai ở đâu: key nằm trong repository, xuất hiện trong quá trình quét classpath và trong từng dòng log, không thể xoay vòng nếu không deploy, đồng thời xuất hiện trong kết quả secret scanner của GitHub để cả Internet nhìn thấy.
+
+### RIGHT
+
+```java
+// application.yml  (chỉ là một reference, không bao giờ là secret)
+ai:
+  provider: anthropic
+  key-ref: vault://finpay/ai/tenant-42/anthropic-key
+  model: claude-sonnet-4-5
+  timeout: 4s
+  max-retries: 3
+```
+
+```java
+@ConfigurationProperties(prefix = "ai")
+@Validated
+public record AiProperties(
+        @NotBlank String provider,
+        @NotBlank String keyRef,
+        @NotBlank String model,
+        @DurationMin(seconds = 1) Duration timeout,
+        @Min(0) int maxRetries) {
+}
+```
+
+```java
+// domain/ — port. Use case không bao giờ thấy key.
+public interface CredentialResolver {
+    KeyCredentials resolve(String keyRef);
+}
+
+public record KeyCredentials(String id, char[] secret) { }
+```
+
+```java
+// infrastructure/ — adapter nói chuyện với Vault.
+@Component
+public class VaultCredentialResolver implements CredentialResolver {
+    private final VaultTemplate vault;
+
+    public KeyCredentials resolve(String keyRef) {
+        VaultResponse response = vault.readSecret(keyRef);
+        return new KeyCredentials(response.getKeyId(),
+                response.getData().get("api_key").toCharArray());
+    }
+}
+```
+
+```java
+// infrastructure/ — adapter provider resolve key trong bộ nhớ theo từng lần gọi
+// và không bao giờ để lộ. char[] và masking toString() giữ key khỏi log.
+@Component
+public class AnthropicModelAdapter implements ModelProvider {
+    private final CredentialResolver credentials;
+    private final AiProperties props;
+
+    public ModelResult complete(AiRequest request) {
+        KeyCredentials creds = credentials.resolve(props.keyRef());
+        try (AnthropicClient client = new AnthropicClient(creds)) {
+            return client.complete(props.model(), request);
+        } finally {
+            Arrays.fill(creds.secret(), 'x');  // xoá sạch khỏi bộ nhớ
+        }
+    }
+}
+```
+
+Key chỉ tồn tại trong phạm vi của adapter, dưới dạng `char[]` được xoá sạch sau lời gọi. Không gì log nó, không gì lưu trữ nó.
+
+## WRONG, rồi RIGHT: timeout, retry, circuit breaker
+
+### WRONG
+
+```java
+public String callLlm(String prompt) throws IOException, InterruptedException {
+    HttpClient client = HttpClient.newHttpClient();
+    HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+            .timeout(Duration.ofMinutes(30))   // thực chất là vô hạn
+            .POST(...)
+            .build();
+    HttpResponse<String> res = client.send(req, BodyHandlers.ofString());
+    if (res.statusCode() == 500) {
+        // "retry": chỉ block tiếp, hy vọng nó qua
+        return callLlm(prompt);
+    }
+    return res.body();
+}
+```
+
+Sai ở đâu: mỗi lời gọi chiếm giữ một thread tới 30 phút, retry đệ quy khiến latency tăng gấp đôi sau mỗi lần lỗi,
+Rewrite both. Write:
+  /tmp/rt_34_platform-ai-core-library/platform-ai-core-library.en.md
+  /tmp/rt_34_platform-ai-core-library/platform-ai-core-library.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

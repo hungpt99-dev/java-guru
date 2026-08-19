@@ -1,0 +1,267 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #37: interview/database-senior
+CURRENT EN FILE (rewrite to /tmp/rt_37_database-senior/database-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #4: Database & SQL — Junior to Senior"
+description: "The database layer determines real-world scalability. Senior candidates must speak fluently about indexing, transaction isolation, connection pooling, and the ORM trap, using real SQL rather than just prose."
+pubDatetime: 2026-08-10T10:15:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - database
+  - sql
+---
+
+The database is where "it works on my machine" dies. Junior developers write `SELECT *` and wonder why production is slow; seniors can show the exact `EXPLAIN` output proving why a query performs a sequential scan and which index will fix it. This post moves from joins to isolation anomalies and pool exhaustion. It contains 50 questions: start at the level you are interviewing for, then read one level above it, with SQL and JDBC examples you can actually run.
+
+> Mindset: a junior writes a query that returns the right rows; a senior writes one that returns the right rows _and_ will not take the site down at 10x traffic, then proves it with `EXPLAIN ANALYZE`.
+
+## Junior — foundations
+
+**Q1. What is a primary key, foreign key, and index?**
+A primary key uniquely identifies a row (enforced as unique and not null). A foreign key references a primary key in another table and enforces referential integrity. An index is usually a B-tree that speeds up lookups at the cost of write overhead. Without an index, `WHERE` performs a sequential scan — on a 10M-row table, that means roughly 10M row reads (hundreds of milliseconds to seconds); with an index, it means roughly four B-tree levels (about four random reads, or ~0.5 ms). Note that a foreign key does _not_ create an index on the child column in most engines. Without an FK index, every parent deletion requires a scan of the child table:
+
+```sql
+CREATE TABLE customers (
+  id BIGSERIAL PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE orders (
+  id BIGSERIAL PRIMARY KEY,
+  customer_id BIGINT NOT NULL REFERENCES customers(id),  -- FK: integrity
+  total DECIMAL(19,4) NOT NULL
+);
+
+-- every INSERT/DELETE now maintains two structures; each index adds
+-- roughly 10–20% write overhead, so index only what queries actually filter on
+CREATE INDEX ix_orders_customer ON orders (customer_id);
+```
+
+**Q2. What is the difference between `INNER JOIN` and `LEFT JOIN`?**
+`INNER JOIN` returns only matched rows; `LEFT JOIN` returns all rows from the left table, with matching columns from the right table or NULLs. A classic bug is using `INNER JOIN` when you need orphaned rows, which silently drops data:
+
+```sql
+-- WRONG: drops users with no orders
+SELECT u.name, o.id FROM users u JOIN orders o ON o.user_id = u.id;
+
+-- RIGHT: keeps every user, shows NULL when they have no orders
+SELECT u.name, o.id FROM users u LEFT JOIN orders o ON o.user_id = u.id;
+
+-- and if a user appears 3×, that is 3 orders — the join is not broken,
+-- you asked for row-per-order. Use DISTINCT or aggregation deliberately.
+```
+
+**Q3. What is the difference between `WHERE` and `HAVING`?**
+`WHERE` filters rows before grouping; `HAVING` filters groups after `GROUP BY`. You cannot use an aggregate in `WHERE`; that is a syntax error. The order also matters for performance: `WHERE` runs before aggregation, so it can use an index and shrink the input from 10M rows to 10k before grouping. `HAVING` can see only the already-aggregated result:
+
+```sql
+-- WRONG
+SELECT user_id, COUNT(*) FROM orders WHERE COUNT(*) > 1 GROUP BY user_id;
+-- RIGHT
+SELECT user_id, COUNT(*) FROM orders GROUP BY user_id HAVING COUNT(*) > 1;
+```
+
+**Q4. What is a transaction and ACID?**
+A transaction groups operations into an all-or-nothing unit. ACID stands for **A**tomicity (all or nothing), **C**onsistency (a valid state), **I**solation (concurrent transactions do not interfere), and **D**urability (committed data survives crashes). In a transfer, debiting A and crediting B must either both commit or both roll back; money must never disappear. Durability is not free: each commit forces a WAL flush, typically ~1–10 ms, which is why batching matters (Q29):
+
+```sql
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;      -- or ROLLBACK; if the second UPDATE fails
+```
+
+**Q5. What is the difference between `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`?**
+`COUNT(*)` counts rows, including NULLs; `COUNT(col)` counts non-NULL values; `COUNT(DISTINCT col)` counts unique non-NULL values. On a 1M-row table, confusing them silently changes the result, a common reporting bug. And `COUNT(*)` is not free: without an index-only scan, it reads every row in the table (taking ~seconds on 10M rows), which is why dashboards pre-aggregate:
+
+```sql
+SELECT COUNT(*) FROM orders;                 -- all rows, NULLs included
+SELECT COUNT(shipped_at) FROM orders;        -- only non-NULL shipped dates
+SELECT COUNT(DISTINCT customer_id) FROM orders;  -- unique customers
+```
+
+**Q6. Why not store money as `FLOAT`?**
+Binary floating-point values cannot represent decimal fractions exactly (0.1 + 0.2 ≠ 0.3), causing rounding drift that prevents ledgers from reconciling. Use `DECIMAL(19,4)` or store integer minor units (cents). Once the database is safe, the Java side must be safe too: never map money to `double`:
+
+```sql
+-- WRONG: never
+amount FLOAT;
+-- RIGHT
+amount DECIMAL(19,4);   -- 19 digits, 4 after the decimal
+-- or in app code: store BIGINT cents, format only at the edge
+```
+
+```java
+// WRONG: the same float bug smuggled through JDBC
+double total = rs.getDouble("amount");
+// RIGHT: BigDecimal end to end, with an explicit rounding mode
+BigDecimal total = rs.getBigDecimal("amount").setScale(2, RoundingMode.HALF_EVEN);
+```
+
+**Q7. What is the difference between `UNIQUE` and `PRIMARY KEY`?**
+A primary key is `UNIQUE NOT NULL` plus the table's identity anchor; a table has exactly one primary key but can have many `UNIQUE` constraints. The trap is NULL semantics: in Postgres, `UNIQUE` treats NULLs as distinct, so two rows with `NULL` in a unique column are legal. This surprises people trying to enforce "one email per user":
+
+```sql
+-- WRONG: this allows an unlimited number of NULL email rows
+CREATE TABLE users (email TEXT UNIQUE);
+INSERT INTO users VALUES (NULL), (NULL);   -- succeeds in Postgres!
+
+-- RIGHT: enforce "at most one NULL" with a partial unique index
+CREATE UNIQUE INDEX one_null_email ON users (email) WHERE email IS NOT NULL;
+```
+
+**Q8. What is the difference between `DELETE`, `TRUNCATE`, and `DROP`?**
+`DELETE` is DML: it works row by row, fires triggers, writes WAL, and leaves dead tuples (bloat) behind. `TRUNCATE` is a fast metadata operation; it releases whole pages instead of touching individual rows, so clearing 10M rows takes ~ms, whereas `DELETE` takes tens of seconds. `DROP` permanently removes the table and its indexes:
+
+```sql
+-- DELETE: 10M rows one by one, ~30–60 s, bloats the table with dead tuples
+DELETE FROM logs WHERE create
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #4: Database & SQL — Junior đến Senior"
+description: "Tầng cơ sở dữ liệu quyết định khả năng mở rộng trong thực tế. Ứng viên senior phải trình bày trôi chảy về indexing, transaction isolation, connection pooling và cái bẫy ORM, bằng SQL thực tế chứ không chỉ bằng lời."
+pubDatetime: 2026-08-10T10:15:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - database
+  - sql
+---
+
+Database là nơi câu "chạy trên máy tôi vẫn ổn" chết. Junior viết `SELECT *` rồi thắc mắc tại sao production chậm; senior chỉ ra được output `EXPLAIN` chứng minh chính xác vì sao query quét tuần tự và index nào sẽ giải quyết vấn đề. Bài này đi từ join qua các isolation anomaly đến pool exhaustion. Có 50 câu hỏi: hãy bắt đầu ở level bạn đang phỏng vấn, rồi đọc thêm một level phía trên, với các ví dụ SQL và JDBC có thể chạy thật.
+
+> Tư duy: junior viết query trả về đúng rows; senior viết query trả về đúng rows _và_ không làm sập site khi traffic tăng gấp 10 lần, rồi chứng minh điều đó bằng `EXPLAIN ANALYZE`.
+
+## Junior — nền tảng
+
+**Q1. Primary key, foreign key, và index là gì?**
+Primary key định danh duy nhất một row (được ép là unique và not null). Foreign key tham chiếu đến PK ở bảng khác và đảm bảo referential integrity. Index thường là B-tree, giúp tăng tốc lookup với cái giá là write overhead. Không có index, `WHERE` phải quét tuần tự; trên bảng 10M row, đó là khoảng 10M row read (từ hàng trăm ms đến vài giây). Có index thì chỉ cần đi qua khoảng 4 B-tree level (khoảng 4 random read, ~0.5 ms). Lưu ý rằng FK trong hầu hết engine _không_ tự tạo index trên cột con. Nếu thiếu FK index, mỗi lần xóa parent đều phải quét bảng con:
+
+```sql
+CREATE TABLE customers (
+  id BIGSERIAL PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE orders (
+  id BIGSERIAL PRIMARY KEY,
+  customer_id BIGINT NOT NULL REFERENCES customers(id),  -- FK: đảm bảo integrity
+  total DECIMAL(19,4) NOT NULL
+);
+
+-- mỗi INSERT/DELETE giờ phải duy trì hai cấu trúc; mỗi index thêm
+-- khoảng 10–20% write overhead, nên chỉ index những gì query thực sự filter
+CREATE INDEX ix_orders_customer ON orders (customer_id);
+```
+
+**Q2. Khác nhau giữa `INNER JOIN` và `LEFT JOIN`?**
+`INNER JOIN` chỉ trả về các row khớp; `LEFT JOIN` trả về mọi row ở bên trái, kèm các cột bên phải nếu khớp hoặc NULL nếu không khớp. Một bug kinh điển là dùng `INNER JOIN` khi cần giữ các row mồ côi, khiến dữ liệu bị mất một cách âm thầm:
+
+```sql
+-- WRONG: mất thầm user không có order
+SELECT u.name, o.id FROM users u JOIN orders o ON o.user_id = u.id;
+
+-- RIGHT: giữ mọi user, hiện NULL khi họ không có order
+SELECT u.name, o.id FROM users u LEFT JOIN orders o ON o.user_id = u.id;
+
+-- và nếu user xuất hiện 3 lần, đó là 3 orders — join không sai,
+-- bạn đã yêu cầu row-per-order. Dùng DISTINCT hoặc aggregation có chủ đích.
+```
+
+**Q3. Khác nhau giữa `WHERE` và `HAVING`?**
+`WHERE` lọc row trước khi group; `HAVING` lọc group sau `GROUP BY`. Không thể dùng aggregate trong `WHERE`; đó là syntax error. Thứ tự cũng quan trọng đối với hiệu năng: `WHERE` chạy trước aggregation nên có thể dùng index và thu nhỏ input từ 10M rows xuống 10k trước khi group. `HAVING` chỉ nhìn thấy kết quả đã aggregate:
+
+```sql
+-- WRONG
+SELECT user_id, COUNT(*) FROM orders WHERE COUNT(*) > 1 GROUP BY user_id;
+-- RIGHT
+SELECT user_id, COUNT(*) FROM orders GROUP BY user_id HAVING COUNT(*) > 1;
+```
+
+**Q4. Transaction và ACID là gì?**
+Transaction gộp các operation thành một khối all-or-nothing. ACID gồm: **A**tomicity (tất cả hoặc không gì cả), **C**onsistency (trạng thái hợp lệ), **I**solation (các txn đồng thời không can thiệp lẫn nhau), và **D**urability (data đã commit vẫn tồn tại sau crash). Trong một transfer, debit A và credit B phải cùng commit hoặc cùng rollback; không bao giờ được để tiền biến mất. Durability không miễn phí: mỗi commit buộc phải flush WAL, thường mất ~1–10 ms, đó là lý do batching quan trọng (Q29):
+
+```sql
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;      -- hoặc ROLLBACK; nếu UPDATE thứ hai thất bại
+```
+
+**Q5. Khác nhau giữa `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`?**
+`COUNT(*)` đếm row, kể cả NULL; `COUNT(col)` đếm các giá trị non-NULL; `COUNT(DISTINCT col)` đếm các giá trị non-NULL duy nhất. Trên bảng 1M row, nhầm lẫn giữa chúng sẽ âm thầm làm thay đổi kết quả, một bug báo cáo kinh điển. `COUNT(*)` cũng không miễn phí: nếu không có index-only scan, nó phải đọc mọi row trong bảng (~vài giây trên 10M rows), đó là lý do dashboard phải pre-aggregate:
+
+```sql
+SELECT COUNT(*) FROM orders;                 -- mọi row, kể cả NULL
+SELECT COUNT(shipped_at) FROM orders;        -- chỉ ngày ship non-NULL
+SELECT COUNT(DISTINCT customer_id) FROM orders;  -- customer duy nhất
+```
+
+**Q6. Tại sao không lưu tiền bằng `FLOAT`?**
+Binary float không thể biểu diễn chính xác số thập phân (0.1 + 0.2 ≠ 0.3), gây rounding drift khiến ledger không thể reconcile. Hãy dùng `DECIMAL(19,4)` hoặc lưu integer minor units (cents). Khi DB đã an toàn, phía Java cũng phải an toàn: không bao giờ map tiền sang `double`:
+
+```sql
+-- WRONG: không bao giờ
+amount FLOAT;
+-- RIGHT
+amount DECIMAL(19,4);   -- 19 chữ số, 4 sau dấu phẩy
+-- hoặc trong app code: lưu BIGINT cents, chỉ format ở biên
+```
+
+```java
+// WRONG: cùng bug float lọt qua JDBC
+double total = rs.getDouble("amount");
+// RIGHT: BigDecimal xuyên suốt, kèm chế độ rounding tường minh
+BigDecimal total = rs.getBigDecimal("amount").setScale(2, RoundingMode.HALF_EVEN);
+```
+
+**Q7. Khác nhau giữa `UNIQUE` và `PRIMARY KEY`?**
+PK là `UNIQUE NOT NULL`, đồng thời là điểm neo định danh của bảng; một bảng có đúng một PK nhưng có thể có nhiều constraint `UNIQUE`. Cái bẫy nằm ở ngữ nghĩa của NULL: trong Postgres, `UNIQUE` coi các NULL là khác nhau, nên hai row cùng có `NULL` ở cột unique vẫn hợp lệ. Điều này thường gây bất ngờ khi ta muốn ép quy tắc "mỗi user một email":
+
+```sql
+-- WRONG: cho phép vô hạn row email NULL
+CREATE TABLE users (email TEXT UNIQUE);
+INSERT INTO users VALUES (NULL), (NULL);   -- thành công trong Postgres!
+
+-- RIGHT: ép "tối đa một NULL" bằng partial unique index
+CREATE UNIQUE INDEX one_null_email ON users (email) WHERE email IS NOT NULL;
+```
+
+**Q8. Khác nhau giữa `DELETE`, `TRUNCATE`, và `DROP`?**
+`DELETE` là DML: xóa từng row, kích hoạt trigger, ghi WAL và để lại dead tuples (bloat). `TRUNCATE` là thao tác metadata nhanh; nó giải phóng cả pages thay vì xử lý từng row, nên xóa 10M rows chỉ mất ~ms trong khi `DELETE` mất hàng chục giây. `DROP` xóa vĩnh viễn bảng và các index của bảng:
+
+```sql
+-- DELETE: 10M rows từng dòng một, ~30–60 s, làm bảng phình vì dead tuples
+DELETE FROM logs WHERE created_at < '2024-01-01';
+-- TRUNCATE: giải phóng mọi pages một lượt, ~1 ms, không filter được
+TRUNCATE logs;
+-- DROP: bảng và mọi index của nó biến mất
+DROP TABLE logs;
+```
+
+**Q9. SQL injection là gì và `PreparedStatement` chặn nó bằng cách nào?**
+SQL injection xảy ra khi input của user bị nối thẳng vào chuỗi SQL; input được parse như _cod
+Rewrite both. Write:
+  /tmp/rt_37_database-senior/database-senior.en.md
+  /tmp/rt_37_database-senior/database-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

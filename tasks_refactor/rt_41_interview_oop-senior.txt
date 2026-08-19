@@ -1,0 +1,235 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #41: interview/oop-senior
+CURRENT EN FILE (rewrite to /tmp/rt_41_oop-senior/oop-senior.en.md):
+=== EN CURRENT ===
+---
+title: "Java Interview Prep #2: OOP & Design Principles — Junior to Senior"
+description: "OOP at the senior level means applying SOLID, favoring composition over inheritance, and designing interfaces at scale — not reciting definitions. 50 interview-grade questions, from the four pillars to 'here is the refactor that saved us from a 12-class change'."
+pubDatetime: 2026-08-10T10:05:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - oop
+  - design-principles
+---
+
+OOP is where interviewers stop asking "what" and start asking "why". Anyone can name the four pillars; a senior can show the code where inheritance caused problems and the refactor that fixed them. This post climbs from the textbook to the trade-off table — 50 questions with compilable examples.
+
+> Mindset: a junior implements the interface; a senior decides whether the interface should exist at all and what it will cost the codebase over the next five years.
+
+## Junior — foundations
+
+**Q1. What are the four pillars of OOP?**
+Encapsulation (hide state behind behavior), Abstraction (expose intent, not mechanism), Inheritance (reuse by specialization), Polymorphism (one interface, many implementations). Naming them is free; applying them without a brittle hierarchy is the skill.
+
+**Q2. Abstract class vs interface?**
+An abstract class can hold state and implement methods; a class can extend only one. An interface is a contract — before Java 8, it could contain only method signatures; now it can also contain `default`/`static` methods, but no instance fields. Prefer interfaces to represent a _type_, and use abstract classes only for shared state or behavior.
+
+```java
+// WRONG: forcing a single inheritance axis for something that's really a role
+abstract class Worker { abstract void doWork(); }
+class Programmer extends Worker { void doWork() { /* ... */ } }
+// can't also be a Reviewer without another axis
+// RIGHT: roles as interfaces, composed freely
+interface Worker { void doWork(); }
+interface Reviewer { void review(Change c); }
+class Programmer implements Worker, Reviewer { /* both */ }
+```
+
+**Q3. What is polymorphism and how does it work?**
+Subtype polymorphism means that a supertype variable can refer to any subtype, and the JVM dispatches the overridden method at runtime. Overloading is _not_ polymorphism; it is resolved at compile time based on the signature.
+
+```java
+Animal a = new Dog();   // compile type Animal, runtime Dog
+a.speak();              // calls Dog.speak() — virtual dispatch
+```
+
+**Q4. Overriding vs overloading?**
+Overriding means using the same signature in a subclass, with dispatch at runtime. Overloading means using the same name with different parameter types, with resolution at compile time. An ambiguous overload fails to compile:
+
+```java
+void log(Object o) { }
+void log(String s) { }
+log(null);   // compile ERROR: ambiguous between Object and String
+```
+
+**Q5. What does the `equals`/`hashCode` contract require?**
+If `a.equals(b)`, then `a.hashCode() == b.hashCode()`. Override both, or maps will break:
+
+```java
+class User { String id; public boolean equals(Object o){...} }  // no hashCode
+Map<User,String> m = new HashMap<>();
+m.put(new User("42"), "x");
+m.get(new User("42"));   // returns null — different bucket!
+// RIGHT: both override, consistent
+```
+
+**Q6. `abstract` vs interface `default` methods?**
+An abstract-class method has a body that the subclass may override. An interface `default` method provides behavior that a class inherits without implementing it — useful for backward-compatible API evolution. Override a `default` method to change its behavior.
+
+**Q7. Can a constructor be overridden or overloaded?**
+Constructors can be overloaded (multiple constructors with different parameters), but they cannot be overridden (constructors are not inherited; they belong to their class). A subclass constructor must call a parent constructor (`super(...)`) as its first statement.
+
+**Q8. What is `super` used for in a constructor?**
+It invokes the parent constructor or method. Forgetting `super()` when the parent has no no-argument constructor is a compile error — a common issue with `SQLException(String)`-style parent classes.
+
+**Q9. What is method hiding vs overriding?**
+A `static` method in a subclass with the same signature as a parent `static` method _hides_ it (resolution is based on the reference type at compile time), unlike an overridden instance method (which is dispatched by the object's type at runtime). This is a frequent interview trap:
+
+```java
+Parent p = new Child(); p.staticMethod(); // calls Parent.staticMethod (hiding)
+```
+
+**Q10. What is the difference between an object reference and a primitive?**
+A reference points to a heap object (~4–8 bytes); a primitive holds its value directly (4 bytes for an `int`). Passing a primitive copies the value; passing an object reference copies the pointer, so both references point to the same object. Mutating the object through either reference mutates the shared object.
+
+**Q11. What is a `record` (Java 16+) and when to use it?**
+A record is an immutable data carrier with auto-generated `equals`/`hashCode`/`toString` methods and accessors. Use it for DTOs and value objects. Don't use it for mutable state or inheritance. `record Point(int x, int y)` beats a hand-written 40-line class.
+
+**Q12. What is the difference between `null` and an empty object?**
+`null` means "no object" — dereferencing it throws a `NullPointerException`. An empty object (e.g. `List.of()`, `""`) is a valid object with no contents. Prefer returning empty collections rather than `null` to avoid NPEs (the Null Object / empty-collection idiom).
+
+**Q13. What is a `static` method — can it access instance fields?**
+A `static` method belongs to the class, not to an instance. It cannot access instance (non-static) fields or call instance methods directly because there is no `this`. It can use only other `static` members and its parameters.
+
+**Q14. What is the difference between `String.length()` and array `.length`?**
+`String.length()` is a method (it returns the number of `char` values, where a `char` is a UTF-16 code unit — so a string with supplementary characters can report more than its grapheme count). `array.length` is a `final` field. A classic source of confusion: `str.length()` is a call, while `arr.length` is not.
+
+**Q15. What is upcasting and downcasting?**
+Upcasting (`Animal a = new Dog()`) is implicit and always safe. Downcasting (`Dog d = (Dog) a`) is explicit and throws `ClassCastException` at runtime if `a` isn't actually a `Dog`. Use `instanceof` before downcasting.
+
+## Mid — tradeoffs & pitfalls
+
+**Q1. When is inheritance the wrong tool?**
+When the relationship isn't a true "is-a" relationship with stable shared behavior. Inheritance couples the subclass to the parent's implementation forever — the "fragile base class" problem. Reach for **composition** instead:
+
+```java
+// WRONG: a ReportGenerator is not really an ExcelWriter; coupl
+=== VI CURRENT ===
+---
+title: "Ôn thi Java #2: OOP & Nguyên lý Thiết kế — Junior đến Senior"
+description: "OOP ở cấp độ senior là biết áp dụng SOLID, ưu tiên composition thay vì inheritance và thiết kế interface ở quy mô lớn — không phải học thuộc các định nghĩa. 50 câu hỏi phỏng vấn, từ bốn trụ cột đến 'đây là refactor đã giúp chúng tôi tránh phải thay đổi 12 class'."
+pubDatetime: 2026-08-10T10:05:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - interview
+  - oop
+  - design-principles
+---
+
+OOP là phần phỏng vấn mà interviewer ngừng hỏi "cái gì" và bắt đầu hỏi "tại sao". Ai cũng có thể gọi tên bốn trụ cột; một senior có thể chỉ ra đoạn code nơi inheritance gây rắc rối và bản refactor đã sửa nó. Bài viết này đi từ kiến thức trong sách giáo khoa đến bảng trade-off — 50 câu hỏi kèm các ví dụ có thể biên dịch.
+
+> Tư duy: junior triển khai interface; senior quyết định liệu interface đó có nên tồn tại hay không và nó sẽ khiến codebase phải trả giá thế nào trong năm năm tiếp theo.
+
+## Junior — nền tảng
+
+**Q1. Bốn trụ cột của OOP?**
+Encapsulation (che giấu state phía sau behavior), Abstraction (bộc lộ ý định thay vì cơ chế), Inheritance (tái sử dụng thông qua chuyên biệt hóa), Polymorphism (một interface, nhiều implementation). Gọi tên chúng chẳng tốn gì; kỹ năng nằm ở việc áp dụng chúng mà không tạo ra một hierarchy mong manh.
+
+**Q2. Abstract class vs interface?**
+Abstract class có thể giữ state và triển khai method; một class chỉ có thể kế thừa một class khác. Interface là một hợp đồng — trước Java 8 chỉ chứa các signature, còn nay có thể có method `default`/`static` nhưng không có instance field. Ưu tiên interface để biểu diễn _type_, và chỉ dùng abstract class cho state hoặc behavior dùng chung.
+
+```java
+// WRONG: ép một trục inheritance cho thứ thực là một role
+abstract class Worker { abstract void doWork(); }
+class Programmer extends Worker { void doWork() { /* ... */ } }
+// không thể vừa là Reviewer không có trục khác
+// RIGHT: role là interface, compose tự do
+interface Worker { void doWork(); }
+interface Reviewer { void review(Change c); }
+class Programmer implements Worker, Reviewer { /* cả hai */ }
+```
+
+**Q3. Polymorphism là gì và hoạt động ra sao?**
+Subtype polymorphism nghĩa là một biến supertype có thể tham chiếu đến bất kỳ subtype nào, còn JVM sẽ dispatch method bị override tại runtime. Overloading _không_ phải là polymorphism; nó được quyết định tại compile time dựa trên signature.
+
+```java
+Animal a = new Dog();   // compile type Animal, runtime Dog
+a.speak();              // gọi Dog.speak() — virtual dispatch
+```
+
+**Q4. Overriding vs overloading?**
+Overriding là dùng cùng signature ở subclass và được dispatch tại runtime. Overloading là dùng cùng tên với các kiểu tham số khác nhau và được quyết định tại compile time. Overload mơ hồ sẽ khiến code không biên dịch được:
+
+```java
+void log(Object o) { }
+void log(String s) { }
+log(null);   // compile ERROR: ambiguous giữa Object và String
+```
+
+**Q5. Hợp đồng `equals`/`hashCode` đòi gì?**
+Nếu `a.equals(b)` thì `a.hashCode() == b.hashCode()`. Phải override cả hai, nếu không map sẽ hoạt động sai:
+
+```java
+class User { String id; public boolean equals(Object o){...} }  // không hashCode
+Map<User,String> m = new HashMap<>();
+m.put(new User("42"), "x");
+m.get(new User("42"));   // trả null — bucket khác!
+// RIGHT: cả hai override, consistent
+```
+
+**Q6. `abstract` vs `default` method của interface?**
+Method của abstract class có phần thân mà subclass có thể override. Method `default` của interface cung cấp behavior để class kế thừa mà không cần triển khai — được dùng để tiến hóa API mà vẫn tương thích ngược. Override method `default` nếu muốn thay đổi behavior đó.
+
+**Q7. Constructor có thể override hay overload?**
+Constructor có thể overload (nhiều constructor với các tham số khác nhau), nhưng không thể override (constructor không được kế thừa mà thuộc riêng về từng class). Constructor của subclass phải gọi constructor của parent (`super(...)`) bằng câu lệnh đầu tiên.
+
+**Q8. `super` dùng gì trong constructor?**
+Để gọi constructor hoặc method của parent. Quên `super()` khi parent không có no-argument constructor sẽ khiến code không biên dịch được — đây là lỗi thường gặp với các parent kiểu `SQLException(String)`.
+
+**Q9. Method hiding vs overriding?**
+Method `static` ở subclass có cùng signature với method `static` của parent sẽ _hide_ method đó (được quyết định bởi reference type tại compile time), khác với instance method overriding (được dispatch tại runtime theo object type). Đây là một bẫy phỏng vấn thường gặp:
+
+```java
+Parent p = new Child(); p.staticMethod(); // gọi Parent.staticMethod (hiding)
+```
+
+**Q10. Khác nhau object reference và primitive?**
+Reference trỏ đến một heap object (~4–8 bytes); primitive giữ trực tiếp giá trị (4 bytes với `int`). Truyền primitive sẽ sao chép giá trị; truyền object reference sẽ sao chép pointer, nên cả hai cùng trỏ đến một object. Mutate object thông qua reference sẽ làm thay đổi object dùng chung.
+
+**Q11. `record` (Java 16+) là gì và khi dùng?**
+Record là một immutable data carrier với `equals`/`hashCode`/`toString` và accessor được tự động sinh ra. Dùng record cho DTO và value object. Đừng dùng cho mutable state hoặc inheritance. `record Point(int x, int y)` gọn hơn nhiều so với một class 40 dòng viết thủ công.
+
+**Q12. Khác nhau `null` và empty object?**
+`null` nghĩa là "không có object" — dereference nó sẽ ném `NullPointerException`. Empty object (ví dụ `List.of()`, `""`) là một object hợp lệ nhưng không có nội dung. Ưu tiên trả về empty collection thay vì `null` để tránh NPE (idiom Null Object / empty collection).
+
+**Q13. `static` method — có access instance field không?**
+Method `static` thuộc về class, không thuộc về instance; nó không thể truy cập instance field (non-static) hoặc gọi trực tiếp instance method vì không có `this`. Nó chỉ có thể dùng các `static` member khác hoặc các parameter của mình.
+
+**Q14. Khác nhau `String.length()` và array `.length`?**
+`String.length()` là method (trả về số lượng `char`, trong đó một `char` là một UTF-16 code unit — vì vậy string có supplementary character có thể cho số lượng lớn hơn grapheme count). `array.length` là một `final` field. Một nhầm lẫn kinh điển: `str.length()` là một lời gọi, còn `arr.length` thì không.
+
+**Q15. Upcasting và downcasting?**
+Upcasting (`Animal a = new Dog()`) là implicit và luôn an toàn. Downcasting (`Dog d = (Dog) a`) là explicit và sẽ ném `ClassCastException` tại runtime nếu `a` thực sự không phải là `Dog`. Hãy dùng `instanceof` trước khi downcast.
+
+## Mid — trade-off và cạm bẫy
+
+**Q1. Khi nào inheritance là công cụ sai?**
+Khi quan hệ không thực sự là "is-a" với behavior dùng chung ổn định. Inheritance gắn chặt subclass với implementation của parent mãi mãi — đây là vấn đề "fragile base class". Hãy ưu tiên **composition**:
+
+```java
+// WRONG: ReportGenerator không thực sự là ExcelWriter; coupling + untestable
+class ReportGenerator extends ExcelWriter { void generate() { /* tangled */ } }
+// RIGHT: giữ một Writer, delegat
+Rewrite both. Write:
+  /tmp/rt_41_oop-senior/oop-senior.en.md
+  /tmp/rt_41_oop-senior/oop-senior.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

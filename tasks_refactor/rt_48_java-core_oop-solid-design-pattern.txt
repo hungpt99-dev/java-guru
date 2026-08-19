@@ -1,0 +1,379 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #48: java-core/oop-solid-design-pattern
+CURRENT EN FILE (rewrite to /tmp/rt_48_oop-solid-design-pattern/oop-solid-design-pattern.en.md):
+=== EN CURRENT ===
+---
+title: "OOP, SOLID & Design Patterns: Engineering Judgment for Real Java Code"
+description: "A problem-first guide to OOP, SOLID and Design Patterns in Java. Learn how to recognize design pressure in real code, refactor toward better structure, and — just as importantly — know exactly when NOT to apply a principle or pattern."
+pubDatetime: 2026-08-11T10:00:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - java-core
+  - oop
+  - solid
+  - design-patterns
+  - clean-code
+---
+
+Your `PaymentService` starts as 50 lines of code. It reads a payment type,
+charges the customer, saves the receipt. Clean. Simple.
+
+Then the business adds credit cards. Then bank transfers. Then e-wallets.
+Then crypto. Then refunds. Then retry logic. Then notifications. Then audit
+logging. Then a second payment provider. Then a third.
+
+Eighteen months later, `PaymentService` is 1,500 lines. Every deployment
+touches it. Every bug report lands in it. The pull request that added PayPal
+broke card payments, because both branches lived in the same method and the
+new `else if` was placed before the one that handled `CARD` in a way nobody
+noticed.
+
+Nobody decided to make this class bad. Every single change was reasonable
+at the time it was made. That is the uncomfortable truth this article is
+built around:
+
+> **Bad design is almost never a single bad decision. It is the accumulated
+> result of many individually reasonable decisions made under pressure.**
+
+This is not another SOLID tutorial. You already know the vocabulary — "SOLID
+means Single Responsibility, Open/Closed..." — and the generic examples that
+come with it (`Animal`, `Dog`, `Cat`, `Shape`, `Circle`). That knowledge is
+not what is missing.
+
+What is missing is **engineering judgment**: the ability to look at a real
+codebase, feel where the design pressure is, choose the right technique —
+and refuse the techniques that would make things worse. So this article
+follows one learning flow, over and over:
+
+```text
+Problem
+   ↓
+Bad Design
+   ↓
+Why It Is Bad
+   ↓
+Principle / Pattern
+   ↓
+Refactoring
+   ↓
+Trade-offs
+   ↓
+Special Cases (when NOT to do it)
+```
+
+Every concept is introduced because a concrete scenario breaks without it —
+not because the concept exists in a textbook. The domain stays consistent
+throughout: payments, orders, notifications, repositories. You will see bad
+code first, then the pressure it creates, then the refactoring, then the
+price of the refactoring.
+
+Here is the whole article in one question:
+
+> **Every time you add an interface, a class, or a pattern, you are spending
+> something (indirection, indirection, indirection). What problem is the
+> spending solving?**
+
+---
+
+## 1. The Problem That Starts Everything
+
+Go back to the opening story. Let us watch `PaymentService` grow, because
+every principle in this article exists to answer the question: _where did
+this go wrong?_
+
+**Month 1.** One payment method. The service is a straight line:
+
+```java
+public class PaymentService {
+    public void pay(Order order, CardDetails card) {
+        validateCard(card);
+        chargeCard(card, order.getTotal());
+        saveReceipt(order, "PAID");
+        sendConfirmationEmail(order);
+    }
+}
+```
+
+**Month 4.** The business adds bank transfers and e-wallets. Reasonable
+reactions, one by one:
+
+- "A new payment type means a new branch — that's fine, it's just two more
+  lines."
+- "Refunds? Add a `refund()` method with a `switch` on the type."
+- "Retry? Wrap the call in a loop. Keep it simple."
+- "Email? The same `sendConfirmationEmail` logic is needed by both payment
+  paths — move it to a private method."
+- "Audit logging? It's just `logger.info(...)` on every entry and exit."
+- "A second provider? Inline the new SDK calls next to the old ones — we
+  can extract that later."
+
+**Month 18.** The class looks like this:
+
+```java
+public class PaymentService {
+    public void pay(Order order, PaymentRequest request) {
+        // 40 lines of validation for 6 payment types
+        // 90 lines of branch logic (CARD, BANK_TRANSFER, E_WALLET, CRYPTO)
+        // 30 lines of retry logic duplicated for 2 providers
+        // 50 lines of email logic
+        // 25 lines of audit logging
+        // 20 lines of receipt persistence
+        // 15 lines of exception translation
+        // ...
+    }
+
+    public void refund(Payment payment, BigDecimal amount) {
+        // another 200 lines, half of it copied from pay()
+    }
+
+    // 900 more lines: private helpers, provider-specific quirks,
+    // special cases for crypto confirmations, error codes, ...
+}
+```
+
+1500 lines. Here is the question you must learn to ask — because it is the
+question that separates knowing about SOLID from being able to use it:
+
+> **What actually went wrong?**
+
+Not "what should we have done instead" — what _went wrong_? Which concrete
+symptoms tell you this class has a design problem, as opposed to just being
+long?
+
+Look closely at the list of symptoms:
+
+| Symptom                                         | What it tells you                                  |
+| ----------------------------------------------- | -------------------------------------------------- |
+| One class changes for many different reasons    | Several responsibilities share one file            |
+| Adding a payment type means editing `pay()`     | The variation point is inside an `if/else` chain   |
+| Duplicated retry/email/audit code               | Cross-cutting behavior is woven into business code |
+| A change to provider A breaks provider B        | Branches are coupled through shared mutable state  |
+| Testing `pay()` needs a real DB, email, SDK     | Dependencies are hardwired, not injected           |
+| You can't say what `pay()` does in one sentence | Too many things are happening per method call      |
+
+Each symptom maps to a principle in this article. The table will fill in as
+we go — keep it in mind, because the refactoring case study in Part VI walks
+through fixing this exact class, one symptom at a time.
+
+But before the principles, we need the raw material: the four OOP concepts
+that everything else is built on. Not as definitions — as mechanisms that
+either protect your system or betray it.
+
+---
+
+## 2. Part I — OOP: More Than Classes and Objects
+
+You know the syntax of classes, objects, inheritance, interfaces. What this
+part is really about is what those mechanisms _do_ — the protections they
+provide, the failure modes they create, and the judgment involved in using
+them. Four concepts, four engineering questions:
+
+| Concept       | The engineering question                     |
+| ------------- | -------------------------------------------- |
+| Encapsulation | Who is allowed to touch this state, and how? |
+| Abstraction   | What should callers know about the inside?   |
+| Inheritance   | Is this really an "is-a" relationship?       |
+| Polymorphism  | Who decides which behavior runs?             |
+
+### 2.1 Encapsulation: Protecting Invariants, Not Hiding Fields
+
+Most Java developers believe encapsula
+=== VI CURRENT ===
+---
+title: "OOP, SOLID & Design Patterns: Tư Duy Kỹ Thuật Cho Code Java Thực Tế"
+description: "Cẩm nang theo hướng vấn đề trước về OOP, SOLID và Design Patterns trong Java. Học cách nhận ra áp lực thiết kế trong code thực tế, refactor về cấu trúc tốt hơn — và quan trọng không kém — biết chính xác khi nào KHÔNG nên áp dụng một nguyên tắc hay pattern."
+pubDatetime: 2026-08-11T10:00:00+07:00
+featured: false
+draft: false
+tags:
+  - java
+  - java-core
+  - oop
+  - solid
+  - design-patterns
+  - clean-code
+---
+
+`PaymentService` của bạn bắt đầu với 50 dòng code. Nó đọc loại thanh toán,
+trừ tiền khách hàng, lưu biên lai. Sạch. Đơn giản.
+
+Rồi business thêm thẻ tín dụng. Rồi chuyển khoản ngân hàng. Rồi e-wallet.
+Rồi crypto. Rồi refund. Rồi logic retry. Rồi thông báo. Rồi audit logging.
+Rồi provider thanh toán thứ hai. Rồi thứ ba.
+
+Mười tám tháng sau, `PaymentService` dài 1.500 dòng. Mọi lần deploy đều đụng
+vào nó. Mọi bug report đều rơi vào nó. Pull request thêm PayPal làm hỏng cả
+thanh toán thẻ, vì cả hai nhánh sống trong cùng một method và cái `else if`
+mới được đặt trước nhánh xử lý `CARD` theo cách không ai để ý.
+
+Không ai quyết định làm class này thành tồi. Từng thay đổi đều hợp lý tại
+thời điểm nó được thực hiện. Đó là sự thật khó chịu mà bài viết này xây
+dựng trên đó:
+
+> **Thiết kế tồi hầu như không bao giờ là một quyết định tồi duy nhất. Nó là
+> kết quả tích lũy của rất nhiều quyết định hợp lý từng cái một, được thực
+> hiện dưới áp lực.**
+
+Đây không phải một tutorial SOLID khác. Bạn đã biết từ vựng — "SOLID nghĩa
+là Single Responsibility, Open/Closed..." — và các ví dụ chung chung đi kèm
+(`Animal`, `Dog`, `Cat`, `Shape`, `Circle`). Kiến thức đó không phải thứ
+đang thiếu.
+
+Thứ đang thiếu là **tư duy kỹ thuật (engineering judgment)**: khả năng nhìn
+vào một codebase thực tế, cảm nhận áp lực thiết kế đang đè ở đâu, chọn đúng
+kỹ thuật — và từ chối những kỹ thuật sẽ khiến mọi thứ tệ hơn. Vì vậy bài
+viết này lặp đi lặp lại một luồng học duy nhất:
+
+```text
+Vấn đề (Problem)
+   ↓
+Thiết kế tồi (Bad Design)
+   ↓
+Vì sao nó tồi (Why It Is Bad)
+   ↓
+Nguyên tắc / Pattern
+   ↓
+Refactoring
+   ↓
+Đánh đổi (Trade-offs)
+   ↓
+Trường hợp đặc biệt (khi nào KHÔNG làm điều đó)
+```
+
+Mỗi khái niệm được giới thiệu vì một tình huống cụ thể sụp đổ nếu thiếu nó —
+không phải vì khái niệm đó tồn tại trong sách giáo khoa. Domain được giữ
+nhất quán suốt bài: thanh toán, đơn hàng, thông báo, repository. Bạn sẽ thấy
+code tồi trước, rồi áp lực nó tạo ra, rồi refactoring, rồi cái giá của
+refactoring đó.
+
+Đây là toàn bộ bài viết trong một câu hỏi:
+
+> **Mỗi lần bạn thêm một interface, một class, hay một pattern, bạn đang
+> trả tiền cho thứ gì đó (indirection, indirection, indirection). Vấn đề mà
+> khoản chi này đang giải quyết là gì?**
+
+---
+
+## 1. Vấn Đề Khởi Đầu Tất Cả
+
+Quay lại câu chuyện mở đầu. Hãy nhìn `PaymentService` lớn dần lên, vì mọi
+nguyên tắc trong bài viết này tồn tại để trả lời câu hỏi: _điều gì đã sai ở
+đây?_
+
+**Tháng 1.** Một phương thức thanh toán. Service là một đường thẳng:
+
+```java
+public class PaymentService {
+    public void pay(Order order, CardDetails card) {
+        validateCard(card);
+        chargeCard(card, order.getTotal());
+        saveReceipt(order, "PAID");
+        sendConfirmationEmail(order);
+    }
+}
+```
+
+**Tháng 4.** Business thêm chuyển khoản ngân hàng và e-wallet. Những phản
+ứng hợp lý, từng cái một:
+
+- "Thêm một loại thanh toán nghĩa là thêm một nhánh — ổn thôi, chỉ là thêm
+  vài dòng."
+- "Refund? Thêm method `refund()` với `switch` theo loại."
+- "Retry? Bọc lời gọi trong vòng lặp. Giữ đơn giản."
+- "Email? Logic `sendConfirmationEmail` giống nhau mà cả hai nhánh thanh
+  toán đều cần — chuyển nó thành private method."
+- "Audit logging? Chỉ là `logger.info(...)` ở mọi điểm vào ra."
+- "Provider thứ hai? Chèn các lời gọi SDK mới cạnh những cái cũ — sau này
+  rút ra cũng được."
+
+**Tháng 18.** Class trông như thế này:
+
+```java
+public class PaymentService {
+    public void pay(Order order, PaymentRequest request) {
+        // 40 dòng validation cho 6 loại thanh toán
+        // 90 dòng logic rẽ nhánh (CARD, BANK_TRANSFER, E_WALLET, CRYPTO)
+        // 30 dòng logic retry lặp lại cho 2 provider
+        // 50 dòng logic email
+        // 25 dòng audit logging
+        // 20 dòng lưu biên lai
+        // 15 dòng chuyển đổi exception
+        // ...
+    }
+
+    public void refund(Payment payment, BigDecimal amount) {
+        // thêm 200 dòng nữa, nửa số đó copy từ pay()
+    }
+
+    // 900 dòng nữa: private helper, quirk riêng của từng provider,
+    // ngoại lệ riêng của crypto, error code, ...
+}
+```
+
+1.500 dòng. Đây là câu hỏi bạn phải học cách đặt ra — vì nó là thứ phân
+biệt "biết về SOLID" với "dùng được SOLID":
+
+> **Điều gì thực sự đã sai?**
+
+Không phải "đáng lẽ nên làm gì khác" — điều _gì_ đã sai? Những triệu chứng
+cụ thể nào cho bạn biết class này có vấn đề thiết kế, thay vì chỉ là dài?
+
+Nhìn kỹ danh sách triệu chứng:
+
+| Triệu chứng                                    | Nó nói cho bạn điều gì                       |
+| ---------------------------------------------- | -------------------------------------------- |
+| Một class thay đổi vì nhiều lý do khác nhau    | Nhiều responsibility chung một file          |
+| Thêm loại thanh toán nghĩa là sửa `pay()`      | Điểm biến thiên nằm trong chuỗi `if/else`    |
+| Code retry/email/audit bị lặp                  | Hành vi cắt ngang đan xen code nghiệp vụ     |
+| Thay đổi provider A làm hỏng provider B        | Các nhánh ghép chặt qua shared mutable state |
+| Test `pay()` cần DB thật, email thật, SDK thật | Dependency hardwire, không được inject       |
+| Không thể tóm tắt `pay()` làm gì trong một câu | Quá nhiều thứ xảy ra trong một method call   |
+
+Mỗi triệu chứng ánh xạ tới một nguyên tắc trong bài viết này. Bảng này sẽ
+được điền dần — hãy ghi nhớ nó, vì case study refactoring ở Phần VI dẫn dắt
+bạn sửa chính class này, hết triệu chứng này đến triệu chứng khác.
+
+Nhưng trước các nguyên tắc, chúng ta cần vật liệu thô: bốn khái niệm OOP mà
+mọi thứ khác xây dựng trên đó. Không phải như định nghĩa — mà như cơ chế:
+chúng bảo vệ hệ thống của bạn hoặc phản bội nó.
+
+---
+
+## 2. Phần I — OOP: Không Chỉ Là Class và Object
+
+Bạn biết cú pháp của class, object, inheritance, interface. Điều phần này
+thực sự bàn là những cơ chế đó _làm gì_ — các sự bảo vệ chúng cung cấp, các
+kiểu thất bại chúng tạo ra, và sự phán đoán khi dùng chúng. Bốn khái niệm,
+bốn câu hỏi kỹ thuật:
+
+| Khái niệm     | Câu hỏi kỹ thuật                                   |
+| ------------- | -------------------------------------------------- |
+| Encapsulation | Ai được phép đụng vào state này, và bằng cách nào? |
+| Abstraction   | Caller nên biết gì về bên trong?                   |
+| Inheritance   | Đây có thực sự là quan hệ "is-a"?                  |
+| Polymorphism  | Ai quyết định hành vi nào chạy?                    |
+
+### 2.1 Encapsulation: Bảo Vệ Invariant, Không Phải Ẩn Field
+
+Hầu hết lập trình viên Java tin rằng encapsulation nghĩa là `private` field
+cộng getter/setter. Không phải. `private` l
+Rewrite both. Write:
+  /tmp/rt_48_oop-solid-design-pattern/oop-solid-design-pattern.en.md
+  /tmp/rt_48_oop-solid-design-pattern/oop-solid-design-pattern.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

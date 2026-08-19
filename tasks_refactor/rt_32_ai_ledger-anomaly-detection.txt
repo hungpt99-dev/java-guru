@@ -1,0 +1,277 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #32: ai/ledger-anomaly-detection
+CURRENT EN FILE (rewrite to /tmp/rt_32_ledger-anomaly-detection/ledger-anomaly-detection.en.md):
+=== EN CURRENT ===
+---
+title: "Catching Ledger Anomalies in Real Time with ML and Prometheus"
+description: "How FinPay's ledger-service streams Kafka events through an anomaly model and exposes Prometheus metrics for Grafana alerting."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> **Repository:** https://github.com/finpay-lab/ledger-service
+
+# AI-3: Ledger and Kafka Anomaly Detection with Prometheus
+
+A ledger is the last place you want an LLM making decisions. This post explains how FinPay's `ledger-service` integrates AI without giving it the keys to the money room: we feed Kafka ledger events to an anomaly scorer, export the verdicts to Prometheus, and keep every AI touchpoint behind guardrails, ports, and a paper trail.
+
+## 1. The problem
+
+`ledger-service` is a Spring Boot service that double-posts every payment (`debit`/`credit`) in a single database transaction, streams those events to Kafka (`ledger.events`), and makes them searchable in OpenSearch. The business asked for an early-warning system: *"Flag suspicious ledger patterns the moment they land, before reconciliation and before the batch job at 2 AM."*
+
+We evaluated several signal sources: deterministic rules first, then a statistical baseline, and finally an LLM scorer on top of those. The product decision was:
+
+> AI should never decide a money outcome. It produces a *signal*; humans and deterministic policy make the *decision*.
+
+Everything below describes the architecture that makes that sentence true in production.
+
+## 2. The money path is sacred
+
+The core invariant of the service:
+
+```java
+// application/PostingService.java — money path, 3-15ms, one DB transaction.
+@Transactional
+public void post(LedgerCommand cmd) {
+    ledger.entry(new Entry(cmd.eventId(), DEBIT,  cmd.partyId(), cmd.amount()));
+    ledger.entry(new Entry(cmd.eventId(), CREDIT, cmd.counterparty(), cmd.amount()));
+}
+```
+
+Any work we add to this path competes for the same DB transaction, connection, and row locks. The first (naive) AI integration we wrote — shown below only to illustrate what *not* to do — violated every one of those constraints.
+
+## 3. WRONG: the naive synchronous integration
+
+```java
+// WRONG — never do this. AI inline on the money path, key hardcoded, no guardrails.
+public class PaymentProcessor {
+
+    private static final String OPENAI_API_KEY = "sk-proj-..."; // !! hardcoded secret
+
+    private static final String PROMPT = """
+        You are a payments fraud expert.
+        Amount %.2f, party %s, counterparty %s.
+        Answer exactly YES or NO: is this suspicious?
+        """;
+
+    @Transactional
+    public void postLedger(PaymentEvent event) {
+        ledger.post(debit(event), credit(event)); // 1. money path first — but then we block
+
+        // 2. !! synchronous LLM call INSIDE the DB transaction, no timeout, no breaker
+        String answer = openAiClient.ask(String.format(PROMPT,
+                event.amount(), event.partyId(), event.counterparty()), OPENAI_API_KEY);
+
+        // 3. !! the LLM implicitly becomes a money decider — it freezes funds
+        if ("YES".equals(answer)) {
+            fundsService.hold(event.eventId());
+        }
+
+        // 4. !! retries happen synchronously: 5 attempts x 3s = 15s of held row locks
+        auditRepo.save(new AuditRow(event.eventId(), answer)); // and audit rides the money tx
+    }
+}
+```
+
+Here's what's wrong, in order of severity:
+
+- **The LLM is on the money path.** The DB transaction stays open while we wait on a third-party API. A 2-second LLM p95 becomes 2 seconds of held row locks, connection-pool exhaustion, and a slower ledger for everyone.
+- **No timeout, no circuit breaker, no degradation.** When OpenAI is down, the ledger is down with it. A monitoring AI must never become a second point of failure.
+- **The key is hardcoded.** It will be committed, scanned by secret scanners, rotated, and leaked. It also means every deploy ships the same static credential — the opposite of BYOK (Bring Your Own Key).
+- **AI silently decides money.** `fundsService.hold(...)` fires with no deterministic override and no human step. There is no separation between "signal" and "decision".
+- **No idempotency.** Kafka is at-least-once; a redelivery posts the entry twice and calls `hold` twice. Replays become financial bugs.
+- **Audit rides the money transaction.** If the LLM hangs, the audit never writes. The paper trail disappears exactly when something goes wrong.
+
+## 4. The guardrails we commit to
+
+Before writing any "RIGHT" code, we wrote down the rules that shape it. These are product-level, not code-level:
+
+1. **AI is not a money decider.** It emits a signal; a separate deterministic policy and a human approval flow own the money outcome.
+2. **Idempotent by `eventId`.** Every consumer, every store, every external side effect must be safe to replay.
+3. **Timeout -> retry -> circuit breaker**, in that order, and a deterministic fallback so an AI outage degrades, never blocks.
+4. **BYOK; the key is never hardcoded or logged.** The key is injected at runtime from a secret store; any accidental log output is redacted.
+5. **Audit every decision.** Each score is a versioned, append-only record with the input evidence, model, verdict, and timestamp.
+6. **The AI path is fully instrumented.** Latency, failures, and anomaly rate go to Prometheus so we can alert on the monitor itself.
+
+## 5. RIGHT: hexagonal ports, adapters live in infrastructure
+
+We split the codebase along hexagonal boundaries. `domain/` owns the models and **ports** (interfaces). `infrastructure/` owns the **adapters** (Kafka, OpenAI, OpenSearch, and Micrometer). The domain core knows nothing about HTTP, JSON, Kafka, or AI SDKs, which makes the fallback, testing, and replacement straightforward.
+
+```
+com.finpay.ledger
+├── domain/
+│   ├── model/              # LedgerEvent, AnomalyScore, AnomalyRecord
+│   └── port/               # AnomalyScorer, AnomalyStore, AuditTrail   <- ports (pure)
+├── application/            # orchestration: PostingService, DetectAnomalyService
+└── infrastructure/
+    ├── kafka/              # LedgerEventListener (adapter)
+    ├── ai/                 # OpenAiAnomalyScorer, RuleBasedScorer (adapters)
+    ├── opensearch/         # OpenSearchAnomalyStore (adapter)
+    ├── audit/              # AuditTrailImpl (adapter)
+    └── metrics/            # Prometheus registration (adapter)
+```
+
+The ports:
+
+```java
+// domain/port/AnomalyScorer.java
+package com.finpay.ledger.domain.port;
+
+import com.finpay.ledger.domain.model.AnomalyScore;
+import com.finpay.ledger.domain.model.LedgerEvent;
+
+public interface AnomalyScorer {
+    AnomalyScore score(LedgerEvent event);
+}
+
+// domain/port/AnomalyStore.java
+package com.finpay.ledger.domain.port;
+
+import com.finpay.ledger.domain.model.AnomalyRecord;
+
+public interface AnomalyStore {
+    boolean exists(String eventId);
+    void save(AnomalyRecord record);
+}
+
+// domain/port/AuditTrail.java
+package com.finpay.ledger.domain
+=== VI CURRENT ===
+---
+title: "Catching Ledger Anomalies in Real Time with ML and Prometheus"
+description: "Cách ledger-service của FinPay đưa các sự kiện Kafka qua mô hình phát hiện bất thường và xuất metric Prometheus để Grafana cảnh báo."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> **Repository:** https://github.com/finpay-lab/ledger-service
+
+# AI-3: Phát hiện bất thường trong Ledger và Kafka với Prometheus
+
+Sổ cái (ledger) là nơi cuối cùng bạn muốn một LLM đưa ra quyết định. Bài viết này giải thích cách `ledger-service` của FinPay tích hợp AI mà không trao cho nó chìa khóa của "phòng tiền": chúng tôi đưa các sự kiện ledger từ Kafka vào bộ chấm điểm bất thường (anomaly scorer), xuất kết quả sang Prometheus và bảo đảm mọi điểm chạm AI đều nằm sau các guardrail, port và một dấu vết đầy đủ.
+
+## 1. Vấn đề
+
+`ledger-service` là một dịch vụ Spring Boot ghi kép (double-entry) mọi giao dịch thanh toán (`debit`/`credit`) trong một transaction DB duy nhất, stream các sự kiện đó sang Kafka (`ledger.events`) và cung cấp chúng để tìm kiếm trong OpenSearch. Nghiệp vụ yêu cầu một hệ thống cảnh báo sớm: *"gắn cờ các mẫu ledger đáng ngờ ngay khi chúng xuất hiện, trước khi đối soát và trước batch job lúc 2 giờ sáng."*
+
+Chúng tôi đã đánh giá một số nguồn tín hiệu: trước tiên là các luật xác định (deterministic rules), sau đó là một baseline thống kê và cuối cùng là bộ chấm điểm LLM ở lớp trên cùng. Quyết định về sản phẩm là:
+
+> AI không bao giờ được quyết định kết quả về tiền. AI tạo ra *tín hiệu*; con người và chính sách xác định mới là bên ra *quyết định*.
+
+Phần dưới đây trình bày kiến trúc biến nguyên tắc đó thành hiện thực trong môi trường production.
+
+## 2. Luồng tiền là thiêng liêng
+
+Bất biến cốt lõi của dịch vụ:
+
+```java
+// application/PostingService.java — luồng tiền, 3-15ms, một transaction DB.
+@Transactional
+public void post(LedgerCommand cmd) {
+    ledger.entry(new Entry(cmd.eventId(), DEBIT,  cmd.partyId(), cmd.amount()));
+    ledger.entry(new Entry(cmd.eventId(), CREDIT, cmd.counterparty(), cmd.amount()));
+}
+```
+
+Bất kỳ công việc nào được thêm vào luồng này đều phải dùng chung transaction DB, connection và row lock. Bản tích hợp AI đầu tiên (ngây thơ) mà chúng tôi viết — được trình bày bên dưới chỉ để minh họa điều *không nên* làm — đã vi phạm tất cả các ràng buộc đó.
+
+## 3. WRONG: tích hợp đồng bộ ngây thơ
+
+```java
+// WRONG — đừng bao giờ làm thế này. AI nằm ngay trên luồng tiền, key hardcode, không guardrail.
+public class PaymentProcessor {
+
+    private static final String OPENAI_API_KEY = "sk-proj-..."; // !! bí mật hardcode
+
+    private static final String PROMPT = """
+        You are a payments fraud expert.
+        Amount %.2f, party %s, counterparty %s.
+        Answer exactly YES or NO: is this suspicious?
+        """;
+
+    @Transactional
+    public void postLedger(PaymentEvent event) {
+        ledger.post(debit(event), credit(event)); // 1. luồng tiền trước — nhưng rồi ta block
+
+        // 2. !! gọi LLM đồng bộ NGAY TRONG transaction DB, không timeout, không breaker
+        String answer = openAiClient.ask(String.format(PROMPT,
+                event.amount(), event.partyId(), event.counterparty()), OPENAI_API_KEY);
+
+        // 3. !! LLM ngầm trở thành người quyết định tiền — nó đóng băng quỹ
+        if ("YES".equals(answer)) {
+            fundsService.hold(event.eventId());
+        }
+
+        // 4. !! retry đồng bộ: 5 lần x 3s = 15s giữ nguyên row lock
+        auditRepo.save(new AuditRow(event.eventId(), answer)); // và audit bị ghép vào transaction tiền
+    }
+}
+```
+
+Những điểm sai ở đây, theo thứ tự mức độ nghiêm trọng:
+
+- **LLM nằm trên luồng tiền.** Transaction DB vẫn mở trong khi chúng ta chờ một API bên thứ ba. Một LLM có p95 là 2 giây sẽ khiến row lock bị giữ trong 2 giây, cạn kiệt connection pool và làm chậm ledger của tất cả mọi người.
+- **Không timeout, không circuit breaker, không suy giảm (degradation).** Khi OpenAI sập, ledger cũng sập theo. Một AI giám sát không bao giờ được trở thành điểm lỗi thứ hai.
+- **Key bị hardcode.** Nó sẽ bị commit, bị quét bởi secret scanner, bị rotate và bị lộ. Nó cũng có nghĩa là mọi lần deploy đều mang theo cùng một credential tĩnh — ngược hẳn với BYOK (Bring Your Own Key).
+- **AI âm thầm quyết định tiền.** `fundsService.hold(...)` được gọi mà không có cơ chế ghi đè xác định và không có bước can thiệp nào của con người. Không có sự tách biệt giữa "tín hiệu" và "quyết định".
+- **Thiếu tính idempotent.** Kafka đảm bảo at-least-once; khi một sự kiện được gửi lại, entry sẽ được ghi hai lần và `hold` được gọi hai lần. Replay trở thành lỗi tài chính.
+- **Audit bám theo transaction tiền.** Nếu LLM treo, audit sẽ không bao giờ được ghi. Dấu vết giấy tờ biến mất đúng lúc có sự cố.
+
+## 4. Các guardrail chúng tôi cam kết
+
+Trước khi viết bất kỳ code "RIGHT" nào, chúng tôi viết ra các quy tắc định hình nó. Đây là những quy tắc ở cấp sản phẩm, không phải cấp code:
+
+1. **AI không phải là người quyết định tiền.** AI phát ra tín hiệu; một chính sách xác định riêng và một quy trình phê duyệt của con người nắm quyền quyết định kết quả về tiền.
+2. **Idempotent theo `eventId`.** Mọi consumer, mọi store, mọi side effect bên ngoài đều phải an toàn khi replay.
+3. **Timeout -> retry -> circuit breaker**, theo đúng thứ tự đó, kèm một fallback xác định để khi AI sập thì hệ thống suy giảm, không bao giờ block.
+4. **BYOK; key không bao giờ được hardcode hoặc ghi log.** Key được tiêm vào lúc chạy từ một secret store; mọi nội dung vô tình xuất hiện trong log đều được che đi.
+5. **Audit mọi quyết định.** Mỗi điểm số là một bản ghi có phiên bản (versioned), chỉ ghi thêm (append-only), kèm theo bằng chứng đầu vào, model, phán quyết và timestamp.
+6. **Đường AI được đo lường đầy đủ.** Độ trễ, lỗi và tỷ lệ bất thường được đưa lên Prometheus để chúng ta có thể đặt cảnh báo (alert) cho chính kẻ giám sát.
+
+## 5. RIGHT: các cổng hexagonal, adapter nằm trong infrastructure
+
+Chúng tôi tách codebase theo ranh giới hexagonal. `domain/` sở hữu các model và **port** (interface). `infrastructure/` sở hữu các **adapter** (Kafka, OpenAI, OpenSearch và Micrometer). Lõi domain không biết gì về HTTP, JSON, Kafka hay AI SDK; nhờ đó, việc fallback, kiểm thử và thay thế trở nên đơn giản.
+
+```
+com.finpay.ledger
+├── domain/
+│   ├── model/              # LedgerEvent, AnomalyScore, AnomalyRecord
+│   └── port/               # AnomalyScorer, AnomalyStore, AuditTrail   <- ports (thuần)
+├── application/            # orchestration: PostingService, DetectAnomalyService
+└── infrastructure/
+    ├── kafka/              # LedgerEventListener (adapter)
+    ├── ai/                 # OpenAiAnomalyScorer, RuleBasedScorer (adapter)
+    ├── opensearch/         # OpenSearchAnomalyStore (adapter)
+    ├── audit/              # AuditTrailImpl (adapter)
+    └── metrics/            # Prometheus registration (adapter)
+```
+
+Các port:
+
+```java
+// domain/port/AnomalyScorer.java
+package com.finpay.ledger.domain.port;
+
+import com.finpay.ledger.domain.model.
+Rewrite both. Write:
+  /tmp/rt_32_ledger-anomaly-detection/ledger-anomaly-detection.en.md
+  /tmp/rt_32_ledger-anomaly-detection/ledger-anomaly-detection.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

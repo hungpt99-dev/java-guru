@@ -1,0 +1,105 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #14: system-design/kafka-lessons-only-production-can-teach-you
+CURRENT EN FILE (rewrite to /tmp/rt_14_kafka-lessons-only-production-can-teach-you/kafka-lessons-only-production-can-teach-you.en.md):
+=== EN CURRENT ===
+---
+title: "Kafka: Lessons Only Production Can Teach You"
+description: "No Kafka tutorial prepares you for the 2 AM wake-up call when consumer lag spirals out of control. Hard-earned lessons about Kafka in production."
+pubDatetime: 2026-01-24T07:31:00+07:00
+featured: true
+draft: false
+tags:
+  - kafka
+  - system-design
+  - microservices
+---
+
+## Foreword
+
+No Kafka tutorial prepares you for the 2 AM wake-up call when consumer lag spirals out of control. You open Grafana, see offsets frozen like bronze statues. You restart pods — lag drops slightly then clings back. You scale up consumers — five minutes later, the entire group rebalances continuously, throughput drops to zero. The whole system clinically dead because of a few bad messages.
+
+Kafka on slides is always clean and perfect: at-least-once, offset, partition, consumer group, retry. Every example is tidy, every flow is a "happy path", every error is handled in 3 lines of code.
+
+Kafka in production is different. It doesn't care how thoroughly you've read the documentation. It only cares where you commit offsets wrong, how long you block the poll thread, and how uncontrolled your retries are. It's a battlefield where theory meets reality, where "it works on my machine" gets shattered into pieces.
+
+This article doesn't teach you the Kafka API — hundreds of tutorials already do that. This article records hard-earned lessons only gained after a few real incidents: when data duplicates uncontrollably, messages vanish without a trace, and the entire system freezes because of a seemingly tiny message. These are things not found in official documentation, yet they determine your system's survival.
+
+---
+
+## 1. One Bad Message Can Clog the Entire System
+
+Most tutorials teach you to write consumer handlers following a very elegant formula: deserialize message, call business service, throw exception on error. Code looks clean, runs smoothly locally, QA testing finds no issues.
+
+Production will gift you an expensive lesson: just one message with a "dirty" payload — wrong JSON schema, unexpected null field, unmappable enum value — your handler throws an exception. **Spring Kafka** retries that message (if configured). Handler throws again. This loop continues until... you have to intervene manually.
+
+**Error classification is a survival skill:**
+
+- **Permanent errors (non-retryable):** JSON parse errors, schema violations, validation errors, business logic errors. Retrying 1,000 times won't make that JSON any more valid. These errors need immediate handling and routing to a Dead Letter Queue.
+- **Transient errors (retryable):** Temporary network errors, database connection timeouts, short deadlocks, temporarily unavailable service dependencies. These may succeed after a controlled number of retries.
+
+**Important note:** **Kafka core has no retry mechanism.** Retry is provided by **client libraries** like Spring Kafka through the `DefaultErrorHandler` mechanism with `RetryTemplate`. Without proper configuration, exceptions will block the consumer loop.
+
+**Schema Registry is your first shield:** Use Schema Registry with STRONG compatibility mode to catch schema errors at the producer side. Invalid messages get rejected before entering the topic, never reaching your consumer. This is proactive defense rather than reactive handling.
+
+**Handle correctly from the start:** Permanent error messages must go straight to DLQ with full metadata — what error, when, retry count, and most importantly: can it be replayed? Don't let one bad message block an entire partition. Commit its offset after appropriate handling so the consumer can continue.
+
+---
+
+## 2. Rebalance Can Destroy Throughput
+
+Rebalance is Kafka's mechanism for redistributing partitions among consumers when the group changes. In production, rebalance happens more often than you think: new deployments, pod restarts, slight network blips, slow consumers.
+
+**Deadly mistake:** You block message processing too long in the poll thread, exceeding `max.poll.interval.ms` (typically 5 minutes). The broker doesn't see heartbeats, thinks the consumer is "dead", kicks it from the group → triggers full rebalance. During rebalance (tens of seconds to minutes), no messages are processed, throughput drops to zero.
+
+**Static Membership — stability savior:** Since Kafka 2.3, you can configure `group.instance.id`. When a consumer restarts with the same instance ID, the broker recognizes it as an "old friend" and allows rejoining without triggering a full group rebalance, as long as the assignment remains valid. This is especially important in container-based deployment environments where pods frequently restart.
+
+**Keep the poll thread lightweight:** The poll thread should only do one thing — fetch messages and send heartbeats. Never process heavy business logic in this thread. Spring Kafka has `ConcurrentKafkaListenerContainerFactory` for parallel processing, but you need to understand how it manages offsets and threads.
+
+**Dynamic configuration tuning:** Reduce `max.poll.records` when processing is slow, increase it when the system is idle. Adjust `fetch.min.bytes` and `fetch.max.wait.ms` to balance latency and throughput based on actual load patterns.
+
+---
+
+## 3. Wrong Retry Kills Downstream
+
+Tutorials often say: "Use exponential backoff, retry 5 times." Sounds reasonable, until you face reality.
+
+Classic production scenario: Downstream service has a 2-second timeout. 1,000 messages all call that endpoint. Each message retries 5 times = 5,000 requests flooding in within minutes. Downstream service dies completely → all messages fail → retry again → creating a **retry storm** that completely destroys the downstream service.
+
+**Retry in Spring Kafka is client-side:** Spring Kafka provides `RetryTemplate` with `ExponentialBackOffPolicy` or `FixedBackOffPolicy`. But immediate retry in the same consumer thread can cause blocking and rebalance.
+
+**Independent retry pipeline — the mature solution:**
+
+- Main consumer only processes messages that succeed on the first attempt
+- On transient error → produce to Retry Topic with timestamp delay (5s, 30s, 2 min, 10 min...)
+- Separate retry consumer processes messages from Retry Topic after the predetermined delay
+- After N failed retries → push to DLQ for manual inspection
+
+**Spring Kafka has built-in retry with backoff:** You can configure `DefaultErrorHandler` with `FixedBackOff` or `ExponentialBackOff`. But be careful: too many retries in the same thread will block processing of other messages.
+
+**Circuit breaker — not a luxury but a necessity:** Monitor error rates in real-time. When the error rate exceeds a threshold (e.g., 50% in 1 minute), automatically pause retries, route messages directly to DLQ. Don't beat a dying service to death.
+
+**Jitter in backoff:** Add randomness to retry intervals to avoid the "thundering herd" phenomenon — all retries happening simultaneously after each cycle.
+
+---
+
+## 4. Consumer Is Not Thread-Safe — How to Commit Offsets
+=== VI CURRENT ===
+(missing)
+Rewrite both. Write:
+  /tmp/rt_14_kafka-lessons-only-production-can-teach-you/kafka-lessons-only-production-can-teach-you.en.md
+  /tmp/rt_14_kafka-lessons-only-production-can-teach-you/kafka-lessons-only-production-can-teach-you.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

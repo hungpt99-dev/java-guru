@@ -1,0 +1,281 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #18: system-design/rate-limiter
+CURRENT EN FILE (rewrite to /tmp/rt_18_rate-limiter/rate-limiter.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a Distributed Rate Limiter"
+description: "A production design for low-latency, globally consistent request limits with bursts, route policies, and explicit failure behavior."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We need a service that answers one question before an API request reaches application code: **may this principal spend one unit of quota now?** A principal can be a user, source IP, API key, or OAuth token. A policy can differ by route, HTTP method, tenant plan, and region.
+
+The service must support token-bucket limits for smooth traffic plus controlled bursts, and sliding-window limits when a product needs a hard count over a time interval. A rejected request receives HTTP `429 Too Many Requests` and a useful `Retry-After` value. Configuration changes must propagate without restarting gateways.
+
+Users are API gateways and internal services; operators are platform and product teams. The limiter is on the synchronous request path, so the primary non-functional requirements are:
+
+| Requirement | Target |
+|---|---|
+| Decision latency | p99 under 1 ms at the gateway, excluding network time to the origin |
+| Decision availability | 99.99% monthly for the limiter path |
+| Counter semantics | One global logical counter per key and policy; bounded, documented cross-region staleness |
+| Scaling | No permanently central hotspot; shard ownership horizontally |
+| Clock behavior | Correctness must not depend on synchronized wall clocks |
+| Safety | A limiter outage must not silently turn into unlimited expensive traffic |
+
+The design separates the fast decision plane from the slower control plane. It also makes fail-open versus fail-closed a policy choice, not an accidental timeout behavior.
+
+## 2. Scale Estimation
+
+Assume 10 million DAU. Each active user makes 100 API requests per day. That gives `10,000,000 x 100 = 1,000,000,000` decisions/day. Dividing by 86,400 seconds gives `11,574` average decisions/s. A 10x peak for launches and diurnal concentration gives `115,740` peak decisions/s. Add 30% headroom: provision for `150,000` decisions/s.
+
+Assume 20% of decisions are API-key or service-token traffic not represented by a user session, so the estimate still covers those requests rather than adding them again. A 90:10 allow-to-reject ratio means about `135,000` allows/s and `15,000` rejects/s at peak. Every request is a counter read and usually a small atomic update, so the decision-plane read:write ratio is approximately `1:1`; configuration reads are cached and are not in this path.
+
+For a token bucket, store key, policy version, token count, and last monotonic timestamp in 40 bytes. With 500 million active keys and two replicas, hot state is `500,000,000 x 40 x 2 = 40 GB` before index and memory overhead. At 2.5x overhead, reserve 100 GB of usable in-memory capacity. Expire idle buckets after 24 hours; this is an activity TTL, not a correctness clock.
+
+If each decision emits a compact 100-byte audit/event record, peak event bandwidth is `150,000 x 100 = 15 MB/s` or 1.296 TB/day uncompressed. Keep detailed decision events sampled, while retaining counters and all rejects. A 7-day compressed event retention at 30% of raw size is roughly `1.296 TB x 7 x 0.3 = 2.72 TB`.
+
+Configuration is small: 100,000 policies at 1 KB is about 100 MB, replicated in the control database and distributed cache. Assume 5% daily key growth: active state grows from 500 million to about 525 million keys after one day unless expiry offsets it. Target 99.99% monthly availability, or about 4.4 minutes of unavailable decision service per 30-day month. The p99 budget is intentionally much tighter than that availability budget because a slow limiter causes an origin-wide outage through connection and thread exhaustion.
+
+## 3. API Design
+
+The gateway calls the decision endpoint with a stable request identity. Authentication is mTLS between gateway and limiter; the limiter does not trust a caller-supplied tenant without validating the signed gateway identity.
+
+```http
+POST /v1/decisions
+Authorization: mTLS
+Content-Type: application/json
+X-Request-Id: 01J...
+Idempotency-Key: gateway-01J...-attempt-1
+
+{
+  "principal_type": "api_key",
+  "principal_id": "key_7f3",
+  "route": "POST:/v1/payments",
+  "region": "sg",
+  "cost": 1
+}
+```
+
+An allowed response is:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"allowed":true,"remaining":39,"limit":40,"reset_at":"2026-08-15T03:01:00Z","policy_version":812}
+```
+
+A rejection is:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 2
+Content-Type: application/json
+
+{"allowed":false,"remaining":0,"limit":40,"retry_after_ms":1840,"policy_version":812}
+```
+
+`cost` supports expensive operations consuming more than one token. The gateway forwards the same `X-Request-Id`; a retry uses the same `Idempotency-Key`. The decision record is deduplicated for a short horizon so a timed-out response does not spend quota twice. This key is not a substitute for the business operation's idempotency key: payment creation still needs its own durable idempotency contract.
+
+For administration:
+
+```http
+PUT /v1/policies/{policy_id}
+If-Match: "policy-version-811"
+
+{"match":{"route":"POST:/v1/payments","plan":"standard"},"algorithm":"token_bucket","rate_per_second":20,"burst":40,"scope":"api_key"}
+```
+
+`PUT` is idempotent and `If-Match` prevents lost updates. Only authorized operators can change policies. A policy is immutable by version; gateways may briefly use the previous version during propagation, with the maximum propagation delay exposed as a metric.
+
+## 4. Data Model
+
+The source of truth is a relational control database. Mutable bucket state lives in a sharded in-memory decision store and is periodically summarized, not synchronously copied into SQL.
+
+```sql
+CREATE TABLE rate_policy (
+  policy_id        BIGINT PRIMARY KEY,
+  version          BIGINT NOT NULL,
+  route_pattern    TEXT NOT NULL,
+  method           TEXT NOT NULL,
+  principal_scope  TEXT NOT NULL,
+  algorithm        TEXT NOT NULL CHECK (algorithm IN ('token_bucket', 'sliding_window')),
+  rate_per_second  NUMERIC,
+  burst            INTEGER,
+  window_seconds   INTEGER,
+  limit_count      INTEGER,
+  state            TEXT NOT NULL CHECK (state IN ('active', 'disabled')),
+  updated_at       TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX rate_policy_version
+  ON rate_policy (policy_id, version);
+
+CREATE INDEX rate_policy_match
+  ON rate_policy (method, route_pattern, principal_scope, state);
+
+CREATE TABLE policy_audit (
+  policy_id BIGINT NOT NULL,
+  version BIGINT NOT NULL,
+  actor TEXT NOT NULL,
+  change_json JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (policy_id, version)
+);
+```
+
+The decision-store key is `hash(tenant_id | principal_type | principal_id | route | policy_id)`. Hash partitioning spreads arbitrary customer traffic and avoids range hotspots caused by sequential IDs. The va
+=== VI CURRENT ===
+---
+title: "Thiết kế Bộ Giới hạn Tốc độ (Rate Limiter) Phân tán"
+description: "Thiết kế production cho giới hạn request có độ trễ thấp và bộ đếm nhất quán toàn cục, hỗ trợ burst, chính sách theo route và hành vi lỗi rõ ràng."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta cần một dịch vụ trả lời một câu hỏi trước khi request API đến code ứng dụng: **principal này có được phép tiêu tốn một đơn vị quota ngay bây giờ không?** Principal có thể là user, địa chỉ IP nguồn, API key hoặc OAuth token. Chính sách có thể khác theo route, HTTP method, gói tenant và region.
+
+Dịch vụ phải hỗ trợ giới hạn token-bucket để điều tiết traffic và cho phép burst có kiểm soát, cùng giới hạn sliding-window khi sản phẩm cần một số đếm cứng trong một khoảng thời gian. Request bị từ chối nhận HTTP `429 Too Many Requests` và giá trị `Retry-After` hữu ích. Thay đổi cấu hình phải được truyền đi mà không cần restart gateway.
+
+Người dùng của dịch vụ là API gateway và service nội bộ; người vận hành là các team platform và product. Limiter nằm trên đường đi đồng bộ của request, vì vậy các yêu cầu phi chức năng chính là:
+
+| Yêu cầu | Mục tiêu |
+|---|---|
+| Độ trễ quyết định | p99 dưới 1 ms tại gateway, không tính thời gian mạng đến origin |
+| Availability của quyết định | 99.99% mỗi tháng cho đường đi limiter |
+| Ngữ nghĩa bộ đếm | Một bộ đếm logic toàn cục cho mỗi key và policy; độ trễ chéo region có giới hạn và được ghi rõ |
+| Khả năng scale | Không có hotspot trung tâm cố định; ownership được chia ngang |
+| Hành vi đồng hồ | Tính đúng không được phụ thuộc vào wall clock đồng bộ |
+| An toàn | Limiter lỗi không được âm thầm biến thành traffic đắt tiền không giới hạn |
+
+Thiết kế tách decision plane nhanh khỏi control plane chậm hơn. Đồng thời, fail-open hay fail-closed là lựa chọn của policy, không phải hệ quả ngẫu nhiên của timeout.
+
+## 2. Scale Estimation
+
+Giả sử có 10 triệu DAU. Mỗi user hoạt động tạo 100 API request mỗi ngày. Như vậy `10,000,000 x 100 = 1,000,000,000` quyết định/ngày. Chia cho 86.400 giây cho `11,574` quyết định/giây trung bình. Dùng đỉnh 10x cho các đợt phát hành và phân bố theo ngày cho `115,740` quyết định/giây lúc cao điểm. Cộng 30% headroom: provision cho `150,000` quyết định/giây.
+
+Giả sử 20% quyết định đến từ API key hoặc service token, không được biểu diễn bởi user session, nên ước tính đã bao phủ các request đó thay vì cộng lại lần nữa. Tỷ lệ allow/reject 90:10 cho khoảng `135,000` allow/giây và `15,000` reject/giây ở đỉnh. Mỗi request là một lần đọc bộ đếm và thường là một lần cập nhật nguyên tử nhỏ, nên read:write của decision plane xấp xỉ `1:1`; config read được cache và không nằm trên đường đi này.
+
+Với token bucket, lưu key, policy version, số token và monotonic timestamp cuối trong 40 byte. Với 500 triệu key đang hoạt động và hai replica, state nóng là `500,000,000 x 40 x 2 = 40 GB`, chưa tính overhead index và memory. Ở mức overhead 2.5x, cần dành 100 GB capacity in-memory usable. Bucket không hoạt động được expire sau 24 giờ; đây là activity TTL, không phải đồng hồ dùng để đảm bảo tính đúng.
+
+Nếu mỗi quyết định phát ra một record audit/event gọn 100 byte, bandwidth event lúc đỉnh là `150,000 x 100 = 15 MB/s`, tương đương 1.296 TB/ngày chưa nén. Giữ event quyết định chi tiết ở dạng sampled, nhưng giữ toàn bộ counter và reject. Retention event nén 7 ngày ở 30% dữ liệu thô xấp xỉ `1.296 TB x 7 x 0.3 = 2.72 TB`.
+
+Config nhỏ: 100.000 policy ở 1 KB là khoảng 100 MB, được replicate trong control database và distributed cache. Giả sử key tăng 5% mỗi ngày: state hoạt động tăng từ 500 triệu lên khoảng 525 triệu key sau một ngày nếu expiry không bù lại. Mục tiêu availability 99.99% mỗi tháng, tương đương khoảng 4,4 phút unavailable trong tháng 30 ngày. Budget p99 cố ý chặt hơn budget availability vì limiter chậm có thể gây outage toàn origin thông qua cạn connection và thread.
+
+## 3. API Design
+
+Gateway gọi endpoint quyết định với identity request ổn định. Authentication giữa gateway và limiter dùng mTLS; limiter không tin tenant do caller tự gửi nếu chưa xác thực identity gateway đã ký.
+
+```http
+POST /v1/decisions
+Authorization: mTLS
+Content-Type: application/json
+X-Request-Id: 01J...
+Idempotency-Key: gateway-01J...-attempt-1
+
+{
+  "principal_type": "api_key",
+  "principal_id": "key_7f3",
+  "route": "POST:/v1/payments",
+  "region": "sg",
+  "cost": 1
+}
+```
+
+Response cho phép là:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"allowed":true,"remaining":39,"limit":40,"reset_at":"2026-08-15T03:01:00Z","policy_version":812}
+```
+
+Response từ chối là:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 2
+Content-Type: application/json
+
+{"allowed":false,"remaining":0,"limit":40,"retry_after_ms":1840,"policy_version":812}
+```
+
+`cost` cho phép thao tác đắt tiền tiêu tốn hơn một token. Gateway chuyển tiếp cùng `X-Request-Id`; retry dùng cùng `Idempotency-Key`. Decision record được deduplicate trong một khoảng ngắn để response timeout không tiêu quota hai lần. Key này không thay thế idempotency key của business operation: việc tạo payment vẫn cần contract idempotency durable riêng.
+
+Với quản trị:
+
+```http
+PUT /v1/policies/{policy_id}
+If-Match: "policy-version-811"
+
+{"match":{"route":"POST:/v1/payments","plan":"standard"},"algorithm":"token_bucket","rate_per_second":20,"burst":40,"scope":"api_key"}
+```
+
+`PUT` là idempotent và `If-Match` ngăn lost update. Chỉ operator được cấp quyền mới đổi được policy. Policy bất biến theo version; gateway có thể dùng version trước trong thời gian ngắn khi propagation, và độ trễ propagation tối đa được xuất thành metric.
+
+## 4. Data Model
+
+Nguồn sự thật là relational control database. Mutable bucket state nằm trong decision store in-memory được shard và được summarize định kỳ, không copy đồng bộ vào SQL.
+
+```sql
+CREATE TABLE rate_policy (
+  policy_id        BIGINT PRIMARY KEY,
+  version          BIGINT NOT NULL,
+  route_pattern    TEXT NOT NULL,
+  method           TEXT NOT NULL,
+  principal_scope  TEXT NOT NULL,
+  algorithm        TEXT NOT NULL CHECK (algorithm IN ('token_bucket', 'sliding_window')),
+  rate_per_second  NUMERIC,
+  burst            INTEGER,
+  window_seconds   INTEGER,
+  limit_count      INTEGER,
+  state            TEXT NOT NULL CHECK (state IN ('active', 'disabled')),
+  updated_at       TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX rate_policy_version
+  ON rate_policy (policy_id, version);
+
+CREATE INDEX rate_policy_match
+  ON rate_policy (method, route_pattern, principal_scope, state);
+
+CREATE TABLE policy_audit (
+  policy_id BIGINT NOT NULL,
+  version BIGINT NOT NULL,
+  actor TEXT NOT NULL,
+  change_json JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (policy_id, version)
+);
+```
+
+Key của decision store là `hash(tenant_id | principal_type | principal_id | route | policy_id)`. Hash partitioning phân tán traffic customer tùy ý và tránh hotspot do ID tuần tự gây ra. Value là `{tokens, last_elapsed_ns, policy_version, dedupe entries}`
+Rewrite both. Write:
+  /tmp/rt_18_rate-limiter/rate-limiter.en.md
+  /tmp/rt_18_rate-limiter/rate-limiter.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,279 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #19: system-design/realtime-chat
+CURRENT EN FILE (rewrite to /tmp/rt_19_realtime-chat/realtime-chat.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a Real-Time Chat System"
+description: "A durable, ordered, multi-device chat architecture for millions of concurrent connections and sub-200 ms message sends."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building chat for a consumer product used by people, support agents, and automated clients. A user can create a 1:1 conversation or a group, send text and media, see presence, receive typing indicators, search recent history, and continue receiving messages after a device has been offline. One account may have several phones, browsers, and desktop clients.
+
+The important guarantees are deliberately scoped:
+
+- Every accepted message is durable and has one order within its conversation.
+- A send is acknowledged after durable commit, not merely after enqueueing in memory.
+- Delivery is at-least-once; clients deduplicate by `message_id` and resume from a cursor.
+- Presence and typing are ephemeral and may be stale. Message history is not.
+- The target is p99 send acknowledgement below 200 ms in-region, millions of concurrent WebSocket connections, durable history, and multi-device synchronization.
+
+The service is not a global total-order broadcast system. Ordering is per conversation, and media bytes are stored outside the message database. This boundary keeps the hard guarantees affordable.
+
+## 2. Scale Estimation
+
+Assumptions are planning inputs, not product facts:
+
+| Quantity | Assumption | Reason |
+|---|---:|---|
+| DAU | 50 million | A large consumer deployment |
+| Active senders/day | 20% of DAU | Many users read without sending |
+| Messages/sender/day | 20 | Includes text and media metadata messages |
+| Average message envelope | 1 KB | Text, IDs, timestamps, and a few attributes |
+| Media attachment average | 2 MB, 5% of messages | Media is object storage, not hot-row storage |
+| Retention | 3 years | Durable product history |
+| Peak multiplier | 10x average | Regional time-zone and event spikes |
+
+Messages/day = `50,000,000 x 20% x 20 = 200,000,000`.
+
+Average message writes = `200,000,000 / 86,400 = 2,315 writes/s`; planning peak = `23,150 writes/s`. A send also creates an outbox event, so the durable write path handles roughly 46,300 row/event writes/s before replication. At-least-once delivery and retries are not counted as new user messages.
+
+Raw message storage for three years = `200,000,000 x 1 KB x 1,095 days = 219 TB` decimal. Add two replicas, indexes, tombstones, and 30% headroom: about `219 x 2 x 1.3 = 569 TB`. Media storage = `200,000,000 x 5% x 2 MB x 1,095 = 21.9 PB` before lifecycle compression or deletion; it belongs in object storage with a CDN.
+
+At peak, message ingress is about `23,150 x 1 KB = 23 MB/s` (184 Mb/s) and media upload traffic is approximately `1,158 x 2 MB = 2.3 GB/s` if the same peak factor applies. Direct-to-object-storage multipart upload is therefore mandatory. A typical active user has 12 conversation reads/day, or 600 million reads/day, 6,944 average read requests/s and about 69,440 peak requests/s. The read:write request ratio is approximately 3:1 after excluding WebSocket frames.
+
+For 10 million concurrently connected clients, assuming 20% are connected in each region, four regions hold 2 million sockets each. At 4 KB/s average outbound traffic per connected client (presence, typing, and messages), egress is 8 GB/s per region at that occupancy. The availability objective is 99.99% for message acceptance and history reads; presence can have a lower 99.9% objective because it is recoverable.
+
+Traffic grows with DAU and engagement. Capacity is provisioned for 2x the forecast peak, and a 100% annual growth review is a trigger to add shards rather than stretch a cluster past its failure domain.
+
+## 3. API Design
+
+HTTP APIs authenticate with a short-lived access token; WebSocket upgrade uses the same token. Every mutating request accepts an idempotency key scoped to the authenticated user.
+
+```http
+POST /v1/conversations
+Authorization: Bearer <token>
+Idempotency-Key: 7d2e...
+Content-Type: application/json
+
+{"type":"group","member_ids":["u2","u3"],"title":"Project"}
+```
+
+```json
+{"conversation_id":"c_91","created_at":"2026-08-15T03:00:00Z","last_seq":0}
+```
+
+```http
+POST /v1/conversations/{conversation_id}/messages
+Authorization: Bearer <token>
+Idempotency-Key: client-device-42:local-881
+Content-Type: application/json
+
+{"client_message_id":"local-881","text":"hello","attachments":[]}
+```
+
+```json
+{"message_id":"m_7","conversation_id":"c_91","seq":1842,"sender_id":"u1","text":"hello","created_at":"2026-08-15T03:00:01Z"}
+```
+
+`POST /v1/media/upload-sessions` returns a bounded, authenticated object-storage upload URL. The client then sends the resulting object ID in the message request. `GET /v1/conversations/{id}/messages?after_seq=1830&limit=50` returns messages and `next_after_seq`; the server caps `limit` at 100. `POST /v1/conversations/{id}/read-cursors` stores a device cursor. `GET /v1/conversations?cursor=...` lists memberships and last-read state.
+
+The WebSocket endpoint is `GET /v1/realtime` with subprotocol `chat.v1`. Frames are `message.new`, `message.ack`, `typing.start/stop`, `presence.update`, and `sync.required`. A reconnect sends `{"type":"resume","conversation_cursors":{"c_91":1840}}`; the server replays from history and then switches to live delivery. Clients acknowledge delivery with `message.received` but never treat delivery acknowledgement as durable send acknowledgement.
+
+## 4. Data Model
+
+The authoritative store is a distributed SQL database. Conversation membership and message metadata need transactions and predictable conditional writes; object storage holds media.
+
+```sql
+CREATE TABLE conversations (
+  conversation_id UUID PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('direct', 'group')),
+  created_at TIMESTAMPTZ NOT NULL,
+  next_seq BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE conversation_members (
+  conversation_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  role TEXT NOT NULL,
+  joined_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (conversation_id, user_id)
+);
+CREATE INDEX members_by_user ON conversation_members (user_id, conversation_id);
+
+CREATE TABLE messages (
+  conversation_id UUID NOT NULL,
+  seq BIGINT NOT NULL,
+  message_id UUID NOT NULL,
+  sender_id UUID NOT NULL,
+  client_message_id TEXT NOT NULL,
+  body JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (conversation_id, seq),
+  UNIQUE (sender_id, client_message_id)
+);
+CREATE INDEX messages_by_id ON messages (message_id);
+
+CREATE TABLE outbox (
+  event_id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL,
+  seq BIGINT NOT NULL,
+  payload JSONB NOT NULL,
+  published_at TIMESTAMPTZ NULL,
+  UNIQUE (conversation_id, seq)
+);
+```
+
+`(conversation_id, seq)` makes history scans ordered and local to a conversation. `members_by_user` answers login fan-out and membership checks; the primary key answers “who is in this group?” The sender/c
+=== VI CURRENT ===
+---
+title: "Thiết kế Hệ thống Chat Thời gian Thực (Real-Time Chat)"
+description: "Kiến trúc chat bền vững, có thứ tự và đa thiết bị cho hàng triệu kết nối đồng thời với thời gian xác nhận gửi dưới 200 ms."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng tính năng chat cho một sản phẩm người dùng cuối, nơi người dùng, nhân viên hỗ trợ và client tự động có thể trao đổi. Người dùng có thể tạo cuộc trò chuyện 1:1 hoặc nhóm, gửi văn bản và media, xem presence, nhận typing indicator, đọc lịch sử gần đây và tiếp tục nhận tin sau khi một thiết bị offline. Một tài khoản có thể có nhiều điện thoại, trình duyệt và client desktop.
+
+Các đảm bảo quan trọng được giới hạn có chủ ý:
+
+- Mỗi tin nhắn được chấp nhận đều bền vững và có một thứ tự trong cuộc trò chuyện của nó.
+- Send chỉ được xác nhận sau khi commit bền vững, không phải chỉ sau khi đưa vào bộ nhớ.
+- Delivery là at-least-once; client khử trùng lặp bằng `message_id` và tiếp tục từ cursor.
+- Presence và typing là dữ liệu tạm thời, có thể cũ. Lịch sử tin nhắn thì không.
+- Mục tiêu là p99 xác nhận gửi dưới 200 ms trong cùng region, hàng triệu WebSocket đồng thời, lịch sử bền vững và đồng bộ đa thiết bị.
+
+Đây không phải hệ thống broadcast có một total order toàn cầu. Thứ tự chỉ được đảm bảo theo từng conversation, còn byte media nằm ngoài message database. Ranh giới này giữ chi phí của các đảm bảo khó ở mức hợp lý.
+
+## 2. Scale Estimation
+
+Các giả định là đầu vào để lập kế hoạch, không phải dữ kiện sản phẩm:
+
+| Quantity | Assumption | Reason |
+|---|---:|---|
+| DAU | 50 million | A large consumer deployment |
+| Active senders/day | 20% of DAU | Many users read without sending |
+| Messages/sender/day | 20 | Includes text and media metadata messages |
+| Average message envelope | 1 KB | Text, IDs, timestamps, and a few attributes |
+| Media attachment average | 2 MB, 5% of messages | Media is object storage, not hot-row storage |
+| Retention | 3 years | Durable product history |
+| Peak multiplier | 10x average | Regional time-zone and event spikes |
+
+Messages/day = `50,000,000 x 20% x 20 = 200,000,000`.
+
+Average message writes = `200,000,000 / 86,400 = 2,315 writes/s`; planning peak = `23,150 writes/s`. Mỗi send cũng tạo một outbox event, do đó durable write path xử lý khoảng 46,300 row/event writes/s trước replication. Delivery at-least-once và retry không được tính là tin nhắn người dùng mới.
+
+Raw message storage trong ba năm = `200,000,000 x 1 KB x 1,095 days = 219 TB` thập phân. Cộng hai replica, index, tombstone và 30% headroom: khoảng `219 x 2 x 1.3 = 569 TB`. Media storage = `200,000,000 x 5% x 2 MB x 1,095 = 21.9 PB` trước lifecycle compression hoặc xóa; phần này thuộc object storage có CDN.
+
+Ở peak, message ingress khoảng `23,150 x 1 KB = 23 MB/s` (184 Mb/s) và media upload khoảng `1,158 x 2 MB = 2.3 GB/s` nếu cùng peak factor. Vì vậy bắt buộc phải upload multipart trực tiếp tới object storage. Một active user điển hình có 12 conversation reads/ngày, tức 600 triệu read/ngày, trung bình 6,944 request/s và peak khoảng 69,440 request/s. Tỷ lệ request read:write xấp xỉ 3:1, chưa tính WebSocket frame.
+
+Với 10 triệu client kết nối đồng thời, giả sử 20% kết nối nằm trong mỗi region, bốn region chứa mỗi region 2 triệu socket. Ở mức trung bình 4 KB/s outbound cho mỗi client kết nối (presence, typing và message), egress là 8 GB/s mỗi region ở mức tải đó. Mục tiêu availability là 99.99% cho message acceptance và history read; presence có thể có mục tiêu thấp hơn là 99.9% vì có thể khôi phục.
+
+Traffic tăng theo DAU và mức tương tác. Capacity được cấp cho 2x forecast peak, và mức tăng 100% hằng năm là tín hiệu cần thêm shard thay vì kéo dài một cluster vượt quá failure domain.
+
+## 3. API Design
+
+HTTP API xác thực bằng access token sống ngắn; WebSocket upgrade dùng cùng token. Mọi request thay đổi dữ liệu nhận một idempotency key có phạm vi theo authenticated user.
+
+```http
+POST /v1/conversations
+Authorization: Bearer <token>
+Idempotency-Key: 7d2e...
+Content-Type: application/json
+
+{"type":"group","member_ids":["u2","u3"],"title":"Project"}
+```
+
+```json
+{"conversation_id":"c_91","created_at":"2026-08-15T03:00:00Z","last_seq":0}
+```
+
+```http
+POST /v1/conversations/{conversation_id}/messages
+Authorization: Bearer <token>
+Idempotency-Key: client-device-42:local-881
+Content-Type: application/json
+
+{"client_message_id":"local-881","text":"hello","attachments":[]}
+```
+
+```json
+{"message_id":"m_7","conversation_id":"c_91","seq":1842,"sender_id":"u1","text":"hello","created_at":"2026-08-15T03:00:01Z"}
+```
+
+`POST /v1/media/upload-sessions` trả về URL upload tới object storage có xác thực và giới hạn. Sau đó client gửi object ID trong message request. `GET /v1/conversations/{id}/messages?after_seq=1830&limit=50` trả về message và `next_after_seq`; server giới hạn `limit` ở 100. `POST /v1/conversations/{id}/read-cursors` lưu device cursor. `GET /v1/conversations?cursor=...` liệt kê membership và last-read state.
+
+WebSocket endpoint là `GET /v1/realtime` với subprotocol `chat.v1`. Frame gồm `message.new`, `message.ack`, `typing.start/stop`, `presence.update` và `sync.required`. Khi reconnect, client gửi `{"type":"resume","conversation_cursors":{"c_91":1840}}`; server replay từ history rồi chuyển sang live delivery. Client acknowledge bằng `message.received` nhưng không bao giờ coi delivery acknowledgement là durable send acknowledgement.
+
+## 4. Data Model
+
+Authoritative store là distributed SQL database. Membership và message metadata cần transaction cùng conditional write dễ dự đoán; object storage giữ media.
+
+```sql
+CREATE TABLE conversations (
+  conversation_id UUID PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('direct', 'group')),
+  created_at TIMESTAMPTZ NOT NULL,
+  next_seq BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE conversation_members (
+  conversation_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  role TEXT NOT NULL,
+  joined_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (conversation_id, user_id)
+);
+CREATE INDEX members_by_user ON conversation_members (user_id, conversation_id);
+
+CREATE TABLE messages (
+  conversation_id UUID NOT NULL,
+  seq BIGINT NOT NULL,
+  message_id UUID NOT NULL,
+  sender_id UUID NOT NULL,
+  client_message_id TEXT NOT NULL,
+  body JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (conversation_id, seq),
+  UNIQUE (sender_id, client_message_id)
+);
+CREATE INDEX messages_by_id ON messages (message_id);
+
+CREATE TABLE outbox (
+  event_id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL,
+  seq BIGINT NOT NULL,
+  payload JSONB NOT NULL,
+  published_at TIMESTAMPTZ NULL,
+  UNIQUE (conversation_id, seq)
+);
+```
+
+`(conversation_id, seq)` khiến history scan có thứ tự và nằm cục bộ theo conversation. `members_by_user` phục vụ fan-out lúc login và kiểm tra membership; primary key phục vụ truy vấn “ai thuộc group này?”. Unique key sender/client khiến HTTP retry trả lại message ban đầu thay vì cấp sequence khác. `messages_by_id` phục 
+Rewrite both. Write:
+  /tmp/rt_19_realtime-chat/realtime-chat.en.md
+  /tmp/rt_19_realtime-chat/realtime-chat.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

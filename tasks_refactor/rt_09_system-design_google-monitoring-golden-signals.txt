@@ -1,0 +1,183 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #9: system-design/google-monitoring-golden-signals
+CURRENT EN FILE (rewrite to /tmp/rt_9_google-monitoring-golden-signals/google-monitoring-golden-signals.en.md):
+=== EN CURRENT ===
+---
+title: "Monitoring Distributed Systems: Google's Four Golden Signals"
+description: "A source-backed guide to monitoring latency, traffic, errors, saturation, and turning SLO evidence into actionable alerts."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] Monitoring a distributed service means collecting, processing, aggregating, and displaying real-time quantitative data such as query counts, error counts, processing times, and server lifetimes. The engineering problem is not to collect every possible signal; it is to identify what is broken, help explain why, and interrupt a human only when action is urgent and user-visible. [Source: Google, “Monitoring Distributed Systems,” https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[SOURCE FACT] A page is expensive: frequent pages cause people to skim or ignore alerts, and noise can mask a real incident. The source therefore describes effective alerting as high signal with very low noise, and says every page should be actionable. [Source: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[ANALYSIS] Distributed systems make this harder because a frontend symptom may be a backend cause, while retries can hide failures at one layer. A monitoring design must preserve both the user’s experience and enough internal evidence to debug the dependency chain without making the paging path depend on a fragile causal model.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] The article describes Google SRE’s monitoring principles, not a complete named production architecture. It distinguishes white-box monitoring, based on internals such as logs and instrumented HTTP endpoints, from black-box monitoring, which tests externally visible behavior as a user would see it. Google SRE uses heavy white-box monitoring and modest but critical black-box monitoring. [Source: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[SOURCE FACT] The four golden signals are latency, traffic, errors, and saturation. If only four metrics can be measured for a user-facing system, the source recommends focusing on these. [Source: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+- [SOURCE FACT] **Latency** is request service time. Successful and failed request latency should be distinguished; a fast HTTP 500 is still a failure, while a slow error is worse than a fast error.
+- [SOURCE FACT] **Traffic** measures demand using a system-specific high-level metric, such as requests per second, concurrent sessions, or transactions per second.
+- [SOURCE FACT] **Errors** include explicit failures, implicit wrong results, and policy failures such as exceeding a committed response-time objective.
+- [SOURCE FACT] **Saturation** measures how full the service is, emphasizing its most constrained resource. Systems can degrade before 100% utilization, so a utilization target matters.
+
+[SOURCE FACT] The source recommends histograms or latency buckets rather than relying on a mean. It also recommends simple, predictable, robust rules for paging, with dashboards and post hoc analysis supporting diagnosis. [Source: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[ANALYSIS] The transferable design is a separation of concerns: user-facing symptoms drive paging; white-box causes enrich investigation; dashboards expose ongoing subcritical conditions; longer-horizon data supports capacity planning.
+
+## 3. Architecture Diagram
+
+[ANALYSIS] The diagram separates the source-backed monitoring concepts from an implementation proposed for an interview or a new service. The source does not claim this exact component topology is used by Google.
+
+```mermaid
+flowchart LR
+    U[Users] --> S[Distributed service]
+    S --> B[Black-box probes\n[Source-backed component]]
+    S --> W[White-box instrumentation\n[Source-backed component]]
+    B --> C[Metric collection and aggregation\n[Source-backed component]]
+    W --> C
+    C --> H[Latency histogram + golden-signal series\n[Proposed component]]
+    H --> D[Dashboards and retrospective analysis\n[Source-backed component]]
+    H --> R[Simple alert rules\n[Source-backed component]]
+    R --> P[Pager / ticket / email\n[Source-backed component]]
+    H --> E[SLO/error-budget evaluator\n[Proposed component]]
+    E --> R
+    W --> X[Logs and dependency evidence\n[Source-backed component]]
+    X --> D
+```
+
+[SOURCE FACT] The source defines dashboards as summary views of core service metrics and classifies human notifications as pages, tickets, or email alerts. It also says basic collection, aggregation, alerting, and dashboards work well as a relatively standalone system. [Source: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[PROPOSED DESIGN] The SLO/error-budget evaluator is an explicit component here so that policy errors and user-visible availability can be computed consistently. It is an extension of the source’s SLO-oriented alerting discussion, not a claim about Google’s internal binaries.
+
+## 4. System Design Analysis
+
+[SOURCE FACT] Monitoring must answer two questions: “what’s broken?” and “why?” The source calls the first a symptom and the second a cause. It warns that dependency-based alerting hierarchies are difficult to maintain in systems that are continuously refactored. [Source: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[ANALYSIS] A practical pipeline should therefore have two paths:
+
+- A low-complexity symptom path for paging: end-to-end probe success, request latency, and user-visible error rate.
+- A rich diagnostic path for dashboards: dependency latency, retry counts, queue depth, resource utilization, logs, and deploy markers.
+
+[SOURCE FACT] Black-box monitoring is useful for active user symptoms but is weak for imminent problems; white-box monitoring can expose imminent failures and failures masked by retries. [Source: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[PROPOSED DESIGN] Attach a stable service, route, status-class, and region identity to each metric, but control cardinality. Keep request IDs and detailed payload context in logs or traces rather than metric labels. A page should identify the affected service and symptom, link to the relevant dashboard, and state the first safe action.
+
+[PROPOSED DESIGN] Define an SLI as the measured indicator, such as the proportion of eligible requests that complete successfully within a latency objective. Define the SLO as the target over a stated window. Keep the SLI computation reproducible from the same request classification used by dashboards and alerts; otherwise, an SLO report can disagree with the page that caused the investigation.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] A minimal time-series record can be represented as:
+
+```sql
+CREATE TABLE metric_sample (
+  observed_at TIMESTAMP NOT NULL,
+  service TEXT NOT NULL,
+  signal TEXT NOT NULL,        
+=== VI CURRENT ===
+---
+title: "Giám sát Hệ thống Phân tán: Bốn Tín hiệu Vàng của Google SRE"
+description: "Hướng dẫn dựa trên nguồn về latency, traffic, errors, saturation và cách biến bằng chứng SLO thành cảnh báo có thể hành động."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] Giám sát một dịch vụ phân tán là việc thu thập, xử lý, tổng hợp và hiển thị dữ liệu định lượng theo thời gian thực, chẳng hạn số lượng và loại truy vấn, số lượng và loại lỗi, thời gian xử lý và vòng đời máy chủ. Bài toán kỹ thuật không phải là thu thập mọi tín hiệu có thể có; đó là xác định điều gì đang hỏng, hỗ trợ giải thích nguyên nhân, và chỉ làm gián đoạn con người khi hành động là khẩn cấp và có thể nhìn thấy từ phía người dùng. [Nguồn: Google, “Monitoring Distributed Systems,” https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[SOURCE FACT] Một page có chi phí cao: page thường xuyên khiến con người đọc lướt hoặc bỏ qua cảnh báo, và nhiễu có thể che khuất sự cố thật. Vì vậy, nguồn mô tả hệ thống cảnh báo hiệu quả là hệ thống có tín hiệu cao, nhiễu rất thấp, đồng thời nói rằng mỗi page phải có thể hành động được. [Nguồn: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[ANALYSIS] Hệ thống phân tán làm bài toán khó hơn vì symptom ở frontend có thể là cause ở backend, trong khi retry có thể che giấu lỗi tại một tầng. Thiết kế giám sát phải bảo toàn cả trải nghiệm người dùng lẫn bằng chứng nội bộ đủ để gỡ lỗi chuỗi dependency, nhưng không được khiến đường đi của page phụ thuộc vào một mô hình nhân quả mong manh.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] Bài viết mô tả các nguyên tắc giám sát của Google SRE, không mô tả một kiến trúc production hoàn chỉnh có tên riêng. Bài viết phân biệt white-box monitoring, dựa trên nội bộ như log và HTTP endpoint có instrument, với black-box monitoring, kiểm tra hành vi bên ngoài mà người dùng nhìn thấy. Google SRE sử dụng nhiều white-box monitoring và một lượng black-box monitoring vừa phải nhưng then chốt. [Nguồn: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[SOURCE FACT] Bốn tín hiệu vàng là latency, traffic, errors và saturation. Nếu chỉ có thể đo bốn metric cho một hệ thống hướng người dùng, nguồn khuyến nghị tập trung vào bốn tín hiệu này. [Nguồn: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+- [SOURCE FACT] **Latency** là thời gian phục vụ request. Cần phân biệt latency của request thành công và thất bại; HTTP 500 nhanh vẫn là thất bại, còn một lỗi chậm tệ hơn lỗi nhanh.
+- [SOURCE FACT] **Traffic** đo nhu cầu bằng metric cấp cao phù hợp với hệ thống, như request mỗi giây, phiên đồng thời hoặc transaction mỗi giây.
+- [SOURCE FACT] **Errors** bao gồm lỗi tường minh, kết quả sai dù giao thức báo thành công, và lỗi theo policy như vượt quá mục tiêu thời gian phản hồi đã cam kết.
+- [SOURCE FACT] **Saturation** đo mức độ đầy của dịch vụ, tập trung vào resource bị giới hạn nhất. Hệ thống có thể suy giảm trước khi utilization đạt 100%, nên cần có utilization target.
+
+[SOURCE FACT] Nguồn khuyến nghị dùng histogram hoặc bucket latency thay vì chỉ dựa vào mean. Nguồn cũng khuyến nghị các rule page đơn giản, dễ dự đoán và bền vững, trong khi dashboard và phân tích hậu kiểm hỗ trợ chẩn đoán. [Nguồn: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[ANALYSIS] Thiết kế có thể áp dụng rộng rãi là tách các mối quan tâm: symptom hướng tới người dùng quyết định page; cause từ white-box làm giàu điều tra; dashboard hiển thị điều kiện chưa nghiêm trọng; dữ liệu dài hạn hỗ trợ capacity planning.
+
+## 3. Architecture Diagram
+
+[ANALYSIS] Sơ đồ tách các khái niệm được nguồn hỗ trợ khỏi implementation được đề xuất cho phỏng vấn hoặc dịch vụ mới. Nguồn không khẳng định Google sử dụng đúng topology thành phần này.
+
+```mermaid
+flowchart LR
+    U[Users] --> S[Distributed service]
+    S --> B[Black-box probes\n[Source-backed component]]
+    S --> W[White-box instrumentation\n[Source-backed component]]
+    B --> C[Metric collection and aggregation\n[Source-backed component]]
+    W --> C
+    C --> H[Latency histogram + golden-signal series\n[Proposed component]]
+    H --> D[Dashboards and retrospective analysis\n[Source-backed component]]
+    H --> R[Simple alert rules\n[Source-backed component]]
+    R --> P[Pager / ticket / email\n[Source-backed component]]
+    H --> E[SLO/error-budget evaluator\n[Proposed component]]
+    E --> R
+    W --> X[Logs and dependency evidence\n[Source-backed component]]
+    X --> D
+```
+
+[SOURCE FACT] Nguồn định nghĩa dashboard là góc nhìn tóm tắt các metric cốt lõi của dịch vụ và phân loại thông báo cho con người thành page, ticket hoặc email alert. Nguồn cũng nói collection, aggregation, alerting và dashboard cơ bản hoạt động tốt như một hệ thống tương đối độc lập. [Nguồn: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[PROPOSED DESIGN] SLO/error-budget evaluator được thể hiện như một thành phần riêng để tính nhất quán availability hướng người dùng và lỗi theo policy. Đây là phần mở rộng từ thảo luận về alerting theo SLO của nguồn, không phải tuyên bố về binary nội bộ của Google.
+
+## 4. System Design Analysis
+
+[SOURCE FACT] Hệ thống giám sát phải trả lời hai câu hỏi: “điều gì đang hỏng?” và “tại sao?”. Nguồn gọi câu đầu là symptom, câu sau là cause. Nguồn cảnh báo rằng các dependency-based alerting hierarchy khó bảo trì trong những hệ thống được refactor liên tục. [Nguồn: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[ANALYSIS] Một pipeline thực tế nên có hai đường đi:
+
+- Đường symptom ít phức tạp để page: thành công của probe end-to-end, latency request và tỷ lệ error nhìn thấy từ người dùng.
+- Đường chẩn đoán giàu thông tin cho dashboard: latency dependency, số retry, queue depth, resource utilization, log, và dấu mốc deploy.
+
+[SOURCE FACT] Black-box monitoring hữu ích cho symptom đang ảnh hưởng người dùng nhưng yếu trong việc phát hiện vấn đề sắp xảy ra; white-box monitoring có thể phát hiện failure sắp xảy ra và failure bị retry che giấu. [Nguồn: https://sre.google/sre-book/monitoring-distributed-systems/]
+
+[PROPOSED DESIGN] Gắn service, route, status-class và region ổn định vào mỗi metric, nhưng kiểm soát cardinality. Đưa request ID và ngữ cảnh payload chi tiết vào log hoặc trace thay vì metric label. Page phải nêu service và symptom bị ảnh hưởng, dẫn tới dashboard liên quan, và chỉ ra hành động an toàn đầu tiên.
+
+[PROPOSED DESIGN] Định nghĩa SLI là chỉ báo được đo, chẳng hạn tỷ lệ request đủ điều kiện hoàn tất thành công trong giới hạn latency. Định nghĩa SLO là target trong một cửa sổ thời gian cụ thể. Giữ cách tính SLI có thể tái lập từ cùng một quy tắc phân loại request được dashboard và alert sử dụng; nếu không, báo cáo SLO có thể mâu thuẫn với page đã khởi động cuộc điều tra.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] Có thể biểu diễn record time-series tối thiểu như sau:
+
+```sql
+CREATE TABLE metric_sample (
+  observed_at TIMESTAMP 
+Rewrite both. Write:
+  /tmp/rt_9_google-monitoring-golden-signals/google-monitoring-golden-signals.en.md
+  /tmp/rt_9_google-monitoring-golden-signals/google-monitoring-golden-signals.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,249 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #5: system-design/distributed-job-scheduler
+CURRENT EN FILE (rewrite to /tmp/rt_5_distributed-job-scheduler/distributed-job-scheduler.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a Distributed Job Scheduler"
+description: "An operational design for timezone-aware cron, one-off jobs, and DAG workflows with at-least-once execution and auditable recovery."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building a multi-tenant scheduler for data pipelines, billing tasks, notifications, and maintenance jobs. A user can define a cron schedule, submit a one-off run, or compose tasks into a directed acyclic graph (DAG). The scheduler must decide when a run is due and arrange execution on worker fleets; it is not the business worker itself.
+
+Functional requirements:
+
+- Cron expressions, one-off timestamps, and DAG dependencies are supported.
+- A run is at-least-once: a worker may receive it again after a timeout or failover.
+- Retries use bounded exponential backoff with jitter and end in a dead-letter state after a policy limit.
+- Catch-up is explicit: missed occurrences after downtime can be replayed, coalesced, or skipped per schedule.
+- Time zones and daylight-saving transitions use IANA zone rules. A local time that occurs twice is represented by a distinct offset; a nonexistent local time follows a declared skip policy.
+
+Non-functional requirements:
+
+- No silent double execution: the platform prevents duplicate *logical dispatches*, while job code must still be idempotent because at-least-once delivery cannot prevent an old worker from finishing late.
+- Missed-task detection, audit history, horizontal scale, tenant isolation, and regional disaster recovery.
+- Target availability is 99.95% for schedule evaluation and control APIs, with a 99.9% objective for dispatch latency under normal load. A due run should be enqueued within 30 seconds of its due instant at p99.
+
+The users are platform teams and service owners. They need a durable record of what was intended, what was dispatched, which attempt ran, and why a run was skipped or delayed.
+
+## 2. Scale Estimation
+
+Assume 2,000 tenants and 10,000 active schedules. This is a deliberately moderate starting point: it is large enough for operational pressure but small enough that the primary database remains useful for authoritative state. Assume each tenant has 25 daily API actions on average (schedule edits, run queries, and manual triggers).
+
+- API volume = `2,000 DAU x 25 requests/day = 50,000 requests/day`.
+- Average API rate = `50,000 / 86,400 = 0.58 RPS`; design for `10x = 5.8 RPS` peak, rounded to 10 RPS for bursts.
+- If each schedule produces 100 occurrences/day, occurrence creation is `10,000 x 100 = 1,000,000 occurrences/day`, or `11.6 per second` average. A 10x temporal burst is 116 due events/second.
+- Let 2% of occurrences need a retry. Dispatch-attempt events are `1,000,000 x 1.02 = 1.02 million/day`. At 1.5 KB per event, the event log is about `1.53 GB/day`, or `1.67 TB` for three years before compression and replicas.
+- Authoritative run rows average 1 KB. With 1.02 million attempts plus metadata, 30-day hot storage is approximately `1.02M x 1 KB x 30 = 30.6 GB`, excluding indexes and replicas; budget 3x, or 92 GB.
+- At 5% of runs using 20 KB of logs retained for 30 days, log ingress is `1.02M x 0.05 x 20 KB = 1.02 GB/day`; logs belong in object storage, not the transactional database.
+- A 1.5 KB dispatch event at 116 peak events/second is only `174 KB/s` or 1.4 Mbps before replication. We provision 10 Mbps per broker direction to leave room for workflow metadata and bursts.
+- The normal attempt-to-control-read ratio is roughly 20:1. Run state is read by the UI and controllers, while attempts are append-heavy.
+
+Growth is forecast at 3x in 18 months: 30,000 schedules and 3 million occurrences/day. We provision for 100,000 due events/second at 100x only after a sharding milestone, rather than pretending the initial cluster has that capacity. The availability target implies no single scheduler process or availability zone may be required for correctness. A regional outage is a recovery objective, not transparent zero-loss active-active behavior: target RPO 5 minutes and RTO 30 minutes.
+
+## 3. API Design
+
+All endpoints require an OAuth2 service or user token. `tenant_id` comes from the authenticated principal and is never trusted from a query parameter. Every mutating request accepts `Idempotency-Key`; the server stores its result for 24 hours, scoped to tenant and endpoint.
+
+`POST /v1/schedules`
+
+```json
+{
+  "name": "nightly-settlement",
+  "cron": "0 2 * * *",
+  "timezone": "America/New_York",
+  "misfire_policy": "catch_up",
+  "max_catch_up": 3,
+  "job_ref": "settlement:v4",
+  "retry_policy": {"max_attempts": 5, "backoff_seconds": 30, "max_backoff_seconds": 3600}
+}
+```
+
+`201 Created` returns `schedule_id`, normalized schedule fields, `next_fire_at`, and `version`. The server validates the cron and IANA zone before committing.
+
+`PATCH /v1/schedules/{schedule_id}` updates a schedule with an `If-Match: <version>` header. A stale version returns `409`, preventing an operator from overwriting a concurrent change. `DELETE` disables future occurrences but does not erase audit history.
+
+`POST /v1/schedules/{schedule_id}/runs` creates a manual or one-off run:
+
+```json
+{"scheduled_for":"2026-08-20T09:30:00Z","parameters":{"account":"eu"}}
+```
+
+The response is `202 Accepted` with `run_id` and `status: "queued"`. It is asynchronous because a worker may not be available and the API should not hold a database transaction open for execution.
+
+`POST /v1/workflows` accepts a DAG of task references and edges. The API rejects cycles, unknown task references, and more than 500 nodes. `GET /v1/runs/{run_id}` returns the run, task states, attempt counters, and timestamps. `POST /v1/runs/{run_id}/cancel` records a cancellation request; workers cooperatively stop, while already completed side effects are not rolled back.
+
+The dispatch contract includes `run_id`, `task_id`, `attempt`, `lease_id`, `fencing_token`, deadline, and a trace ID. A worker acknowledges receipt, renews its lease, and reports completion with the same lease. A completion for an expired lease is rejected as stale and is safe to retry.
+
+## 4. Data Model
+
+PostgreSQL is the source of truth. Times are stored in UTC; the original IANA timezone and user expression are retained for explainability.
+
+```sql
+CREATE TABLE schedules (
+  tenant_id UUID NOT NULL,
+  schedule_id UUID NOT NULL,
+  name TEXT NOT NULL,
+  cron TEXT,
+  timezone TEXT NOT NULL,
+  misfire_policy TEXT NOT NULL CHECK (misfire_policy IN ('skip','catch_up','coalesce')),
+  max_catch_up INT NOT NULL DEFAULT 3,
+  next_fire_at TIMESTAMPTZ,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  version BIGINT NOT NULL DEFAULT 1,
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, schedule_id)
+);
+
+CREATE TABLE runs (
+  tenant_id UUID NOT NULL,
+  run_id UUID NOT NULL,
+  schedule_id UUID,
+  workflow_id UUID,
+  scheduled_for TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL,
+  created_at TIMESTAMPT
+=== VI CURRENT ===
+---
+title: "Thiết kế Bộ Lập lịch Công việc Phân tán (Distributed Job Scheduler)"
+description: "Thiết kế vận hành cho cron có nhận biết múi giờ, công việc một lần và workflow DAG với thực thi ít nhất một lần và khả năng khôi phục có kiểm toán."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng một bộ lập lịch đa tenant cho pipeline dữ liệu, tác vụ tính cước, thông báo và bảo trì. Người dùng có thể định nghĩa lịch cron, gửi một lần chạy hoặc ghép các tác vụ thành đồ thị có hướng không chu kỳ (DAG). Bộ lập lịch quyết định khi nào một lần chạy đến hạn và sắp xếp việc thực thi trên các cụm worker; nó không phải là business worker.
+
+Yêu cầu chức năng:
+
+- Hỗ trợ biểu thức cron, mốc thời gian một lần và dependency của DAG.
+- Một run được thực thi ít nhất một lần: worker có thể nhận lại run sau timeout hoặc failover.
+- Retry dùng exponential backoff có giới hạn và jitter, kết thúc ở trạng thái dead-letter sau số lần theo chính sách.
+- Catch-up là hành vi tường minh: các occurrence bị lỡ sau downtime có thể được replay, gộp hoặc bỏ qua theo từng schedule.
+- Múi giờ và chuyển giờ mùa hè dùng bộ quy tắc IANA. Một giờ địa phương xuất hiện hai lần được biểu diễn bằng offset riêng; giờ không tồn tại tuân theo chính sách bỏ qua đã khai báo.
+
+Yêu cầu phi chức năng:
+
+- Không double-execution âm thầm: nền tảng ngăn các *logical dispatch* trùng nhau, nhưng mã job vẫn phải idempotent vì delivery ít nhất một lần không thể ngăn worker cũ hoàn thành muộn.
+- Phát hiện task bị lỡ, lịch sử audit, scale ngang, cô lập tenant và khôi phục thảm họa theo vùng.
+- Mục tiêu availability là 99.95% cho đánh giá schedule và control API, cùng mục tiêu 99.9% cho độ trễ dispatch trong tải bình thường. Run đến hạn nên được đưa vào queue trong 30 giây kể từ thời điểm đến hạn ở p99.
+
+Người dùng là các team nền tảng và chủ dịch vụ. Họ cần bản ghi bền vững về điều đã dự kiến, điều đã dispatch, attempt nào đã chạy, và lý do run bị bỏ qua hoặc trì hoãn.
+
+## 2. Scale Estimation
+
+Giả định 2.000 tenant và 10.000 schedule đang hoạt động. Đây là quy mô khởi đầu vừa phải: đủ tạo áp lực vận hành nhưng vẫn cho phép database chính giữ vai trò trạng thái chuẩn. Giả định trung bình mỗi tenant có 25 thao tác API mỗi ngày (sửa schedule, truy vấn run và trigger thủ công).
+
+- Lưu lượng API = `2,000 DAU x 25 requests/day = 50,000 requests/day`.
+- Tốc độ API trung bình = `50,000 / 86,400 = 0.58 RPS`; thiết kế cho đỉnh `10x = 5.8 RPS`, làm tròn thành 10 RPS cho burst.
+- Nếu mỗi schedule tạo 100 occurrence/ngày, số occurrence = `10,000 x 100 = 1,000,000 occurrences/day`, hay trung bình `11.6/giây`. Burst theo thời gian 10x là 116 due event/giây.
+- Giả sử 2% occurrence cần retry. Số dispatch-attempt event là `1,000,000 x 1.02 = 1.02 million/day`. Với 1,5 KB/event, event log khoảng `1.53 GB/day`, hay `1.67 TB` trong ba năm trước compression và replica.
+- Một run row chuẩn trung bình 1 KB. Với 1,02 triệu attempt cộng metadata, hot storage 30 ngày xấp xỉ `1.02M x 1 KB x 30 = 30.6 GB`, chưa tính index và replica; dự phòng 3x, tức 92 GB.
+- Nếu 5% run dùng 20 KB log và giữ 30 ngày, log ingress là `1.02M x 0.05 x 20 KB = 1.02 GB/day`; log phải vào object storage, không phải transactional database.
+- Event dispatch 1,5 KB ở đỉnh 116 event/giây chỉ là `174 KB/s` hay 1,4 Mbps trước replication. Cấp 10 Mbps cho mỗi hướng broker để có chỗ cho metadata workflow và burst.
+- Tỷ lệ đọc control so với attempt bình thường gần 20:1. UI và controller đọc trạng thái run, còn attempt thiên về append.
+
+Dự báo tăng 3x trong 18 tháng: 30.000 schedule và 3 triệu occurrence/ngày. Ta chỉ cấp cho 100.000 due event/giây ở mốc 100x sau khi đạt milestone sharding, thay vì giả vờ cluster ban đầu có năng lực đó. Mục tiêu availability yêu cầu không một scheduler process hay availability zone nào là điều kiện cho correctness. Mất một vùng là mục tiêu khôi phục, không phải active-active không mất dữ liệu: RPO 5 phút và RTO 30 phút.
+
+## 3. API Design
+
+Mọi endpoint yêu cầu OAuth2 service hoặc user token. `tenant_id` lấy từ principal đã xác thực và không bao giờ tin giá trị từ query parameter. Mọi request thay đổi trạng thái nhận `Idempotency-Key`; server lưu kết quả 24 giờ, giới hạn theo tenant và endpoint.
+
+`POST /v1/schedules`
+
+```json
+{
+  "name": "nightly-settlement",
+  "cron": "0 2 * * *",
+  "timezone": "America/New_York",
+  "misfire_policy": "catch_up",
+  "max_catch_up": 3,
+  "job_ref": "settlement:v4",
+  "retry_policy": {"max_attempts": 5, "backoff_seconds": 30, "max_backoff_seconds": 3600}
+}
+```
+
+`201 Created` trả về `schedule_id`, các trường schedule đã chuẩn hóa, `next_fire_at` và `version`. Server validate cron và IANA zone trước khi commit.
+
+`PATCH /v1/schedules/{schedule_id}` cập nhật schedule với header `If-Match: <version>`. Version cũ trả `409`, ngăn operator ghi đè thay đổi đồng thời. `DELETE` tắt các occurrence tương lai nhưng không xóa audit history.
+
+`POST /v1/schedules/{schedule_id}/runs` tạo run thủ công hoặc một lần:
+
+```json
+{"scheduled_for":"2026-08-20T09:30:00Z","parameters":{"account":"eu"}}
+```
+
+Response là `202 Accepted` với `run_id` và `status: "queued"`. Nó bất đồng bộ vì worker có thể chưa sẵn sàng và API không nên giữ transaction database mở trong lúc thực thi.
+
+`POST /v1/workflows` nhận DAG gồm task reference và edge. API từ chối cycle, task reference không tồn tại và DAG quá 500 node. `GET /v1/runs/{run_id}` trả run, trạng thái task, số attempt và timestamp. `POST /v1/runs/{run_id}/cancel` ghi nhận yêu cầu hủy; worker dừng hợp tác, còn side effect đã hoàn tất không được rollback.
+
+Dispatch contract gồm `run_id`, `task_id`, `attempt`, `lease_id`, `fencing_token`, deadline và trace ID. Worker acknowledge nhận việc, gia hạn lease và báo hoàn thành bằng lease đó. Completion của lease đã hết hạn bị từ chối là stale và có thể retry an toàn.
+
+## 4. Data Model
+
+PostgreSQL là nguồn sự thật. Thời gian lưu UTC; timezone IANA gốc và expression người dùng được giữ lại để giải thích.
+
+```sql
+CREATE TABLE schedules (
+  tenant_id UUID NOT NULL,
+  schedule_id UUID NOT NULL,
+  name TEXT NOT NULL,
+  cron TEXT,
+  timezone TEXT NOT NULL,
+  misfire_policy TEXT NOT NULL CHECK (misfire_policy IN ('skip','catch_up','coalesce')),
+  max_catch_up INT NOT NULL DEFAULT 3,
+  next_fire_at TIMESTAMPTZ,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  version BIGINT NOT NULL DEFAULT 1,
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, schedule_id)
+);
+
+CREATE TABLE runs (
+  tenant_id UUID NOT NULL,
+  run_id UUID NOT NULL,
+  schedule_id UUID,
+  workflow_id UUID,
+  scheduled_for TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, run_id),
+  UNIQUE (tenant_id, schedule_id, scheduled_for)
+);
+
+CREATE TABLE task_attempts (
+  tenant_id UUID NOT NULL,
+  run_id UUID NOT NULL,
+  task_id UUID NOT NULL,
+  attempt INT NOT NULL,
+  status TEXT NOT NULL,
+  lease_id UUID,
+  fencing_token BIGINT,
+  available_at TIMESTAMPTZ NOT NULL,
+  started_a
+Rewrite both. Write:
+  /tmp/rt_5_distributed-job-scheduler/distributed-job-scheduler.en.md
+  /tmp/rt_5_distributed-job-scheduler/distributed-job-scheduler.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

@@ -1,0 +1,179 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #10: system-design/google-spanner
+CURRENT EN FILE (rewrite to /tmp/rt_10_google-spanner/google-spanner.en.md):
+=== EN CURRENT ===
+---
+title: "Spanner: Google's Globally-Distributed Database and TrueTime"
+description: "A source-disciplined system-design analysis of external consistency, time uncertainty, Paxos-style replication, sharding, and multi-region operation."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] The permitted Google Research page is titled *Spanner: Google's Globally Distributed Database*. Its page identifies the work as an ACM Transactions on Computer Systems publication. [Source: https://research.google/pubs/spanner-googles-globally-distributed-database/]
+
+[ANALYSIS] The engineering problem implied by that title is not merely storing rows in several data centers. A useful global database must reconcile four competing requirements: transactions across machines, survivability across regions, horizontal partitioning, and an ordering that applications can trust. Network delay, clock skew, partitions, replica loss, and hot keys make those requirements interact rather than remain independent.
+
+[SOURCE FACT] The companion source says that large online services may consult multi-terabyte datasets spanning thousands of servers, and that keeping the latency tail low becomes harder as system size or utilization increases. It describes the goal as constructing a predictably responsive whole from less predictable parts. [Source: https://research.google/pubs/the-tail-at-scale/]
+
+[ANALYSIS] For a globally distributed transactional database, the tail problem includes more than user-visible reads. A cross-region commit waits on coordination; a clock uncertainty interval can delay the point at which a result is safe to expose; and a failed replica can force a slower quorum path. The design must make correctness explicit while preventing every slow component from becoming a system-wide latency failure.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] The source title explicitly describes Spanner as globally distributed, and the supplied research focus names TrueTime, external consistency, Paxos, sharding, and multi-region operation. Those are the source topics for this article, not claims about an unlisted deployment configuration. [Source: https://research.google/pubs/spanner-googles-globally-distributed-database/]
+
+[ANALYSIS] The core conceptual move is to make uncertainty part of the transaction protocol. A time reading is not treated as one exact instant; it has an earliest and latest bound. A transaction can be assigned a commit timestamp only when the system can prove that the timestamp is ordered safely relative to relevant transactions. That is the role commonly associated with TrueTime in the Spanner design: the database pays a bounded waiting cost to obtain a stronger ordering guarantee.
+
+[ANALYSIS] Paxos is a natural replication primitive for this architecture: each shard has a replicated log, and a quorum chooses the next durable state. Sharding keeps unrelated key ranges independent, while a transaction coordinator can enlist multiple shard leaders when a transaction spans ranges. Multi-region placement improves fault tolerance and locality, but cross-region coordination remains a latency and availability cost, not a free optimization.
+
+[ANALYSIS] “External consistency” is stronger than eventual convergence. If transaction A commits before transaction B begins, the database must not later expose an order in which B precedes A. The guarantee concerns the serialization order observed by clients, while the implementation still has to handle retries, ambiguous outcomes, and leader changes.
+
+## 3. Architecture Diagram
+
+The diagram separates the proposed interface and operational controls from the source topics. It is not a claim that Google uses this exact component decomposition.
+
+```mermaid
+flowchart LR
+    C[Client]
+    G[Global SQL/API gateway\n[Proposed component]]
+    R[Directory and shard map\n[Proposed component]]
+    S1[Shard group A\nPaxos replicas\n[Source-backed component]]
+    S2[Shard group B\nPaxos replicas\n[Source-backed component]]
+    TT[TrueTime uncertainty API\n[Source-backed component]]
+    TC[Commit coordinator\n[Proposed component]]
+    REG[Multi-region replica placement\n[Source-backed component]]
+    OBS[Tail-latency controls\n[Proposed component]]
+
+    C --> G --> R
+    R --> S1
+    R --> S2
+    G --> TC
+    TC --> S1
+    TC --> S2
+    TC --> TT
+    S1 --- REG
+    S2 --- REG
+    G --> OBS
+```
+
+[SOURCE FACT] The labels “TrueTime,” “Paxos,” sharding, and multi-region operation are grounded in the supplied Spanner source description. [Source: https://research.google/pubs/spanner-googles-globally-distributed-database/]
+
+[PROPOSED DESIGN] The gateway, shard directory, coordinator, and observability controls are an interview-friendly decomposition. They make ownership and failure boundaries visible; they do not assert that these are the original paper's exact module names or interfaces.
+
+## 4. System Design Analysis
+
+[ANALYSIS] A transaction first resolves its keys to shards. A single-shard read or write can stay near one replica group. A multi-shard transaction needs a coordinator, participant preparation, a globally safe commit timestamp, and durable decision records. The protocol should make the decision recoverable: after a coordinator crash, participants must be able to determine whether to commit, abort, or wait for resolution.
+
+[ANALYSIS] TrueTime changes the commit path in a precise way. Let an uncertainty interval be `[earliest, latest]`. A commit timestamp selected at `latest` is not immediately safe merely because a local clock returned it. The coordinator must wait until the uncertainty interval has passed before advertising a result whose real-time order matters. This wait protects external consistency, but it should be charged only where the guarantee is required.
+
+[ANALYSIS] Paxos quorum replication and time ordering solve different problems. Paxos decides which value is durable within a replica group; it does not by itself define a global real-time transaction order. Conversely, a time API does not replicate data. Combining them is useful because the log provides durable agreement while bounded time uncertainty provides a rule for ordering commits.
+
+[SOURCE FACT] The Tail at Scale source identifies temporary high-latency episodes as increasingly important at large scale and discusses techniques that reduce their impact, including use of resources already deployed for fault tolerance. [Source: https://research.google/pubs/the-tail-at-scale/]
+
+[ANALYSIS] Applied here, that suggests hedged reads for safe replicas, deadline propagation, admission control, and isolation of overloaded shards. Hedging must not duplicate a non-idempotent write. A read can be served from the first acceptable response, while a write must be driven by the transaction protocol and its retry token.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] Use a relational s
+=== VI CURRENT ===
+---
+title: "Spanner: Cơ sở dữ liệu Phân tán Toàn cầu của Google và TrueTime"
+description: "Phân tích thiết kế hệ thống có kỷ luật nguồn về external consistency, bất định thời gian, nhân bản kiểu Paxos, phân mảnh và vận hành đa khu vực."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] Trang Google Research được phép sử dụng có tiêu đề *Spanner: Google's Globally Distributed Database*. Trang này xác định công trình là một ấn phẩm trên ACM Transactions on Computer Systems. [Nguồn: https://research.google/pubs/spanner-googles-globally-distributed-database/]
+
+[ANALYSIS] Bài toán kỹ thuật được gợi ra từ tiêu đề không chỉ là lưu các hàng dữ liệu ở vài trung tâm dữ liệu. Một cơ sở dữ liệu toàn cầu hữu ích phải đồng thời đáp ứng bốn yêu cầu: giao dịch trên nhiều máy, sống sót trước lỗi khu vực, phân vùng theo chiều ngang và một thứ tự mà ứng dụng có thể tin cậy. Độ trễ mạng, lệch đồng hồ, phân hoạch mạng, mất bản sao và khóa nóng khiến các yêu cầu này tác động lẫn nhau.
+
+[SOURCE FACT] Nguồn bổ trợ nói rằng các dịch vụ trực tuyến lớn có thể truy vấn các tập dữ liệu nhiều terabyte trải trên hàng nghìn máy chủ, và việc giữ đuôi độ trễ thấp trở nên khó hơn khi quy mô hoặc mức sử dụng tăng. Nguồn mô tả mục tiêu là tạo ra một tổng thể có khả năng phản hồi dự đoán được từ những thành phần kém dự đoán hơn. [Nguồn: https://research.google/pubs/the-tail-at-scale/]
+
+[ANALYSIS] Với một cơ sở dữ liệu giao dịch phân tán toàn cầu, bài toán đuôi độ trễ không chỉ nằm ở các lượt đọc mà người dùng nhìn thấy. Commit liên khu vực phải chờ phối hợp; khoảng bất định của đồng hồ có thể trì hoãn thời điểm một kết quả an toàn để công bố; bản sao lỗi có thể buộc hệ thống đi theo đường quorum chậm hơn. Thiết kế phải nêu rõ tính đúng đắn nhưng không để mọi thành phần chậm biến thành lỗi độ trễ toàn hệ thống.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] Tiêu đề nguồn mô tả Spanner là hệ thống phân tán toàn cầu, còn phạm vi nghiên cứu được cung cấp nêu TrueTime, external consistency, Paxos, sharding và vận hành đa khu vực. Đây là các chủ đề nguồn cho bài viết, không phải khẳng định về một cấu hình triển khai không được liệt kê. [Nguồn: https://research.google/pubs/spanner-googles-globally-distributed-database/]
+
+[ANALYSIS] Bước chuyển đổi khái niệm cốt lõi là đưa sự bất định vào giao thức giao dịch. Một lần đọc thời gian không được xem là một thời điểm chính xác duy nhất; nó có cận sớm nhất và cận muộn nhất. Giao dịch chỉ được gán timestamp commit khi hệ thống chứng minh được timestamp đó được sắp thứ tự an toàn so với các giao dịch liên quan. Đây là vai trò thường gắn với TrueTime trong thiết kế Spanner: cơ sở dữ liệu chấp nhận một chi phí chờ có giới hạn để đạt được bảo đảm thứ tự mạnh hơn.
+
+[ANALYSIS] Paxos là một primitive nhân bản tự nhiên cho kiến trúc này: mỗi shard có log được nhân bản, và quorum chọn trạng thái bền vững tiếp theo. Sharding giữ các dải khóa không liên quan độc lập, trong khi coordinator giao dịch có thể huy động nhiều leader shard khi giao dịch đi qua nhiều dải. Đặt bản sao ở nhiều khu vực cải thiện khả năng chịu lỗi và tính địa phương, nhưng phối hợp liên khu vực vẫn là chi phí về độ trễ và tính sẵn sàng, không phải tối ưu miễn phí.
+
+[ANALYSIS] “External consistency” mạnh hơn hội tụ cuối cùng. Nếu giao dịch A commit trước khi giao dịch B bắt đầu, cơ sở dữ liệu không được về sau công bố thứ tự trong đó B đứng trước A. Bảo đảm này nói về thứ tự tuần tự hóa mà client quan sát; phần triển khai vẫn phải xử lý retry, kết quả không xác định và thay đổi leader.
+
+## 3. Architecture Diagram
+
+Sơ đồ tách giao diện và kiểm soát vận hành được đề xuất khỏi các chủ đề của nguồn. Đây không phải khẳng định Google dùng đúng cách phân rã thành phần này.
+
+```mermaid
+flowchart LR
+    C[Client]
+    G[Global SQL/API gateway\n[Proposed component]]
+    R[Directory and shard map\n[Proposed component]]
+    S1[Shard group A\nPaxos replicas\n[Source-backed component]]
+    S2[Shard group B\nPaxos replicas\n[Source-backed component]]
+    TT[TrueTime uncertainty API\n[Source-backed component]]
+    TC[Commit coordinator\n[Proposed component]]
+    REG[Multi-region replica placement\n[Source-backed component]]
+    OBS[Tail-latency controls\n[Proposed component]]
+
+    C --> G --> R
+    R --> S1
+    R --> S2
+    G --> TC
+    TC --> S1
+    TC --> S2
+    TC --> TT
+    S1 --- REG
+    S2 --- REG
+    G --> OBS
+```
+
+[SOURCE FACT] Các nhãn “TrueTime,” “Paxos,” sharding và vận hành đa khu vực được neo vào mô tả nguồn Spanner được cung cấp. [Nguồn: https://research.google/pubs/spanner-googles-globally-distributed-database/]
+
+[PROPOSED DESIGN] Gateway, directory shard, coordinator và các kiểm soát quan sát là cách phân rã phù hợp cho phỏng vấn. Chúng làm rõ ranh giới sở hữu và lỗi; chúng không khẳng định đây là tên module hay giao diện chính xác của bài báo gốc.
+
+## 4. System Design Analysis
+
+[ANALYSIS] Giao dịch trước hết ánh xạ các khóa tới shard. Lượt đọc hoặc ghi trên một shard có thể ở gần một nhóm bản sao. Giao dịch nhiều shard cần coordinator, chuẩn bị ở các participant, timestamp commit an toàn toàn cục và các bản ghi quyết định bền vững. Giao thức phải làm cho quyết định có thể khôi phục: sau khi coordinator sập, participant phải biết commit, abort hay chờ giải quyết.
+
+[ANALYSIS] TrueTime thay đổi đường đi commit theo cách cụ thể. Gọi khoảng bất định là `[earliest, latest]`. Timestamp commit chọn tại `latest` chưa an toàn ngay chỉ vì đồng hồ cục bộ trả về nó. Coordinator phải chờ đến khi khoảng bất định đã trôi qua trước khi công bố kết quả mà thứ tự thời gian thực có ý nghĩa. Việc chờ này bảo vệ external consistency, nhưng chỉ nên tính vào chi phí nơi thực sự cần bảo đảm đó.
+
+[ANALYSIS] Nhân bản quorum bằng Paxos và thứ tự thời gian giải quyết hai vấn đề khác nhau. Paxos quyết định giá trị nào bền vững trong một nhóm bản sao; tự nó không định nghĩa thứ tự thời gian thực toàn cục của giao dịch. Ngược lại, API thời gian không nhân bản dữ liệu. Kết hợp chúng hữu ích vì log tạo ra đồng thuận bền vững, còn bất định thời gian có giới hạn cung cấp quy tắc sắp thứ tự commit.
+
+[SOURCE FACT] Nguồn Tail at Scale xác định các đợt độ trễ cao tạm thời ngày càng quan trọng ở quy mô lớn và bàn về các kỹ thuật giảm tác động của chúng, bao gồm việc tận dụng tài nguyên đã có cho khả năng chịu lỗi. [Nguồn: https://research.google/pubs/the-tail-at-scale/]
+
+[ANALYSIS] Áp dụng vào đây, điều đó gợi ý đọc hedged tới các bản sao an toàn, truyền deadline, admission control và cô lập shard quá tải. Hedging không được nhân đôi một ghi không idempotent. Lượt đọc có thể dùng phản hồi chấp nhận được đầu tiên, còn lượt ghi phải đi qua giao thức giao dịch và retry token.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] Dùng schema quan hệ với khóa tenant và entity rõ ràng. Các cột khóa đầu nên khớp đường truy cập chính để các hàng liên quan có thể được đặt gần nhau khi cần atomicity giữa nhiều hàng.
+
+```sql
+CREATE TABLE Accounts (
+  
+Rewrite both. Write:
+  /tmp/rt_10_google-spanner/google-spanner.en.md
+  /tmp/rt_10_google-spanner/google-spanner.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

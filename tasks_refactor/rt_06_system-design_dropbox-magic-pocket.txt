@@ -1,0 +1,211 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #6: system-design/dropbox-magic-pocket
+CURRENT EN FILE (rewrite to /tmp/rt_6_dropbox-magic-pocket/dropbox-magic-pocket.en.md):
+=== EN CURRENT ===
+---
+title: "Dropbox Magic Pocket: Designing Exabyte-Scale Blob Storage"
+description: "A source-disciplined system-design analysis of immutable blobs, erasure coding, tiered storage, and durability at exabyte scale."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] The supplied Dropbox Infrastructure page lists Dropbox engineering posts titled “Scaling to exabytes and beyond,” “Inside the Magic Pocket,” “How we optimized Magic Pocket for cold storage,” and “Pocket watch: Verifying exabytes of data.” It also lists posts about SMR storage, removing SSD cache disks, and storage efficiency in Magic Pocket. Source: https://dropbox.tech/infrastructure/
+
+[ANALYSIS] Those titles describe a storage problem with three competing requirements: retain a very large amount of user content, keep the durable copy economically viable, and verify that data remains recoverable as hardware and sites fail. A blob store is not a filesystem with a larger disk. It must manage placement, repair, integrity, lifecycle, and operations as one control problem.
+
+[ANALYSIS] The workload is plausibly dominated by immutable or append-only objects: uploaded file content is addressed by an object identifier, while names, folders, permissions, and revisions belong in a metadata system. This separation lets the blob plane optimize sequential media and repair without making every directory operation a storage operation. That is an engineering model, not a claim about Dropbox’s private implementation.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] The index identifies Magic Pocket as an infrastructure topic and explicitly includes the title “Scaling to exabytes and beyond.” It separately identifies a Magic Pocket cold-storage optimization post and a post on verifying exabytes of data. Source: https://dropbox.tech/infrastructure/
+
+[ANALYSIS] The public index supports a narrow conclusion: Dropbox has publicly discussed Magic Pocket in the context of exabyte-scale growth, cold storage, and verification. It does not, in the supplied material, specify a particular erasure-code width, replication factor, placement algorithm, API contract, repair window, or durability percentage.
+
+[ANALYSIS] Consequently, this article does not attribute those mechanisms to Dropbox. The rest of this section is an engineering interpretation of what a system with those stated concerns must do: isolate immutable data from metadata, encode data across failure domains, maintain a manifest for reconstruction, move objects between storage tiers, and continuously check integrity. Each mechanism is developed as a design proposal below.
+
+## 3. Architecture Diagram
+
+[ANALYSIS] The diagram separates the source-backed subject area from components proposed for an interview-ready design. The source-backed label means only that the Dropbox index names the relevant system or concern; it does not mean the index confirms the depicted internals.
+
+```mermaid
+flowchart LR
+    C[Client / Dropbox service] --> API[Object API\n[Proposed component]]
+    API --> META[Metadata and manifest store\n[Proposed component]]
+    API --> ING[Ingest and chunker\n[Proposed component]]
+    ING --> ENC[Erasure encoder\n[Proposed component]]
+    ENC --> PL[Placement service\n[Proposed component]]
+    PL --> HOT[Hot tier: SSD or fast disk\n[Proposed component]]
+    PL --> COLD[Cold tier: dense / SMR media\n[Proposed component]]
+    META --> READ[Read planner and decoder\n[Proposed component]]
+    HOT --> READ
+    COLD --> READ
+    READ --> API
+    AUDIT[Verifier / repair scheduler\n[Proposed component]] --> META
+    AUDIT --> HOT
+    AUDIT --> COLD
+    TOPIC[Magic Pocket, exabyte scale, cold storage, verification\n[Source-backed component]] -.-> API
+```
+
+[PROPOSED DESIGN] The write path creates immutable chunks, calculates checksums, encodes data and parity, places fragments in independent failure domains, and commits a manifest only after the required fragments are durable. The read path gets the manifest, selects healthy fragments, verifies checksums, and reconstructs missing fragments when necessary.
+
+## 4. System Design Analysis
+
+[SOURCE FACT] The source index names cold storage, SMR storage, SSD-cache removal, and data verification as separate Dropbox infrastructure topics. Source: https://dropbox.tech/infrastructure/
+
+[ANALYSIS] These concerns interact. Cold media lowers cost but usually increases access latency and makes small random writes expensive. Erasure coding lowers durable-storage overhead compared with many full replicas, but writes parity, reads multiple fragments, and makes repair network-intensive. Verification consumes bandwidth and I/O, but without it a silent bit error can remain invisible until a second failure removes the last good copy.
+
+[PROPOSED DESIGN] Use a content-addressed blob layer with immutable chunks. Keep a small metadata record outside the blob layer: object identity, ordered chunk IDs, logical length, checksum root, coding profile, tier, and placement epoch. Never overwrite a committed chunk. A new file revision writes new chunks and a new manifest; garbage collection later removes unreachable chunks after a safety interval.
+
+[PROPOSED DESIGN] Model failure domains explicitly: fragment placements must not share the same drive, host, rack, power domain, or site when the durability policy requires independence. The placement service should reject a plan that satisfies the fragment count but violates domain diversity. A repair job should first restore the minimum recoverability threshold, then restore the preferred distribution.
+
+[ANALYSIS] The control plane is more difficult than the data path. It must make placement decisions from imperfect, changing inventories, while avoiding a repair storm during a site or network outage. Rate limits, per-domain budgets, and repair priorities are durability features, not merely operational tuning.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] A minimal relational representation for the control plane is:
+
+```sql
+CREATE TABLE blob_manifest (
+  blob_id            VARBINARY(32) PRIMARY KEY,
+  revision_id        VARBINARY(32) NOT NULL,
+  logical_size       BIGINT NOT NULL,
+  chunk_count        BIGINT NOT NULL,
+  coding_profile     VARCHAR(32) NOT NULL,
+  checksum_root      VARBINARY(32) NOT NULL,
+  tier               VARCHAR(16) NOT NULL,
+  state              VARCHAR(16) NOT NULL,
+  placement_epoch    BIGINT NOT NULL,
+  created_at         TIMESTAMP NOT NULL
+);
+
+CREATE TABLE fragment (
+  blob_id            VARBINARY(32) NOT NULL,
+  chunk_index        BIGINT NOT NULL,
+  fragment_index     INT NOT NULL,
+  fragment_id        VARBINARY(32) NOT NULL,
+  domain_id          VARCHAR(128) NOT NULL,
+  device_id          VARCHAR(128) NOT NULL,
+  checksum           VARBINARY(32) NOT NULL,
+  state              VARCHAR(16) NOT NULL,
+  PRIMARY KEY (blob_id, chunk_index, fragment_index)
+);
+```
+
+[PROPOSED D
+=== VI CURRENT ===
+---
+title: "Dropbox Magic Pocket: Thiết kế Kho lưu trữ Blob quy mô Exabyte"
+description: "Phân tích thiết kế hệ thống dựa trên nguồn về blob bất biến, mã hóa xóa, lưu trữ phân tầng và độ bền ở quy mô exabyte."
+pubDatetime: 2026-08-16T10:00:00+07:00
+tags: ["system-design", "big-tech", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Original Engineering Problem
+
+[SOURCE FACT] Trang Dropbox Infrastructure được cung cấp liệt kê các bài kỹ thuật có tiêu đề “Scaling to exabytes and beyond”, “Inside the Magic Pocket”, “How we optimized Magic Pocket for cold storage” và “Pocket watch: Verifying exabytes of data”. Trang này cũng liệt kê các bài về lưu trữ SMR, loại bỏ đĩa cache SSD và hiệu quả lưu trữ trong Magic Pocket. Nguồn: https://dropbox.tech/infrastructure/
+
+[ANALYSIS] Các tiêu đề đó cho thấy một bài toán lưu trữ có ba yêu cầu cạnh tranh: giữ lại lượng nội dung người dùng rất lớn, duy trì bản sao bền vững với chi phí hợp lý, và xác minh dữ liệu vẫn có thể khôi phục khi phần cứng hoặc địa điểm gặp sự cố. Blob store không phải là filesystem với một ổ đĩa lớn hơn. Nó phải quản lý placement, sửa chữa, toàn vẹn, vòng đời và vận hành như một bài toán điều khiển thống nhất.
+
+[ANALYSIS] Workload có thể chủ yếu gồm các object bất biến hoặc chỉ ghi nối tiếp: nội dung tệp đã tải lên được định danh bằng object ID, còn tên, thư mục, quyền và revision thuộc về hệ metadata. Việc tách này cho phép data plane của blob tối ưu cho media tuần tự và sửa chữa mà không biến mọi thao tác thư mục thành thao tác lưu trữ. Đây là mô hình kỹ thuật, không phải khẳng định về triển khai riêng tư của Dropbox.
+
+## 2. What the Original System Did
+
+[SOURCE FACT] Index này xác định Magic Pocket là một chủ đề hạ tầng và nêu rõ tiêu đề “Scaling to exabytes and beyond”. Nó cũng xác định một bài tối ưu lưu trữ lạnh cho Magic Pocket và một bài về xác minh exabyte dữ liệu. Nguồn: https://dropbox.tech/infrastructure/
+
+[ANALYSIS] Index công khai chỉ cho phép kết luận thận trọng: Dropbox đã công khai thảo luận Magic Pocket trong bối cảnh tăng trưởng quy mô exabyte, lưu trữ lạnh và xác minh. Với tài liệu được cung cấp, không thể xác định một cấu hình cụ thể về số fragment dữ liệu/parity, hệ số replication, thuật toán placement, hợp đồng API, thời gian repair hay phần trăm durability.
+
+[ANALYSIS] Vì vậy, bài này không gán các cơ chế đó cho Dropbox. Phần còn lại là diễn giải kỹ thuật về những gì một hệ thống có các mối quan tâm nêu trên cần làm: tách dữ liệu bất biến khỏi metadata, mã hóa dữ liệu trên các failure domain, duy trì manifest để tái dựng, chuyển object giữa các tier lưu trữ và liên tục kiểm tra toàn vẹn. Mỗi cơ chế được phát triển như một thiết kế đề xuất bên dưới.
+
+## 3. Architecture Diagram
+
+[ANALYSIS] Sơ đồ tách chủ đề được nguồn hỗ trợ khỏi các thành phần được đề xuất cho một thiết kế dùng trong phỏng vấn. Nhãn source-backed chỉ có nghĩa index Dropbox gọi tên hệ thống hoặc mối quan tâm tương ứng; index không xác nhận các nội bộ được vẽ.
+
+```mermaid
+flowchart LR
+    C[Client / Dropbox service] --> API[Object API\n[Proposed component]]
+    API --> META[Metadata and manifest store\n[Proposed component]]
+    API --> ING[Ingest and chunker\n[Proposed component]]
+    ING --> ENC[Erasure encoder\n[Proposed component]]
+    ENC --> PL[Placement service\n[Proposed component]]
+    PL --> HOT[Hot tier: SSD or fast disk\n[Proposed component]]
+    PL --> COLD[Cold tier: dense / SMR media\n[Proposed component]]
+    META --> READ[Read planner and decoder\n[Proposed component]]
+    HOT --> READ
+    COLD --> READ
+    READ --> API
+    AUDIT[Verifier / repair scheduler\n[Proposed component]] --> META
+    AUDIT --> HOT
+    AUDIT --> COLD
+    TOPIC[Magic Pocket, exabyte scale, cold storage, verification\n[Source-backed component]] -.-> API
+```
+
+[PROPOSED DESIGN] Luồng ghi tạo các chunk bất biến, tính checksum, mã hóa dữ liệu và parity, đặt fragment vào các failure domain độc lập, rồi chỉ commit manifest sau khi số fragment bắt buộc đã durable. Luồng đọc lấy manifest, chọn các fragment khỏe, xác minh checksum và tái dựng fragment bị thiếu khi cần.
+
+## 4. System Design Analysis
+
+[SOURCE FACT] Index nguồn gọi tên cold storage, lưu trữ SMR, loại bỏ SSD cache và xác minh dữ liệu như các chủ đề hạ tầng Dropbox riêng biệt. Nguồn: https://dropbox.tech/infrastructure/
+
+[ANALYSIS] Các mối quan tâm này liên kết với nhau. Media lạnh giảm chi phí nhưng thường tăng latency truy cập và khiến ghi random nhỏ trở nên đắt. Erasure coding giảm overhead lưu trữ durable so với nhiều full replica, nhưng phải ghi parity, đọc nhiều fragment và khiến repair tiêu tốn network. Verification dùng bandwidth và I/O, nhưng nếu không có nó, lỗi bit im lặng có thể không bị phát hiện cho tới khi lỗi thứ hai loại bỏ bản tốt cuối cùng.
+
+[PROPOSED DESIGN] Dùng một lớp blob content-addressed với các chunk bất biến. Giữ một record metadata nhỏ bên ngoài blob layer: object identity, danh sách chunk theo thứ tự, logical length, checksum root, coding profile, tier và placement epoch. Không ghi đè chunk đã commit. Revision mới của tệp ghi các chunk mới và manifest mới; garbage collection sau đó xóa các chunk không còn được tham chiếu sau một khoảng an toàn.
+
+[PROPOSED DESIGN] Mô hình hóa failure domain một cách tường minh: placement của fragment không được dùng chung drive, host, rack, power domain hoặc site khi chính sách durability yêu cầu độc lập. Placement service phải từ chối plan tuy đủ số fragment nhưng vi phạm tính đa dạng domain. Repair job trước hết khôi phục ngưỡng recoverability tối thiểu, sau đó khôi phục phân bố ưu tiên.
+
+[ANALYSIS] Control plane khó hơn data path. Nó phải quyết định placement từ inventory không hoàn hảo và luôn thay đổi, đồng thời tránh repair storm trong lúc site hoặc network outage. Rate limit, ngân sách theo domain và mức ưu tiên repair là tính năng durability, không chỉ là tinh chỉnh vận hành.
+
+## 5. Data Model
+
+[PROPOSED DESIGN] Một biểu diễn relational tối thiểu cho control plane là:
+
+```sql
+CREATE TABLE blob_manifest (
+  blob_id            VARBINARY(32) PRIMARY KEY,
+  revision_id        VARBINARY(32) NOT NULL,
+  logical_size       BIGINT NOT NULL,
+  chunk_count        BIGINT NOT NULL,
+  coding_profile     VARCHAR(32) NOT NULL,
+  checksum_root      VARBINARY(32) NOT NULL,
+  tier               VARCHAR(16) NOT NULL,
+  state              VARCHAR(16) NOT NULL,
+  placement_epoch    BIGINT NOT NULL,
+  created_at         TIMESTAMP NOT NULL
+);
+
+CREATE TABLE fragment (
+  blob_id            VARBINARY(32) NOT NULL,
+  chunk_index        BIGINT NOT NULL,
+  fragment_index     INT NOT NULL,
+  fragment_id        VARBINARY(32) NOT NULL,
+  domain_id          VARCHAR(128) NOT NULL,
+  device_id          VARCHAR(128) NOT NULL,
+  checksum           VARBINARY(32) NOT NULL,
+  state              VARCHAR(16) NOT NULL,
+  PRIMARY KEY (blob_id, chunk_index, fragment_index)
+);
+```
+
+[PROPOSED DESIGN] `blob_manifest` là record commit; `fragment` là chỉ mục placement và integrity. Trong production, các bảng này sẽ được shard theo `blob_id` và được hệ meta
+Rewrite both. Write:
+  /tmp/rt_6_dropbox-magic-pocket/dropbox-magic-pocket.en.md
+  /tmp/rt_6_dropbox-magic-pocket/dropbox-magic-pocket.vi.md
+Same technical content; rewrite language/clarity/structure per rules.

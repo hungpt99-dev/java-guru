@@ -1,0 +1,318 @@
+You are a senior technical editor + software engineer. REWRITE the given article pair (EN + VI) to sound like a real senior engineer, not an AI.
+RULES:
+- Preserve ALL factual/technical correctness. Do NOT invent facts, numbers, benchmarks, company architecture, citations, or URLs.
+- If the article cites a company/system, only keep the claim if it is plausible/generic; do NOT fabricate a specific Big Tech attribution. Remove unsupported specific claims or rewrite as a labeled assumption/proposal.
+- Clearly separate: [SOURCE FACT] / [ANALYSIS] / [PROPOSED DESIGN] where relevant.
+- Remove AI filler, drama ("thieng lieng"/"phong tien"/"ke giam sat"/"chia khoa"/"tham hoa"), and unnecessary metaphors.
+- Use precise engineering terms; prefer standard English terms (timeout, retry, fallback, circuit breaker, async, consumer, producer, idempotency, backpressure, connection pool, row lock) with Vietnamese explanation once.
+- Do NOT overdramatize.
+- Keep code blocks minimal, correct, consistent.
+- Every number must be a source fact or explicitly labeled assumption ("gia dinh minh hoa").
+- Natural intro: what problem, why hard, what covered.
+- Keep bilingual EN+VI parity: same depth, same code/diagrams, faithful VI translation.
+- Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — IMPROVE title to be straightforward.
+- Only modify the two given files. Produce TWO files at the given temp paths.
+
+ARTICLE #7: system-design/file-storage
+CURRENT EN FILE (rewrite to /tmp/rt_7_file-storage/file-storage.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a File Storage System (Object Store)"
+description: "A practical design for a durable, versioned object store with multipart transfer, deduplication, temporary sharing, search, and CDN delivery."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building a multi-tenant object store for product users, internal services, and automation. A client should be able to upload a 4 GB video from an unreliable mobile connection, resume it after a process restart, retrieve an older version, and create a link that expires tomorrow. A service should be able to find objects by tenant-owned metadata without scanning the blob bytes.
+
+Functional requirements:
+
+- Multipart upload and download, including resumable ranges and parallel parts.
+- Immutable object versions. A logical key such as `reports/2026.pdf` may point to a new version while old versions remain addressable.
+- Content deduplication within a tenant, without allowing one tenant to infer another tenant's data.
+- Authenticated reads and short-lived sharing links with TTL and optional download limits.
+- Search over explicitly indexed metadata: tenant, key prefix, content type, tags, size, and creation time.
+- Delete, restore, lifecycle expiration, and audit events.
+
+The non-functional contract is more important than an attractive upload API:
+
+- At least 99.999999999% annual durability for committed bytes. This is a durability objective, not a promise that every request is available during a regional disaster.
+- 99.99% monthly availability for metadata APIs and 99.9% for data transfer, with a documented degraded mode.
+- Objects range from kilobytes to 5 TB. The metadata plane must not carry object payloads.
+- Horizontal capacity growth, CDN edge caching for public or shared reads, checksum verification at every storage boundary, and tenant isolation.
+- A successful retry must not create a second logical version or charge a client twice.
+
+The key boundary is therefore two planes: a transactional metadata/control plane and an immutable blob/data plane. The former decides what an object means; the latter stores bytes efficiently.
+
+## 2. Scale Estimation
+
+Assumptions are intentionally explicit so that they can be replaced by product telemetry:
+
+| Quantity | Assumption | Reason |
+|---|---:|---|
+| Daily active users | 10 million | A large consumer/work collaboration product |
+| Object API operations per active user/day | 20 | 8 reads, 2 writes, 10 metadata/list/link actions |
+| New logical objects/day | 5 million | Not every API operation creates an object |
+| Average new object size | 20 MB | Mix of documents, photos, and short media; large files are a minority |
+| Read:write object-byte ratio | 5:1 | Shared assets are downloaded repeatedly |
+| Peak multiplier | 10x average | Workday and launch-event concentration |
+| Retention | 3 years | Versioning and recovery policy |
+| Multipart part size | 64 MiB | Good retry granularity without excessive manifest rows |
+
+Request math:
+
+```text
+10,000,000 DAU x 20 operations/day = 200,000,000 operations/day
+200,000,000 / 86,400 = 2,315 average API requests/second
+2,315 x 10 = 23,150 peak API requests/second
+```
+
+Writes create `5,000,000 x 20 MB = 100 TB/day` of logical payload. With 3-year retention:
+
+```text
+100 TB/day x 365 x 3 = 109,500 TB = 109.5 PB logical bytes
+```
+
+If tenant-local deduplication removes 25% of repeated content, physical primary bytes are 82.1 PB. Three independently stored copies or erasure-coded equivalent at an average 1.5x overhead produce about 123.1 PB in the primary region. A second region with the same durability policy doubles the capacity requirement to approximately 246 PB. Metadata is smaller but not negligible: 5 million object versions/day x 1.2 KB average row footprint is 6 GB/day before indexes, or about 6.6 TB over three years including a 1.2x index/row overhead. Multipart manifests and part records add roughly 10%.
+
+The 5:1 byte read ratio means roughly `500 TB/day` egress from origin before CDN. That is:
+
+```text
+500 TB x 8 / 86,400 = 46.3 Gbit/s average origin egress
+46.3 x 10 = 463 Gbit/s peak origin egress
+```
+
+CDN hit rate of 70% would lower peak origin transfer to about 139 Gbit/s, but the edge still needs to serve the full 463 Gbit/s. The sizing target is therefore both CDN-scale bandwidth and origin protection, not merely application RPS. At 99.99% monthly availability, the error budget is about 4.32 minutes/month; durability is measured independently through repair, checksum, and loss-budget telemetry.
+
+## 3. API Design
+
+All endpoints use HTTPS and require a tenant-scoped bearer token except a share URL. `Idempotency-Key` is mandatory on mutating operations. The server binds the key to tenant, endpoint, request hash, and result for 24 hours; reusing it with a different request returns `409`.
+
+### Create an upload
+
+```http
+POST /v1/tenants/{tenant_id}/uploads
+Authorization: Bearer <token>
+Idempotency-Key: 01J...
+Content-Type: application/json
+
+{
+  "key": "videos/demo.mp4",
+  "size": 4294967296,
+  "content_type": "video/mp4",
+  "content_sha256": "optional-final-sha256",
+  "metadata": {"project": "demo", "classification": "internal"},
+  "dedup_scope": "tenant"
+}
+```
+
+```json
+{
+  "upload_id": "upl_7f3",
+  "object_id": "obj_91a",
+  "version_id": "ver_2b1",
+  "part_size": 67108864,
+  "expires_at": "2026-08-16T10:00:00Z"
+}
+```
+
+The control plane reserves a version but does not make it visible. The client uploads each part directly to a signed data-plane URL:
+
+```http
+PUT /v1/uploads/upl_7f3/parts/42
+Content-Length: 67108864
+Content-Digest: sha-256=:...:
+```
+
+The response includes the server-observed checksum and an opaque `ETag`. `PUT /v1/uploads/{upload_id}/parts/{part_number}` may be retried safely because a part number is unique within an upload and a different checksum returns `409`.
+
+### Complete or abort
+
+```http
+POST /v1/uploads/upl_7f3/complete
+Idempotency-Key: 01J...
+
+{"parts":[{"number":1,"sha256":"..."},{"number":2,"sha256":"..."}]}
+```
+
+The service verifies part membership, checksums, declared size, and final digest, then atomically transitions the version from `UPLOADING` to `COMMITTED`. A repeated completion returns the original version result. `DELETE /v1/uploads/{upload_id}` aborts an upload; a sweeper also expires abandoned uploads.
+
+### Read and list
+
+```http
+GET /v1/tenants/{tenant_id}/objects/{key}?version_id=ver_2b1
+Range: bytes=0-67108863
+```
+
+The API returns a redirect to a signed, range-capable data URL or streams through the gateway for policy enforcement. `GET /v1/tenants/{tenant_id}/objects?prefix=videos/&limit=100&cursor=...` lists committed versions. Listing is cursor-based and bounded; it never promises an unbounded directory.
+
+```http
+POST /v1/tenants/{tenant_id}/shares
+Idempotency-Key: 01J...
+
+{"version_id":"ver_2b1","ttl_seconds":86400,"max_downloads":3}
+```
+
+The response contains a random, non-enumerable token. `GE
+=== VI CURRENT ===
+---
+title: "Thiết kế Hệ thống Lưu trữ Tập tin (Object Store)"
+description: "Thiết kế thực tế cho object store có độ bền cao, multipart transfer, versioning, deduplication, chia sẻ tạm thời, tìm kiếm và phân phối CDN."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng một object store đa tenant cho người dùng sản phẩm, service nội bộ và hệ thống tự động hóa. Client phải có thể upload video 4 GB qua kết nối di động không ổn định, tiếp tục upload sau khi process khởi động lại, lấy một version cũ và tạo link hết hạn vào ngày mai. Một service phải có thể tìm object theo metadata do tenant sở hữu mà không quét các byte blob.
+
+Yêu cầu chức năng:
+
+- Multipart upload và download, gồm range có thể tiếp tục và các part song song.
+- Object version bất biến. Một key logic như `reports/2026.pdf` có thể trỏ tới version mới trong khi version cũ vẫn được truy cập.
+- Deduplication nội bộ tenant, không cho phép một tenant suy ra dữ liệu của tenant khác.
+- Read có xác thực và share link sống ngắn với TTL, tùy chọn giới hạn số lần tải.
+- Tìm kiếm trên metadata được chỉ mục rõ ràng: tenant, key prefix, content type, tag, size và thời điểm tạo.
+- Delete, restore, lifecycle expiration và audit event.
+
+
+Hợp đồng phi chức năng quan trọng hơn một API upload đẹp:
+
+- Ít nhất 99.999999999% durability hằng năm cho các byte đã commit. Đây là mục tiêu durability, không phải cam kết mọi request luôn available trong thảm họa vùng.
+- Availability hàng tháng 99.99% cho metadata API và 99.9% cho data transfer, với degraded mode được công bố.
+- Object từ kilobyte tới 5 TB. Data plane không được mang payload qua metadata plane.
+- Capacity tăng theo chiều ngang, CDN edge caching cho read public hoặc shared, xác minh checksum ở mọi biên lưu trữ và tenant isolation.
+- Retry thành công không được tạo logical version thứ hai hoặc tính phí client hai lần.
+
+Ranh giới cốt lõi là hai plane: transactional metadata/control plane và immutable blob/data plane. Plane đầu quyết định object có ý nghĩa gì; plane sau lưu byte hiệu quả.
+
+## 2. Scale Estimation
+
+Các giả định được ghi rõ để có thể thay bằng telemetry sản phẩm:
+
+| Đại lượng | Giả định | Lý do |
+|---|---:|---|
+| Daily active users | 10 triệu | Sản phẩm consumer/work collaboration quy mô lớn |
+| Object API operation trên mỗi active user/ngày | 20 | 8 read, 2 write, 10 thao tác metadata/list/link |
+| Logical object mới/ngày | 5 triệu | Không phải API operation nào cũng tạo object |
+| Kích thước object mới trung bình | 20 MB | Hỗn hợp document, ảnh và media ngắn; file lớn là thiểu số |
+| Tỷ lệ byte read:write | 5:1 | Asset shared được download nhiều lần |
+| Hệ số peak | 10x trung bình | Tập trung trong giờ làm việc và các sự kiện ra mắt |
+| Retention | 3 năm | Chính sách versioning và recovery |
+| Kích thước multipart part | 64 MiB | Retry đủ nhỏ mà không tạo quá nhiều manifest row |
+
+Tính request:
+
+```text
+10,000,000 DAU x 20 operations/day = 200,000,000 operations/day
+200,000,000 / 86,400 = 2,315 average API requests/second
+2,315 x 10 = 23,150 peak API requests/second
+```
+
+Write tạo `5,000,000 x 20 MB = 100 TB/day` payload logic. Với retention 3 năm:
+
+```text
+100 TB/day x 365 x 3 = 109,500 TB = 109.5 PB logical bytes
+```
+
+Nếu tenant-local dedup loại bỏ 25% content lặp, primary byte vật lý là 82.1 PB. Ba bản lưu độc lập hoặc mức tương đương bằng erasure coding với overhead trung bình 1.5x tạo khoảng 123.1 PB trong primary region. Region thứ hai với chính sách durability tương tự làm capacity cần thiết tăng gấp đôi, khoảng 246 PB. Metadata nhỏ hơn nhưng không thể bỏ qua: 5 triệu object version/ngày x footprint row trung bình 1.2 KB là 6 GB/ngày trước index, hoặc khoảng 6.6 TB trong 3 năm sau overhead row/index 1.2x. Multipart manifest và part record thêm khoảng 10%.
+
+Tỷ lệ byte read 5:1 nghĩa là khoảng `500 TB/day` egress từ origin trước CDN. Đó là:
+
+```text
+500 TB x 8 / 86,400 = 46.3 Gbit/s average origin egress
+46.3 x 10 = 463 Gbit/s peak origin egress
+```
+
+CDN hit rate 70% giảm origin transfer peak còn khoảng 139 Gbit/s, nhưng edge vẫn phải phục vụ đủ 463 Gbit/s. Vì vậy mục tiêu capacity gồm cả bandwidth quy mô CDN và bảo vệ origin, không chỉ application RPS. Ở availability 99.99% hàng tháng, error budget khoảng 4.32 phút/tháng; durability được đo độc lập qua telemetry repair, checksum và loss budget.
+
+## 3. API Design
+
+Mọi endpoint dùng HTTPS và yêu cầu bearer token theo tenant, ngoại trừ share URL. `Idempotency-Key` bắt buộc với mutation. Server bind key với tenant, endpoint, request hash và result trong 24 giờ; dùng lại key với request khác trả `409`.
+
+### Tạo upload
+
+```http
+POST /v1/tenants/{tenant_id}/uploads
+Authorization: Bearer <token>
+Idempotency-Key: 01J...
+Content-Type: application/json
+
+{
+  "key": "videos/demo.mp4",
+  "size": 4294967296,
+  "content_type": "video/mp4",
+  "content_sha256": "optional-final-sha256",
+  "metadata": {"project": "demo", "classification": "internal"},
+  "dedup_scope": "tenant"
+}
+```
+
+```json
+{
+  "upload_id": "upl_7f3",
+  "object_id": "obj_91a",
+  "version_id": "ver_2b1",
+  "part_size": 67108864,
+  "expires_at": "2026-08-16T10:00:00Z"
+}
+```
+
+Control plane reserve một version nhưng chưa làm nó visible. Client upload từng part trực tiếp tới signed data-plane URL:
+
+```http
+PUT /v1/uploads/upl_7f3/parts/42
+Content-Length: 67108864
+Content-Digest: sha-256=:...:
+```
+
+Response gồm checksum server quan sát và `ETag` opaque. `PUT /v1/uploads/{upload_id}/parts/{part_number}` có thể retry an toàn vì part number là duy nhất trong upload; checksum khác nhau trả `409`.
+
+### Hoàn tất hoặc hủy
+
+```http
+POST /v1/uploads/upl_7f3/complete
+Idempotency-Key: 01J...
+
+{"parts":[{"number":1,"sha256":"..."},{"number":2,"sha256":"..."}]}
+```
+
+Service xác minh part membership, checksum, kích thước khai báo và digest cuối, sau đó atomically chuyển version từ `UPLOADING` sang `COMMITTED`. Completion lặp lại trả kết quả version ban đầu. `DELETE /v1/uploads/{upload_id}` hủy upload; sweeper cũng expire upload bị bỏ quên.
+
+### Đọc và list
+
+```http
+GET /v1/tenants/{tenant_id}/objects/{key}?version_id=ver_2b1
+Range: bytes=0-67108863
+```
+
+API trả redirect tới signed data URL hỗ trợ range hoặc stream qua gateway để enforcement policy. `GET /v1/tenants/{tenant_id}/objects?prefix=videos/&limit=100&cursor=...` list các version đã commit. Listing dùng cursor và có giới hạn; không hứa hẹn một directory không giới hạn.
+
+```http
+POST /v1/tenants/{tenant_id}/shares
+Idempotency-Key: 01J...
+
+{"version_id":"ver_2b1","ttl_seconds":86400,"max_downloads":3}
+```
+
+Response có token ngẫu nhiên, không thể enumerate. `GET /s/{token}` kiểm tra revocation, expiry và download count trước khi cấp CDN URL sống ngắn. Share token không phải object key và được lưu dưới dạng hash.
+
+### Tìm kiếm metadata và lifecycle
+
+```http
+POST /v1/tenants/{tenant_id}/search
+
+{"filters":{"content_type":"video/mp4","tags":{"project":"demo"},"size_gte":1000000},"sort":"created_at_desc","limit":50,"cursor":"..."}
+```
+
+Se
+Rewrite both. Write:
+  /tmp/rt_7_file-storage/file-storage.en.md
+  /tmp/rt_7_file-storage/file-storage.vi.md
+Same technical content; rewrite language/clarity/structure per rules.
