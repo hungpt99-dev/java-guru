@@ -4,7 +4,7 @@
 set -uo pipefail
 cd /root/java-guru
 git checkout main 2>&1 | tail -1
-MODEL="opencode-go/gpt-5.6-luna"
+MODEL="opencode/deepseek-v4-flash-free"
 
 AI_SL="llm-transaction-explainer-rag smart-notifications-llm ledger-anomaly-detection ai-ops-incident-triage trace-summarization-llm kyc-document-intake-llm gateway-ai-guardrail platform-ai-core-library"
 IV_SL=$(ls src/data/blog/en/interview/ 2>/dev/null | sed 's/\.md$//')

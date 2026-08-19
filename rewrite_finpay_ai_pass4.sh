@@ -4,7 +4,7 @@
 set -uo pipefail
 cd /root/java-guru
 git checkout main 2>&1 | tail -1
-MODEL="opencode-go/gpt-5.6-luna"
+MODEL="opencode/deepseek-v4-flash-free"
 TASKDIR="/root/java-guru/tasks_finpay_ai2"
 
 declare -A SLUG

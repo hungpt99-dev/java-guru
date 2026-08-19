@@ -3,7 +3,7 @@
 set -uo pipefail
 cd /root/java-guru
 git checkout main 2>&1 | tail -1
-MODEL="opencode-go/gpt-5.6-luna"
+MODEL="opencode/deepseek-v4-flash-free"
 
 make_one() {
   local N="$1"; local SLUG="$2"; local TASK="$3"; local TMP="/tmp/sysd_${N}"
