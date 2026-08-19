@@ -1,5 +1,5 @@
 ---
-title: "A Shared AI Core Library for Microservices"
+title: "Designing a Shared AI Core for FinPay Microservices: From Failure Modes to Guardrails"
 description: "A practical design for shared LLM integration with BYOK credentials, resilience controls, idempotency, and auditable outcomes."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
@@ -9,197 +9,146 @@ featured: false
 
 Repo referenced by the source material: <https://github.com/finpay-lab/platform>
 
-## The problem
+## Problem
 
-Adding an LLM call to one service is straightforward. Operating that call consistently across a microservice fleet is not. The integration needs credential isolation, bounded failure handling, duplicate-event protection, and an audit record that is useful after the fact.
+Adding an LLM call to one service is easy. Operating that call across a microservice fleet is not. Different services may call providers directly, keep keys in `application.yml`, parse responses differently, retry without a timeout, or record completion as `logger.info("done")`. The result is inconsistent security, failure behavior, duplicate processing, and weak evidence when a transaction is investigated.
 
-**[SOURCE FACT]** The source article describes three services with three different integration patterns: direct provider calls from a controller, an API key in `application.yml`, and a retry strategy that sends a failed event back to a dead-letter queue without a timeout. It also describes inconsistent `JsonObject` parsing, no shared telemetry, and an audit trail reduced to a `logger.info("done")` message.
+**[SOURCE FACT]** The source material describes those integration patterns across three services. **[ANALYSIS]** This article treats them as platform problems, not proof of a production FinPay implementation. FinPay is a reference design; a production-oriented design would validate every assumption against its actual compliance, data, and traffic requirements.
 
-**[ANALYSIS]** Those are not separate LLM problems. They are platform concerns. A shared Spring Boot module can provide one contract for provider calls, credential lookup, resilience, deduplication, and decision auditing while leaving business-specific policy in the calling service.
+## Why It Is Hard
 
-This article covers that boundary. It does not treat an LLM as a money-movement authority, and it does not claim that the implementation below is a complete production library.
+An AI result is probabilistic, while a payment workflow needs deterministic control. A false positive can delay a legitimate payment; a false negative can miss fraud. The same prompt may behave differently after a model update, and a provider can be slow, rate-limited, unavailable, or expensive. A retry can also turn one delivery into multiple side effects unless storage and effects are designed separately.
 
-## Guardrails
-
-These are the non-negotiable rules in the proposed design:
-
-1. **AI is not the money decision-maker.** An LLM may enrich a deterministic or human decision with a fraud score, a suggested limit, or a risk label. The rule engine or an authorized person decides whether money is moved or blocked. The library therefore returns a scored, labeled, auditable observation rather than an `approve`/`reject` command.
-2. **Use caller-supplied `eventId` for idempotency.** Redelivery, a retry, or a double-click must not create another outcome for the same event. The library should make this an explicit contract, backed by an atomic claim in the outcome store.
-3. **Bound every provider call.** A timeout, bounded retries with backoff, and a circuit breaker prevent a failing provider from consuming the caller's resources indefinitely. These controls are complementary: a timeout bounds one attempt, retry handles selected transient failures, and the circuit breaker stops calls when failure is persistent.
-4. **Use BYOK without exposing secrets.** Each tenant supplies its own key. The key is kept in Vault or another secret manager, resolved by reference, rotated there, and excluded from logs, traces, and audit records.
-5. **Audit the result, not the secret.** Persist the prompt hash, model, latency, cost, key ID, and verdict to OpenSearch so the result can be queried for forensic analysis without storing the prompt or API key itself.
-
-## Architecture
-
-**[PROPOSED DESIGN]** Keep the use case in `domain/` dependent on ports only. Put Kafka, model providers, Redis, OpenSearch, and Vault integrations in `infrastructure/` adapters.
+The useful contract is therefore:
 
 ```text
-                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
-  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
-  tx.risk      │            │              ▲                   ▲                ▲
-               │            │              │ adapters          │ adapters       │ adapter
-               ▼            ▼              │                   │                │
-          infrastructure/ ─┼───────────────┴───────────────────┴────────────────┘
-                 │
-                 ├── ModelProviderAdapter (OpenAI / Anthropic / Bedrock)
-                 ├── RedisOutcomeStore            (dedup + short TTL)
-                 ├── OpenSearchDecisionAudit      (long-term forensics)
-                 └── VaultCredentialResolver      (BYOK by reference)
+AI signal -> policy evaluation -> business decision
 ```
 
-The use case knows only the ports. Replacing one model provider with another should therefore be an adapter change, not a change to domain policy. That is a design goal, not a claim about a particular repository implementation.
+The AI component emits a bounded observation such as a score, label, confidence, model version, and reason code. A deterministic policy or authorized human decides whether to hold, review, or continue a payment. The AI never receives authority to move money.
 
-## Credentials: wrong and right
+## Naive Design
 
-### Wrong
+A first implementation often puts provider code in a controller:
 
 ```java
-// Hardcoded key: it can be committed, copied into tickets, and logged.
-public class MoneyFairyService {
-    private static final String OPENAI_KEY = "«redacted:sk-…»...";
+// WRONG: secret, unbounded call, and business authority in one request
+String answer = llm.chat(apiKey, request.toJson());
+return answer.contains("approve") ? APPROVE : REJECT;
+```
 
-    public String label(String text) {
-        OpenAIClient client = new OpenAIClient(OPENAI_KEY);
-        log.info("Calling provider with key={}", OPENAI_KEY);
-        return client.complete(systemPrompt + text);
-    }
+A second attempt may add `exists()` before saving an outcome:
+
+```java
+// WRONG: two consumers can both observe false
+if (!outcomeRepository.exists(eventId)) {
+    outcomeRepository.save(new Outcome(eventId, signal));
 }
 ```
 
-The key is now part of the repository and process configuration, cannot be rotated independently of deployment, and is exposed by the log statement. Secret scanners can also retain a finding after the key has been removed from the working tree. The practical response is rotation and removal from history, not merely deleting the line.
+Both examples appear to work in a happy-path test. Neither defines what happens under concurrency, provider failure, redelivery, or an ambiguous model response.
 
-### Right
+## Why It Breaks
 
-**[PROPOSED DESIGN]** Store a reference in configuration. Resolve the secret only at the provider boundary.
+`exists()` followed by `save()` is a race: two workers can both see absence and both insert. A timeout-free retry can hold threads indefinitely, amplify provider load, and redeliver the same event. A key in configuration can leak through configuration dumps, logs, or support tooling. Parsing free-form text makes schema drift a business incident. Treating a model label as approval silently converts a probabilistic signal into a financial command.
 
-```yaml
-# application.yml: a reference, never the secret itself
-ai:
-  provider: anthropic
-  key-ref: vault://finpay/ai/tenant-42/anthropic-key
-  model: claude-sonnet-4-5
-  timeout: 4s
-  max-retries: 3
-```
+There is also no single source of truth in the naive layout. A search index is not a transaction ledger, a dead-letter queue is not an audit record, and a log line is not a replayable decision history.
+
+## Hard Problems
+
+### Idempotency is two problems
+
+Storage idempotency means the same logical event produces one stored outcome. It does not make external side effects idempotent. A notification, case creation, or payment command needs its own idempotency key or outbox-driven delivery.
+
+Real mechanisms include:
+
+- A database unique constraint on `(tenant_id, event_id)` with an atomic insert; the loser reads the existing outcome.
+- `SETNX` with an expiry for a short-lived claim, followed by durable outcome storage; Redis alone is not the system of record.
+- An inbox table that claims consumed event IDs transactionally.
+- An outbox row written in the same transaction as the outcome, then delivered with a stable effect idempotency key.
 
 ```java
-@ConfigurationProperties(prefix = "ai")
-@Validated
-public record AiProperties(
-        @NotBlank String provider,
-        @NotBlank String keyRef,
-        @NotBlank String model,
-        @DurationMin(seconds = 1) Duration timeout,
-        @Min(0) int maxRetries) {
+// RIGHT: the database arbitrates the race
+try {
+    outcomeRepository.insertUnique(tenantId, eventId, signal);
+    outboxRepository.insert(tenantId, eventId, "RISK_SIGNAL_RECORDED");
+} catch (DuplicateKeyException alreadyProcessed) {
+    return outcomeRepository.get(tenantId, eventId);
 }
 ```
 
-```java
-// domain/: the use case never receives a key.
-public interface CredentialResolver {
-    KeyCredentials resolve(String keyRef);
-}
+The provider call itself may still be repeated. The design must tolerate that by making the final stored outcome authoritative, or by using a provider request idempotency key where supported.
 
-public record KeyCredentials(String id, char[] secret) { }
-```
+### AI uncertainty and evolution
 
-```java
-// infrastructure/: the adapter talks to Vault.
-@Component
-public class VaultCredentialResolver implements CredentialResolver {
-    private final VaultTemplate vault;
+The response must be validated against a versioned schema. Invalid JSON, missing fields, contradictory labels, low confidence, and timeout are explicit outcomes, not reasons to guess. Store `model_version` and `prompt_version`; a changed prompt is a changed decision input. Policies should have their own `policy_version` and thresholds should be testable against historical cases.
 
-    public KeyCredentials resolve(String keyRef) {
-        VaultResponse response = vault.readSecret(keyRef);
-        return new KeyCredentials(response.getKeyId(),
-                response.getData().get("api_key").toCharArray());
-    }
-}
-```
+### Resilience and cost
 
-```java
-// infrastructure/: resolve in memory for one call and never expose the key.
-@Component
-public class AnthropicModelAdapter implements ModelProvider {
-    private final CredentialResolver credentials;
-    private final AiProperties props;
+Set a per-attempt timeout, a total deadline, bounded retries with exponential backoff and jitter, and a circuit breaker. Retry only transient failures such as selected 429/5xx responses; do not retry validation failures. Rate limits require admission control and backpressure. A fallback can use deterministic rules or route to manual review, but it must be labeled as fallback and must not invent an AI signal.
 
-    public ModelResult complete(AiRequest request) {
-        KeyCredentials creds = credentials.resolve(props.keyRef());
-        try (AnthropicClient client = new AnthropicClient(creds)) {
-            return client.complete(props.model(), request);
-        } finally {
-            Arrays.fill(creds.secret(), 'x');
-        }
-    }
-}
-```
+## Trade-offs
 
-The example keeps the secret inside the adapter's scope as a `char[]` and scrubs that array after the call. This reduces accidental exposure; it is not a guarantee against every memory-disclosure mechanism. The key ID may be audited, but the key material must not be.
+A shared library standardizes contracts and instrumentation, but it cannot force every service to use it or make incompatible provider semantics disappear. A sidecar or gateway centralizes policy and rotation but adds a network hop and another availability boundary. Synchronous scoring is simple for a user request but couples payment latency to AI latency; asynchronous scoring improves isolation but requires a pending state and eventual consistency.
 
-## Resilience: wrong and right
+BYOK improves tenant isolation and cost attribution, while increasing secret-manager calls and rotation complexity. Persisting hashes and metadata supports investigations with less exposure, but limits later prompt-level debugging. These are deliberate boundaries, not claims that one option is universally best.
 
-### Wrong
+## Better Design
 
-```java
-public String callLlm(String prompt) throws IOException, InterruptedException {
-    HttpClient client = HttpClient.newHttpClient();
-    HttpRequest req = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofMinutes(30))
-            .POST(...)
-            .build();
-    HttpResponse<String> res = client.send(req, BodyHandlers.ofString());
-    if (res.statusCode() == 500) {
-        return callLlm(prompt);
-    }
-    return res.body();
-}
-```
-
-This holds a thread for up to 30 minutes, retries recursively without a bound, and has no circuit state. If the provider remains unavailable, callers keep spending resources on the same failing endpoint.
-
-### Right
-
-**[PROPOSED DESIGN]** Apply resilience at the provider port. The exact library configuration is implementation-specific, but the behavior should be explicit:
-
-```java
-@Component
-public class ResilientModelPort {
-    private final Retry retry;
-    private final CircuitBreaker circuitBreaker;
-    private final ModelProvider delegate;
-
-    public ModelResult complete(AiRequest request) {
-        return circuitBreaker.executeSupplier(() ->
-                retry.executeSupplier(() -> delegate.complete(request)));
-    }
-}
-```
-
-Configure the HTTP client with a finite timeout such as the `4s` value shown above. Retry only failures that are safe and likely to be transient, cap the retry count, and use backoff. Do not retry validation errors, authentication failures, or a request whose side effects cannot be made idempotent. A circuit breaker should fail fast while the provider is unhealthy; the caller can then choose a fallback, defer the event, or record an unavailable outcome.
-
-The fallback is part of the use-case contract, not an excuse to invent an AI result. A safe fallback can preserve the event for later processing or return an explicit `UNAVAILABLE` status to deterministic business logic.
-
-## Idempotency and audit boundary
-
-**[PROPOSED DESIGN]** The consumer passes `eventId` into the use case. The use case attempts an atomic claim in `RedisOutcomeStore` before calling the provider. If the event was already completed, return the stored outcome. If it is in progress, apply the consumer's defined redelivery behavior rather than starting a second provider call.
-
-Redis is shown for deduplication with a short TTL. The long-term record belongs in `OpenSearchDecisionAudit`. The audit document should contain fields such as:
+The shared module should expose a narrow, typed port: `assess(signalRequest) -> aiSignal`. It resolves a tenant's key by Vault reference, builds a provider-neutral request, validates a structured response, and applies resilience controls. The caller owns business policy; the module owns technical safety and evidence.
 
 ```text
-eventId, promptHash, model, latency, cost, keyId, verdict
+Kafka (replay source) -> consumer -> AI core -> signal store + outbox
+                                      |              |
+                                      v              v
+                               policy service   notifications/effects
+
+DB = system of record
+OpenSearch = read model for investigation and dashboards
+Vault = secret source
 ```
 
-These fields are the audit contract described by the source material. Retention, index mappings, cost calculation, and the exact verdict vocabulary still need to be defined by the owning platform team. In particular, `eventId` uniqueness must be scoped deliberately if multiple tenants or event domains can reuse the same value.
+The transaction that records an outcome should include `transaction_id`, `event_id`, `tenant_id`, signal data, `model_version`, `prompt_version`, `policy_version`, `decision`, `reason`, timestamps, and a correlation reference. The audit record must never contain the raw API key. If the policy decision is recorded separately, link it to the same event and transaction rather than overwriting the original signal.
 
-## What this buys you
+## Failure Scenarios
 
-The value of a shared core library is a narrow, enforceable boundary:
+- **Provider timeout:** stop at the deadline, record `AI_TIMEOUT`, and route to deterministic fallback or manual review.
+- **429 or 5xx:** retry only within the request budget; honor provider rate limits and open the circuit when failures persist.
+- **Malformed or nondeterministic response:** reject the response as invalid, record the model and prompt versions, and do not infer approval.
+- **Consumer crash after insert:** the unique outcome and outbox make redelivery safe; an inbox can mark consumption in the same transaction.
+- **Outbox delivery retry:** use an effect idempotency key; storage idempotency alone does not prevent duplicate email, case, or payment calls.
+- **OpenSearch outage:** continue the business path if the durable DB audit succeeds; replay indexing later. Do not make the search index authoritative.
+- **Vault outage or key rotation race:** fail closed for unavailable credentials, cache only within an explicit short TTL, and never fall back to a hard-coded key.
 
-- business services submit an AI request through a stable use-case API;
-- provider credentials stay behind a resolver and adapter;
-- timeouts and bounded retries are applied consistently;
-- duplicate events can be recognized before another provider call;
-- audit records describe what happened without containing the secret.
+## Capacity
 
-That boundary makes AI integration less dependent on individual service conventions. It does not remove the need for provider-specific testing, access controls, retention policy, or a deterministic decision process outside the library.
+For a synchronous path, the basic relationship is:
+
+```text
+Concurrency = Throughput x Latency
+```
+
+At 200 requests/second and a 750 ms end-to-end latency, the path needs about 150 in-flight requests before safety headroom. Size consumer concurrency, connection pools, provider quotas, and circuit-breaker limits independently. Retries increase attempted provider throughput, so if 10% of calls retry once, provider attempts are roughly `200 x 1.10 = 220/second`, not 200.
+
+Kafka is the replay source, not the business ledger. The DB is the system of record for outcomes and idempotency. OpenSearch is a denormalized read model and may lag or be rebuilt. Capacity planning must include peak partitions, consumer lag, DB unique-index contention, Vault QPS, OpenSearch indexing rate, token cost, and a retry storm during provider recovery.
+
+## Security and Privacy
+
+Minimize data before sending anything to an external AI provider: prefer derived features, redaction, tokenization, and a strict allowlist over a full transaction payload. Do not casually send names, account numbers, addresses, free-form notes, or regulated identifiers. Encrypt data in transit and at rest, isolate tenants, restrict Vault access, rotate keys, and redact secrets and PII from logs, traces, prompts, and exception messages.
+
+Access to the audit trail needs least privilege and retention rules. Hashing a prompt is not anonymization if the original can be reconstructed from a small input space. Define provider retention, residency, training-use, and deletion terms before enabling BYOK routing. A production-oriented design would also require threat modeling, access reviews, and compliance approval.
+
+## Observability
+
+Measure both system behavior and business quality. Useful system metrics include request count, latency percentiles, timeout and retry counts, circuit state, rate-limit responses, token usage, cost estimates, Vault failures, DB conflict counts, outbox age, consumer lag, and OpenSearch indexing lag. Useful business metrics include fallback rate, manual-review rate, policy outcomes, false-positive/false-negative samples from reviewed cases, and drift by model and policy version.
+
+Never use `transaction_id`, `account_id`, prompt text, or event ID as Prometheus labels: their cardinality and sensitivity are unsafe. Put correlation IDs in structured logs or trace context with access controls, and use aggregate labels such as service, provider, model version, policy version, and outcome class. A useful audit query can then reconstruct: transaction, event, signal, versions, decision, and reason without exposing the payload.
+
+## Lessons
+
+1. Start from failure modes and decision authority, then choose the architecture.
+2. Treat AI as a versioned, fallible signal; policy converts it into a business decision.
+3. Use atomic uniqueness, inbox/outbox patterns, and effect keys instead of `exists()` checks.
+4. Bound latency, retries, rate limits, cost, and fallback behavior explicitly.
+5. Keep Kafka for replay, the DB as the record of truth, and OpenSearch as a rebuildable read model.
+6. Minimize sensitive data and make audit and observability useful without turning identifiers into metrics labels.

@@ -1,5 +1,5 @@
 ---
-title: "Thư viện AI core dùng chung cho hệ thống microservice"
+title: "Thiết kế AI Core dùng chung cho FinPay: Từ failure mode đến guardrail"
 description: "Thiết kế thực tế cho tích hợp LLM dùng chung với credential BYOK, cơ chế chống lỗi, idempotency và kết quả có audit."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
@@ -11,195 +11,144 @@ Repo được nhắc đến trong tài liệu nguồn: <https://github.com/finpa
 
 ## Bài toán
 
-Thêm một lời gọi LLM vào một service khá đơn giản. Vận hành lời gọi đó nhất quán trên cả một fleet microservice thì không. Tích hợp cần cô lập credential, xử lý lỗi có giới hạn, chống xử lý trùng event và tạo audit record hữu ích khi cần điều tra.
+Thêm một lời gọi LLM vào một service khá đơn giản. Vận hành lời gọi đó nhất quán trên cả fleet microservice thì không. Các service có thể gọi provider trực tiếp, để key trong `application.yml`, parse response khác nhau, retry không có timeout, hoặc chỉ ghi `logger.info("done")`. Kết quả là security, failure behavior, xử lý trùng và bằng chứng điều tra đều không nhất quán.
 
-**[THÔNG TIN NGUỒN]** Tài liệu nguồn mô tả ba service với ba cách tích hợp khác nhau: gọi trực tiếp provider từ controller, đặt API key trong `application.yml`, và xử lý lỗi bằng cách gửi event lỗi trở lại dead-letter queue mà không có timeout. Tài liệu cũng mô tả việc parse `JsonObject` không nhất quán, không có telemetry dùng chung, và audit trail chỉ còn một thông báo `logger.info("done")`.
+**[THÔNG TIN NGUỒN]** Tài liệu nguồn mô tả các pattern đó ở ba service. **[PHÂN TÍCH]** Bài viết này xem chúng là vấn đề platform, không phải bằng chứng về một triển khai FinPay production. FinPay là reference design; một thiết kế hướng production cần kiểm chứng mọi giả định theo yêu cầu compliance, dữ liệu và lưu lượng thực tế.
 
-**[PHÂN TÍCH]** Đây không phải là ba vấn đề LLM độc lập. Đây là các mối quan tâm của platform. Một module Spring Boot dùng chung có thể cung cấp cùng một contract cho việc gọi provider, tra credential, xử lý lỗi, deduplication và audit quyết định, trong khi policy nghiệp vụ vẫn nằm ở service gọi nó.
+## Vì Sao Khó
 
-Bài viết này tập trung vào ranh giới đó. LLM không được xem là bên có quyền quyết định việc chuyển tiền, và phần code dưới đây không được trình bày như một thư viện production hoàn chỉnh.
+Kết quả AI mang tính xác suất, trong khi workflow thanh toán cần kiểm soát xác định. False positive có thể trì hoãn giao dịch hợp lệ; false negative có thể bỏ sót gian lận. Cùng một prompt có thể cho hành vi khác sau khi model đổi, còn provider có thể chậm, bị rate-limit, unavailable hoặc tốn kém. Retry cũng có thể biến một lần giao thành nhiều side effect nếu storage và effect không được thiết kế riêng.
 
-## Guardrails
-
-Đây là các quy tắc không thể bỏ qua trong thiết kế đề xuất:
-
-1. **AI không quyết định việc chuyển tiền.** LLM có thể bổ sung thông tin cho quyết định của rule xác định (deterministic) hoặc con người, chẳng hạn fraud score, hạn mức đề xuất hoặc risk label. Rule engine hoặc người có thẩm quyền mới quyết định chuyển hay chặn tiền. Vì vậy thư viện trả về một observation có score, label và audit, thay vì một lệnh `approve`/`reject`.
-2. **Dùng `eventId` do bên gọi cung cấp để bảo đảm idempotency.** Redelivery, retry hoặc double-click không được tạo thêm outcome cho cùng một event. Thư viện nên biến đây thành contract rõ ràng, được bảo vệ bằng thao tác claim atomic trong outcome store.
-3. **Giới hạn mọi lời gọi provider.** Timeout, retry có giới hạn kèm backoff và circuit breaker ngăn provider lỗi chiếm tài nguyên của bên gọi vô thời hạn. Ba cơ chế có vai trò khác nhau: timeout giới hạn một attempt, retry xử lý một số lỗi tạm thời, còn circuit breaker ngắt lời gọi khi lỗi kéo dài.
-4. **Dùng BYOK nhưng không để lộ secret.** Mỗi tenant cung cấp key riêng. Key được giữ trong Vault hoặc secret manager khác, được tra cứu bằng reference, xoay vòng tại đó, và không xuất hiện trong log, trace hay audit record.
-5. **Audit kết quả, không audit secret.** Lưu prompt hash, model, latency, cost, key ID và verdict vào OpenSearch để truy vấn phục vụ forensic analysis, nhưng không lưu prompt hoặc API key.
-
-## Kiến trúc
-
-**[THIẾT KẾ ĐỀ XUẤT]** Giữ use case trong `domain/` và chỉ cho nó phụ thuộc vào các port. Đặt tích hợp Kafka, model provider, Redis, OpenSearch và Vault vào các adapter trong `infrastructure/`.
+Contract hữu ích là:
 
 ```text
-                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
-  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
-  tx.risk      │            │              ▲                   ▲                ▲
-               │            │              │ adapters          │ adapters       │ adapter
-               ▼            ▼              │                   │                │
-          infrastructure/ ─┼───────────────┴───────────────────┴────────────────┘
-                 │
-                 ├── ModelProviderAdapter (OpenAI / Anthropic / Bedrock)
-                 ├── RedisOutcomeStore            (dedup + TTL ngắn)
-                 ├── OpenSearchDecisionAudit      (forensics dài hạn)
-                 └── VaultCredentialResolver      (BYOK theo reference)
+AI signal -> policy evaluation -> business decision
 ```
 
-Use case chỉ biết các port. Vì vậy, thay một model provider bằng provider khác nên chỉ cần thay adapter, không phải thay policy trong domain. Đây là mục tiêu thiết kế, không phải khẳng định về một implementation cụ thể trong repository.
+AI component phát ra observation có giới hạn như score, label, confidence, model version và reason code. Policy xác định hoặc người có thẩm quyền quyết định hold, review hay tiếp tục thanh toán. AI không bao giờ có quyền chuyển tiền.
 
-## Credential: sai và đúng
+## Thiết Kế Ngây Thơ
 
-### Sai
+Implement đầu tiên thường đặt provider code trong controller:
 
 ```java
-// Key hardcode: có thể bị commit, copy vào ticket và ghi vào log.
-public class MoneyFairyService {
-    private static final String OPENAI_KEY = "«redacted:sk-…»...";
+// SAI: secret, lời gọi không giới hạn và quyền nghiệp vụ trộn vào một request
+String answer = llm.chat(apiKey, request.toJson());
+return answer.contains("approve") ? APPROVE : REJECT;
+```
 
-    public String label(String text) {
-        OpenAIClient client = new OpenAIClient(OPENAI_KEY);
-        log.info("Calling provider with key={}", OPENAI_KEY);
-        return client.complete(systemPrompt + text);
-    }
+Lần thử thứ hai có thể thêm `exists()` trước khi lưu outcome:
+
+```java
+// SAI: hai consumer có thể cùng thấy false
+if (!outcomeRepository.exists(eventId)) {
+    outcomeRepository.save(new Outcome(eventId, signal));
 }
 ```
 
-Key lúc này nằm trong repository và cấu hình của process, không thể xoay vòng độc lập với việc deploy, đồng thời bị lộ qua câu lệnh log. Secret scanner cũng có thể giữ lại finding sau khi key đã bị xóa khỏi working tree. Cách xử lý thực tế là xoay vòng key và loại bỏ khỏi history, không chỉ xóa một dòng code.
+Cả hai ví dụ đều có vẻ chạy trong happy-path test. Nhưng chúng không định nghĩa hành vi khi có concurrency, provider failure, redelivery hoặc model response không rõ ràng.
 
-### Đúng
+## Vì Sao Hỏng
 
-**[THIẾT KẾ ĐỀ XUẤT]** Lưu reference trong configuration. Chỉ resolve secret ở ranh giới provider.
+`exists()` rồi `save()` là race condition: hai worker có thể cùng thấy bản ghi chưa tồn tại và cùng insert. Retry không có timeout có thể giữ thread vô hạn, khuếch đại tải provider và redeliver cùng event. Key trong config có thể lộ qua config dump, log hoặc tool hỗ trợ. Parse text tự do khiến schema drift trở thành incident nghiệp vụ. Xem model label như approval biến signal xác suất thành lệnh tài chính một cách âm thầm.
 
-```yaml
-# application.yml: reference, không phải secret
-ai:
-  provider: anthropic
-  key-ref: vault://finpay/ai/tenant-42/anthropic-key
-  model: claude-sonnet-4-5
-  timeout: 4s
-  max-retries: 3
-```
+Layout ngây thơ cũng không có source of truth duy nhất. Search index không phải transaction ledger, dead-letter queue không phải audit record, và log line không phải lịch sử quyết định có thể replay.
+
+## Những Bài Toán Khó
+
+### Idempotency là hai bài toán
+
+Storage idempotency nghĩa là cùng một logical event chỉ tạo một outcome được lưu. Nó không làm cho external side effect idempotent. Notification, tạo case hay payment command cần idempotency key riêng hoặc delivery qua outbox.
+
+Các cơ chế thực tế gồm:
+
+- Unique constraint trong database trên `(tenant_id, event_id)` với atomic insert; bên thua đọc outcome đã có.
+- `SETNX` kèm expiry cho claim ngắn hạn, sau đó lưu outcome bền vững; Redis không phải system of record.
+- Inbox table claim event ID một cách transactional.
+- Outbox row được ghi cùng transaction với outcome, sau đó delivery bằng effect idempotency key ổn định.
 
 ```java
-@ConfigurationProperties(prefix = "ai")
-@Validated
-public record AiProperties(
-        @NotBlank String provider,
-        @NotBlank String keyRef,
-        @NotBlank String model,
-        @DurationMin(seconds = 1) Duration timeout,
-        @Min(0) int maxRetries) {
+// ĐÚNG: database phân xử race
+try {
+    outcomeRepository.insertUnique(tenantId, eventId, signal);
+    outboxRepository.insert(tenantId, eventId, "RISK_SIGNAL_RECORDED");
+} catch (DuplicateKeyException alreadyProcessed) {
+    return outcomeRepository.get(tenantId, eventId);
 }
 ```
 
-```java
-// domain/: use case không bao giờ nhận key.
-public interface CredentialResolver {
-    KeyCredentials resolve(String keyRef);
-}
+Provider call vẫn có thể bị lặp. Thiết kế phải chịu được điều đó bằng cách coi outcome lưu cuối là authoritative, hoặc dùng provider request idempotency key nếu provider hỗ trợ.
 
-public record KeyCredentials(String id, char[] secret) { }
-```
+### Bất định và tiến hóa của AI
 
-```java
-// infrastructure/: adapter giao tiếp với Vault.
-@Component
-public class VaultCredentialResolver implements CredentialResolver {
-    private final VaultTemplate vault;
+Response phải được validate theo schema có version. JSON lỗi, thiếu field, label mâu thuẫn, confidence thấp và timeout là các outcome rõ ràng, không phải lý do để đoán. Lưu `model_version` và `prompt_version`; prompt đổi nghĩa là input quyết định đổi. Policy cần có `policy_version`, và threshold phải có thể test trên dữ liệu lịch sử.
 
-    public KeyCredentials resolve(String keyRef) {
-        VaultResponse response = vault.readSecret(keyRef);
-        return new KeyCredentials(response.getKeyId(),
-                response.getData().get("api_key").toCharArray());
-    }
-}
-```
+### Resilience và chi phí
 
-```java
-// infrastructure/: resolve trong bộ nhớ cho một lần gọi và không để lộ key.
-@Component
-public class AnthropicModelAdapter implements ModelProvider {
-    private final CredentialResolver credentials;
-    private final AiProperties props;
+Đặt timeout cho từng attempt, total deadline, retry có giới hạn với exponential backoff và jitter, cùng circuit breaker. Chỉ retry lỗi tạm thời như một số response 429/5xx; không retry lỗi validation. Rate limit cần admission control và backpressure. Fallback có thể dùng rule xác định hoặc chuyển manual review, nhưng phải gắn nhãn fallback và không được tự tạo AI signal.
 
-    public ModelResult complete(AiRequest request) {
-        KeyCredentials creds = credentials.resolve(props.keyRef());
-        try (AnthropicClient client = new AnthropicClient(creds)) {
-            return client.complete(props.model(), request);
-        } finally {
-            Arrays.fill(creds.secret(), 'x');
-        }
-    }
-}
-```
+## Trade-off
 
-Ví dụ giữ secret trong phạm vi adapter dưới dạng `char[]` và xóa nội dung mảng sau lời gọi. Cách này giảm nguy cơ lộ do vô tình, nhưng không bảo đảm chống mọi cơ chế làm lộ memory. Có thể audit key ID, nhưng không được audit key material.
+Shared library chuẩn hóa contract và instrumentation, nhưng không thể buộc service nào cũng dùng nó hoặc xóa khác biệt semantics giữa các provider. Sidecar hay gateway tập trung policy và rotation nhưng thêm network hop và availability boundary. Scoring đồng bộ đơn giản cho user request nhưng buộc latency thanh toán phụ thuộc AI; scoring bất đồng bộ cô lập tốt hơn nhưng cần trạng thái pending và eventual consistency.
 
-## Resilience: sai và đúng
+BYOK tăng tenant isolation và cost attribution, đồng thời tăng số lần gọi secret manager và độ phức tạp rotation. Lưu hash và metadata hỗ trợ điều tra với ít exposure hơn, nhưng hạn chế debug prompt về sau. Đây là các ranh giới có chủ đích, không phải khẳng định một lựa chọn luôn tốt nhất.
 
-### Sai
+## Thiết Kế Tốt Hơn
 
-```java
-public String callLlm(String prompt) throws IOException, InterruptedException {
-    HttpClient client = HttpClient.newHttpClient();
-    HttpRequest req = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofMinutes(30))
-            .POST(...)
-            .build();
-    HttpResponse<String> res = client.send(req, BodyHandlers.ofString());
-    if (res.statusCode() == 500) {
-        return callLlm(prompt);
-    }
-    return res.body();
-}
-```
-
-Đoạn code giữ một thread tối đa 30 phút, retry đệ quy không giới hạn và không có circuit state. Khi provider tiếp tục không khả dụng, caller vẫn tiêu tốn tài nguyên cho cùng một endpoint đang lỗi.
-
-### Đúng
-
-**[THIẾT KẾ ĐỀ XUẤT]** Đặt resilience tại provider port. Cấu hình cụ thể phụ thuộc thư viện được chọn, nhưng behavior phải rõ ràng:
-
-```java
-@Component
-public class ResilientModelPort {
-    private final Retry retry;
-    private final CircuitBreaker circuitBreaker;
-    private final ModelProvider delegate;
-
-    public ModelResult complete(AiRequest request) {
-        return circuitBreaker.executeSupplier(() ->
-                retry.executeSupplier(() -> delegate.complete(request)));
-    }
-}
-```
-
-Cấu hình HTTP client với timeout hữu hạn, chẳng hạn giá trị `4s` ở trên. Chỉ retry những lỗi an toàn và có khả năng là tạm thời; giới hạn số lần retry và dùng backoff. Không retry lỗi validation, lỗi authentication hoặc request có side effect nhưng không bảo đảm idempotency. Circuit breaker nên fail fast khi provider không khỏe; caller có thể chọn fallback, trì hoãn event hoặc ghi nhận outcome `UNAVAILABLE`.
-
-Fallback là một phần của contract use case, không phải lý do để tự tạo ra kết quả AI. Fallback an toàn có thể giữ event để xử lý sau hoặc trả về trạng thái `UNAVAILABLE` rõ ràng cho business logic xác định.
-
-## Idempotency và ranh giới audit
-
-**[THIẾT KẾ ĐỀ XUẤT]** Consumer truyền `eventId` vào use case. Trước khi gọi provider, use case thử claim atomic trong `RedisOutcomeStore`. Nếu event đã hoàn tất, trả về outcome đã lưu. Nếu event đang được xử lý, áp dụng behavior redelivery đã định nghĩa cho consumer thay vì bắt đầu lời gọi provider thứ hai.
-
-Redis được dùng để deduplication với TTL ngắn. Record dài hạn thuộc về `OpenSearchDecisionAudit`. Audit document có thể chứa các field:
+Module dùng chung nên expose một typed port hẹp: `assess(signalRequest) -> aiSignal`. Nó tra key của tenant bằng Vault reference, tạo request trung lập với provider, validate structured response và áp dụng resilience controls. Caller sở hữu business policy; module sở hữu technical safety và evidence.
 
 ```text
-eventId, promptHash, model, latency, cost, keyId, verdict
+Kafka (nguồn replay) -> consumer -> AI core -> signal store + outbox
+                                      |              |
+                                      v              v
+                               policy service   notification/effect
+
+DB = system of record
+OpenSearch = read model cho điều tra và dashboard
+Vault = nguồn secret
 ```
 
-Đây là audit contract được mô tả trong tài liệu nguồn. Retention, index mapping, cách tính cost và vocabulary chính xác của verdict vẫn phải do platform team quy định. Đặc biệt, cần xác định rõ phạm vi uniqueness của `eventId` nếu nhiều tenant hoặc event domain có thể dùng lại cùng giá trị.
+Transaction ghi outcome nên gồm `transaction_id`, `event_id`, `tenant_id`, signal data, `model_version`, `prompt_version`, `policy_version`, `decision`, `reason`, timestamp và correlation reference. Audit record tuyệt đối không chứa raw API key. Nếu policy decision được ghi riêng, hãy link nó với cùng event và transaction thay vì ghi đè signal gốc.
 
-## Kết quả đạt được
+## Kịch Bản Thất Bại
 
-Giá trị của thư viện core dùng chung là tạo một ranh giới hẹp và có thể kiểm soát:
+- **Provider timeout:** dừng ở deadline, ghi `AI_TIMEOUT`, rồi chuyển deterministic fallback hoặc manual review.
+- **429 hoặc 5xx:** chỉ retry trong request budget, tôn trọng rate limit và mở circuit khi lỗi kéo dài.
+- **Response malformed hoặc nondeterministic:** từ chối response, ghi model và prompt version, không suy ra approval.
+- **Consumer crash sau insert:** unique outcome và outbox làm redelivery an toàn; inbox có thể đánh dấu consumption trong cùng transaction.
+- **Outbox delivery retry:** dùng effect idempotency key; storage idempotency một mình không ngăn duplicate email, case hay payment call.
+- **OpenSearch outage:** tiếp tục business path nếu DB audit bền vững đã thành công; index lại sau. Search index không được làm authoritative.
+- **Vault outage hoặc race khi rotate key:** fail closed khi credential unavailable, chỉ cache trong TTL ngắn được định nghĩa rõ, và không fallback sang hard-coded key.
 
-- business service gửi AI request qua một use-case API ổn định;
-- credential của provider nằm sau resolver và adapter;
-- timeout và retry có giới hạn được áp dụng nhất quán;
-- event trùng có thể được nhận diện trước khi gọi provider lần nữa;
-- audit record mô tả điều đã xảy ra mà không chứa secret.
+## Capacity
 
-Ranh giới này làm cho tích hợp AI ít phụ thuộc hơn vào quy ước riêng của từng service. Nó không loại bỏ nhu cầu test theo từng provider, access control, retention policy hoặc quy trình ra quyết định xác định ở bên ngoài thư viện.
+Với synchronous path, quan hệ cơ bản là:
+
+```text
+Concurrency = Throughput x Latency
+```
+
+Ở 200 request/second và latency end-to-end 750 ms, path cần khoảng 150 request đang in-flight trước khi cộng safety headroom. Hãy sizing độc lập consumer concurrency, connection pool, provider quota và circuit-breaker limit. Retry làm tăng attempted provider throughput; nếu 10% call retry một lần thì provider attempts xấp xỉ `200 x 1.10 = 220/second`, không phải 200.
+
+Kafka là nguồn replay, không phải business ledger. DB là system of record cho outcome và idempotency. OpenSearch là read model denormalized, có thể lag hoặc rebuild. Capacity planning phải tính peak partitions, consumer lag, DB unique-index contention, Vault QPS, OpenSearch indexing rate, token cost và retry storm khi provider phục hồi.
+
+## Security và Privacy
+
+Minimize dữ liệu trước khi gửi tới external AI provider: ưu tiên derived features, redaction, tokenization và allowlist nghiêm ngặt thay vì full transaction payload. Không tùy tiện gửi tên, account number, địa chỉ, free-form note hay regulated identifier. Mã hóa in transit và at rest, isolate tenant, giới hạn quyền Vault, rotate key, và redact secret cùng PII khỏi log, trace, prompt và exception message.
+
+Audit trail cần least privilege và retention rule. Hash prompt không phải anonymization nếu có thể dựng lại input từ một không gian nhỏ. Xác định retention, residency, việc dùng dữ liệu để training và điều khoản xóa của provider trước khi bật BYOK routing. Thiết kế hướng production cũng cần threat modeling, access review và compliance approval.
+
+## Observability
+
+Đo cả system behavior và business quality. System metrics hữu ích gồm request count, latency percentile, timeout/retry count, circuit state, rate-limit response, token usage, cost estimate, Vault failure, DB conflict count, outbox age, consumer lag và OpenSearch indexing lag. Business metrics gồm fallback rate, manual-review rate, policy outcome, mẫu false-positive/false-negative từ case đã review, và drift theo model/policy version.
+
+Không dùng `transaction_id`, `account_id`, prompt text hoặc event ID làm Prometheus label: cardinality và sensitivity của chúng không an toàn. Đưa correlation ID vào structured log hoặc trace context có access control, và chỉ dùng aggregate label như service, provider, model version, policy version và outcome class. Audit query khi đó có thể dựng lại transaction, event, signal, version, decision và reason mà không lộ payload.
+
+## Bài Học
+
+1. Bắt đầu từ failure mode và quyền quyết định, rồi mới chọn architecture.
+2. Xem AI là signal có version và có thể sai; policy chuyển nó thành business decision.
+3. Dùng atomic uniqueness, inbox/outbox và effect key thay cho kiểm tra `exists()`.
+4. Định nghĩa rõ latency, retry, rate limit, cost và fallback có giới hạn.
+5. Giữ Kafka cho replay, DB làm source of truth, OpenSearch làm read model có thể rebuild.
+6. Tối thiểu hóa dữ liệu nhạy cảm và làm audit, observability hữu ích mà không biến identifier thành metric label.
