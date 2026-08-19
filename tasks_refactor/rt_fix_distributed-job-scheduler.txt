@@ -1,0 +1,91 @@
+You are a senior technical editor. REWRITE the given EN+VI article pair to sound like a real senior engineer, not an AI.
+RULES: Preserve all technical correctness. Do NOT invent facts/numbers/URLs. Remove AI filler and drama. Use precise engineering terms (timeout, retry, fallback, idempotency, backpressure, circuit breaker). Keep bilingual EN+VI parity. Keep frontmatter. Improve title if needed. Only modify the two files.
+
+ARTICLE: system-design/distributed-job-scheduler
+CURRENT EN (rewrite to /tmp/rt_fix/distributed-job-scheduler.en.md):
+=== EN ===
+---
+title: "Designing a Distributed Job Scheduler"
+description: "An operational design for timezone-aware cron, one-off jobs, and DAG workflows with at-least-once execution and auditable recovery."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+We are building a multi-tenant scheduler for data pipelines, billing tasks, notifications, and maintenance jobs. A user can define a cron schedule, submit a one-off run, or compose tasks into a directed acyclic graph (DAG). The scheduler must decide when a run is due and arrange execution on worker fleets; it is not the business worker itself.
+
+Functional requirements:
+
+- Cron expressions, one-off timestamps, and DAG dependencies are supported.
+- A run is at-least-once: a worker may receive it again after a timeout or failover.
+- Retries use bounded exponential backoff with jitter and end in a dead-letter state after a policy limit.
+- Catch-up is explicit: missed occurrences after downtime can be replayed, coalesced, or skipped per schedule.
+- Time zones and daylight-saving transitions use IANA zone rules. A local time that occurs twice is represented by a distinct offset; a nonexistent local time follows a declared skip policy.
+
+Non-functional requirements:
+
+- No silent double execution: the platform prevents duplicate *logical dispatches*, while job code must still be idempotent because at-least-once delivery cannot prevent an old worker from finishing late.
+- Missed-task detection, audit history, horizontal scale, tenant isolation, and regional disaster recovery.
+- Target availability is 99.95% for schedule evaluation and control APIs, with a 99.9% objective for dispatch latency under normal load. A due run should be enqueued within 30 seconds of its due instant at p99.
+
+The users are platform teams and service owners. They need a durable record of what was intended, what was dispatched, which attempt ran, and why a run was skipped or delayed.
+
+## 2. Scale Estimation
+
+Assume 2,000 tenants and 10,000 active schedules. This is a deliberately moderate starting point: it is large enough for operational pressure but small enough that the primary database remains useful for authoritative state. Assume each tenant has 25 daily API actions on average (schedule edits, run queries, and manual triggers).
+
+- API volume = `2,000 DAU x 25 requests/day = 50,000 requests/day`.
+- Average API rate = `50,000 / 86,400 = 0.58 RPS`; design for `10x = 5.8 RPS` peak, rounded to 10 RPS for bursts.
+- If each schedule produces 100 occurrences/day, occurrence creation is `10,000 x 100 = 1,000,000 occurrences/day`, or `11.6 per second` average. A 10x temporal burst is 116 due events/second.
+- Let 2% of occurrences need a retry. Dispatch-attempt events are `1,000,000 x 1.02 = 1.02 million/day`. At 1.5 KB per event, the event log is about `1.53 GB/day`, or `1.67 TB` for three years before compression and replicas.
+- Authoritative run rows average 1 KB. With 1.02 million attempts plus metadata, 30-day hot storage is approximately `1.02M x 1 KB x 30 = 30.6 GB`, excluding indexes and replicas; budget 3x, or 92 GB.
+- At 5% of runs using 20 KB of logs retained for 30 days, log ingress is `1.02M x 0.05 x 20 KB = 1.02 GB/day`; logs belong in object storage, not the transactional database.
+- A 1.5 KB dispatch event at 116 peak events/second is only `174 KB/s` or 1.4 Mbps before replication. We provision 10 Mbps per broker direction to leave room for wo
+=== VI ===
+---
+title: "Thiết kế Bộ Lập lịch Công việc Phân tán (Distributed Job Scheduler)"
+description: "Thiết kế vận hành cho cron có nhận biết múi giờ, công việc một lần và workflow DAG với thực thi ít nhất một lần và khả năng khôi phục có kiểm toán."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+## 1. Problem
+
+Ta xây dựng một bộ lập lịch đa tenant cho pipeline dữ liệu, tác vụ tính cước, thông báo và bảo trì. Người dùng có thể định nghĩa lịch cron, gửi một lần chạy hoặc ghép các tác vụ thành đồ thị có hướng không chu kỳ (DAG). Bộ lập lịch quyết định khi nào một lần chạy đến hạn và sắp xếp việc thực thi trên các cụm worker; nó không phải là business worker.
+
+Yêu cầu chức năng:
+
+- Hỗ trợ biểu thức cron, mốc thời gian một lần và dependency của DAG.
+- Một run được thực thi ít nhất một lần: worker có thể nhận lại run sau timeout hoặc failover.
+- Retry dùng exponential backoff có giới hạn và jitter, kết thúc ở trạng thái dead-letter sau số lần theo chính sách.
+- Catch-up là hành vi tường minh: các occurrence bị lỡ sau downtime có thể được replay, gộp hoặc bỏ qua theo từng schedule.
+- Múi giờ và chuyển giờ mùa hè dùng bộ quy tắc IANA. Một giờ địa phương xuất hiện hai lần được biểu diễn bằng offset riêng; giờ không tồn tại tuân theo chính sách bỏ qua đã khai báo.
+
+Yêu cầu phi chức năng:
+
+- Không double-execution âm thầm: nền tảng ngăn các *logical dispatch* trùng nhau, nhưng mã job vẫn phải idempotent vì delivery ít nhất một lần không thể ngăn worker cũ hoàn thành muộn.
+- Phát hiện task bị lỡ, lịch sử audit, scale ngang, cô lập tenant và khôi phục thảm họa theo vùng.
+- Mục tiêu availability là 99.95% cho đánh giá schedule và control API, cùng mục tiêu 99.9% cho độ trễ dispatch trong tải bình thường. Run đến hạn nên được đưa vào queue trong 30 giây kể từ thời điểm đến hạn ở p99.
+
+Người dùng là các team nền tảng và chủ dịch vụ. Họ cần bản ghi bền vững về điều đã dự kiến, điều đã dispatch, attempt nào đã chạy, và lý do run bị bỏ qua hoặc trì hoãn.
+
+## 2. Scale Estimation
+
+Giả định 2.000 tenant và 10.000 schedule đang hoạt động. Đây là quy mô khởi đầu vừa phải: đủ tạo áp lực vận hành nhưng vẫn cho phép database chính giữ vai trò trạng thái chuẩn. Giả định trung bình mỗi tenant có 25 thao tác API mỗi ngày (sửa schedule, truy vấn run và trigger thủ công).
+
+- Lưu lượng API = `2,000 DAU x 25 requests/day = 50,000 requests/day`.
+- Tốc độ API trung bình = `50,000 / 86,400 = 0.58 RPS`; thiết kế cho đỉnh `10x = 5.8 RPS`, làm tròn thành 10 RPS cho burst.
+- Nếu mỗi schedule tạo 100 occurrence/ngày, số occurrence = `10,000 x 100 = 1,000,000 occurrences/day`, hay trung bình `11.6/giây`. Burst theo thời gian 10x là 116 due event/giây.
+- Giả sử 2% occurrence cần retry. Số dispatch-attempt event là `1,000,000 x 1.02 = 1.02 million/day`. Với 1,5 KB/event, event log khoảng `1.53 GB/day`, hay `1.67 TB` trong ba năm trước compression và replica.
+- Một run row chuẩn trung bình 1 KB. Với 1,02 triệu attempt cộng metadata, hot storage 30 ngày xấp xỉ `1.02M x 1 KB x 30 = 30.6 GB`, chưa tính index và replica; dự phòng 3x, tức 92 GB.
+- Nếu 5% run dùng 20 KB log và giữ 30 ngày, log ingress là `1.02M x 0.05 x 20 KB = 1.02 GB/day`; log phải vào object storage, không phải transactional database.
+- Event dispatch 1,5 KB ở đỉnh 116 event/giây chỉ là `174 KB/s` hay 1,4 Mbps trước replication. Cấp 10 Mbps cho mỗi hướng broker để có chỗ cho metadata workflow và burst.
+- Tỷ lệ đọc control so với attempt bình thường gần 20:1. 
+Rewrite both. Write:
+  /tmp/rt_fix/distributed-job-scheduler.en.md
+  /tmp/rt_fix/distributed-job-scheduler.vi.md
