@@ -1,6 +1,6 @@
 ---
-title: "I Don't Like Microservices, and Here's Why"
-description: "A real-world perspective from a backend developer: when to and when not to use microservices, trade-offs with monoliths, and lessons for small teams."
+title: "When Microservices Are the Wrong Default"
+description: "A practical comparison of microservices and monoliths, with decision criteria for choosing an architecture that matches the team, domain, and operational maturity."
 pubDatetime: 2025-06-01T13:52:00+07:00
 featured: true
 draft: false
@@ -11,83 +11,80 @@ tags:
   - career
 ---
 
-Hello everyone! I'm Hưng Phạm, a backend developer who once thought microservices were the standard for every system — until I implemented and maintained them myself. And now, after many nights "wrestling" with dozens of logs from 4–5 different services, I've realized one thing: microservices are not the right solution for every system. Why? Let me share my story in detail, hoping it gives you a more realistic view of microservices.
+Microservices solve real problems, but they also introduce a distributed system. That means network failures, independent deployments, operational overhead, and more complicated data flows. For a small team or an early product, those costs can outweigh the benefits.
 
-## 1️. The Beginning — Microservices Were the "Holy Grail" of Tech
+This article is based on the author’s experience implementing and maintaining services. It compares the operational trade-offs with a monolith and proposes criteria for deciding when the additional complexity is justified.
 
-The first day I learned about microservices, the feeling was truly "awesome". The advertisements, the case studies from giants like Netflix, Amazon, Uber, Google… had me nearly mesmerized:
+## What Changed When the Application Was Split
 
-- "Break down the application, each part can be developed and deployed independently, as flexible as you want!"
-- "Scale each service separately, avoiding having to scale the entire bulky application!"
-- "If you don't follow microservices, you're falling behind — this technology is the future of software development!"
+**[SOURCE FACT]** The author initially treated microservices as the standard architecture, then worked on team projects with a small team of 4–5 developers. That experience showed that splitting code into services is not the same as creating independent, low-cost components.
 
-I immediately dove into learning Docker, Kubernetes, Service Mesh, automated CI/CD pipelines, API Gateway… the list of knowledge to learn was endless, to the point where project deadlines weren't as long as the knowledge needed to grasp. I thought I was opening a new horizon for my backend career.
+The main costs were:
 
-## 2️. But Reality Wasn't Like the Dream
+- **Network failure modes.** A request that crosses several services can encounter latency, timeouts, retries, partial failure, or an unavailable dependency. A timeout policy and retry policy must be designed for each call; retries without limits can increase load and make an incident worse.
+- **Deployment coordination.** Each service may have its own build, configuration, version, deployment, and rollback process. A small code change can therefore require coordination across repositories or services.
+- **Data consistency.** A transaction spanning one database is straightforward. The same workflow across service-owned data usually requires asynchronous events, idempotent consumers, and an explicit consistency model. A Saga can coordinate a multi-step workflow, but it does not make distributed transactions equivalent to a local database transaction.
+- **Debugging and observability.** A production incident may require correlating logs and traces across services. Without consistent request IDs, useful metrics, and service-level alerts, the system is difficult to diagnose.
 
-When I officially "microserviced" a few team projects — a small team of only 4–5 devs, I truly "absorbed" that microservices aren't simply about splitting code. It's a complex web that nearly drove me crazy:
+These are not arguments that microservices are inherently bad. They are the baseline costs of moving from an in-process call to a network call.
 
-- Network latency and timeouts: Just one slow service, and the entire system collapses like dominoes. A seemingly simple request runs through a dozen services, very prone to timeouts or mid-process failures.
-- Complex deployment management: Each service has its own CI/CD pipeline, its own configuration, its own versioning. Deployment is no longer a simple button press but becomes a campaign.
-- Painful data consistency problems: No more simple transactions. You have to think about eventual consistency, complex patterns like Saga, Orchestrator (Camunda, Temporal…) — just hearing this makes you want to "surrender".
-- Debug logs tangled like a web: When production has issues, you have to dig through logs of multiple services, trace requests from one service to another. Sometimes it feels like being Sherlock Holmes groping in the dark.
+## What a Small Team Gives Up
 
-## 3️. What Microservices "Steal" from Small Teams
+**[ANALYSIS]** For a small team, a monolith often keeps more work in one place:
 
-With a small team, I realized microservices were "stealing" many valuable things from us:
+- **Focus.** One repository and one deployable unit make it easier to understand the whole product and discuss changes together. Separate services can create ownership silos when people learn only one part of the system.
+- **Development and release speed.** A monolith can often be built, deployed, and rolled back as one unit. With services, configuration, compatibility, deployment order, and rollback may need to be coordinated.
+- **Feedback time.** A feature that crosses service boundaries cannot be considered complete when only one service is deployed. API compatibility and the behavior of dependent consumers also need to be checked.
 
-1. Focus:
-   - Monolith: One repo, one codebase, the whole team "kneading" together, easy to communicate, easy to understand the big picture.
-   - Microservices: Each person "camps" in one service, communicating via API, losing cohesion, easily creating "silos" (factions) within the team.
+This is a trade-off, not a universal rule. A monolith can also become difficult to change, and microservices can improve team autonomy when the boundaries are real and the platform supports them.
 
-2. Initial development speed:
-   - Monolith: Deploy once, rollback once, small changes go up quickly.
-   - Microservices: Scattered deploys, have to adjust configs in many places, rollback is also complex, much more time-consuming.
+## What Microservices Do Well
 
-3. The joy of releasing features:
-   - Monolith: When there's a feature, release it immediately, fast release, user feedback almost instant.
-   - Microservices: Release each service, must ensure no conflicts, no API breakage, stressful because of coordinating multiple services simultaneously.
+**[SOURCE FACT]** The original experience did not eliminate the legitimate benefits of microservices. In the right context, they can provide:
 
-## 4️. But Microservices Aren't Exactly "Evil"
+- **Independent scaling.** A component with a different load profile can be scaled without scaling every component.
+- **Team autonomy.** Teams organized around stable business boundaries can own their services, releases, and operational responsibilities with fewer cross-team dependencies.
+- **Independent replacement.** A well-defined service boundary can make it easier to replace one implementation without changing unrelated parts of the system.
 
-I don't deny that microservices have very valuable strengths:
+These benefits depend on boundaries that are actually independent. Splitting a tightly coupled workflow into services usually moves complexity into APIs, queues, deployment pipelines, and failure handling.
 
-- Independent scaling: "Hot" services can be scaled separately, saving more resources.
-- Large autonomous teams: Each dev group can work on one or a few separate services, reducing dependencies, increasing long-term development speed.
-- Easy to develop and replace individual modules: If you want to change one part, you don't need to touch the entire bulky monolith system.
+## When the Complexity Is Justified
 
-## 5️. So When Should You Use Microservices?
+**[PROPOSED DESIGN]** Consider microservices when most of the following are true:
 
-I think microservices only truly shine when:
+- The team is large enough to own multiple services without leaving each service under-supported. There is no universal developer-count threshold; the relevant question is whether ownership and on-call responsibilities are sustainable.
+- The delivery platform already supports automated CI/CD, configuration management, rollback, logging, metrics, and distributed tracing.
+- The domains have meaningful boundaries. Payments, user management, and logistics may be separate domains, but they should be separated only when their data and change patterns are sufficiently independent.
+- A component has a materially different scaling or availability requirement, and independent operation justifies the added cost.
+- The organization is prepared to operate asynchronous workflows, retries, timeouts, backpressure, and idempotency (safe repeated processing), rather than treating them as implementation details.
 
-- The project has a large enough backend team (10+ devs), able to split teams by clear domains.
-- Infrastructure is already strong, with automated CI/CD, good observability (logging, tracing, metrics…), no longer fumbling with deployments.
-- The application has clearly independent domains, e.g.: payments, user management, logistics, each domain operating almost independently.
-- Traffic volume is very large, needing to scale individual components efficiently to save costs and increase performance.
+High traffic alone is not enough. If the system is still tightly coupled, service boundaries will not automatically improve performance or reduce cost.
 
-## 6️. And When Shouldn't You "Go Fancy"?
+## When a Monolith Is the Better Choice
 
-If you fall into these cases, I advise you to think carefully before "jumping" into microservices:
+**[PROPOSED DESIGN]** A modular monolith is usually the safer starting point when:
 
-- Small team (3–5 devs), still "swimming" in backlog with tons of features to build.
-- Simple application, only a few main modules, not yet at the level of needing complex scaling.
-- Team lacks CI/CD and DevOps experience — microservices will "force" you to master DevOps first.
-- Tight deadlines, e.g., 1 month to ship a product, instead of 1 year for sustainable development.
+- The team is small. **[SOURCE FACT]** The original example involved 3–5 developers with a large backlog.
+- The product has a few main modules and no clear need for independent scaling.
+- The team is still building its CI/CD and operational practices. Adding services before these foundations exist increases the number of things that can fail.
+- The deadline is short. **[SOURCE FACT]** The original example contrasts shipping a product in one month with developing it over one year. These are examples from the source, not general planning guidance.
 
-## 7️. Conclusion: I Don't Hate Microservices, I Just Don't Like "Trend-Chasing" Meaninglessly
+A modular monolith is not a commitment to keep one deployable forever. It can enforce module boundaries, keep local transactions simple, and provide a path to extract a service later when a boundary and a concrete operational need have been demonstrated.
 
-Microservices aren't something evil, nor are they "good just because they exist". I just don't like small teams "copying" trends just because they sound cool, then making themselves miserable with an unnecessarily complex system.
+## A Practical Decision Rule
 
-The most important thing, in my opinion, is still:
+Do not choose microservices because they are fashionable, or because another company uses them. Start with the problem the architecture must solve:
 
-- Understand the real problem.
-- Choose architecture that fits team size, application nature, and the actual level of complexity needed.
+- Which parts need independent scaling or deployment?
+- Which teams can own those parts end to end?
+- Which data must remain consistent in one transaction?
+- Can the platform observe, deploy, roll back, and operate a distributed system?
+- Is the expected benefit larger than the cost of network calls, operational tooling, and coordination?
 
-In summary:
+**[ANALYSIS]** For a small team with a small initial scope and a tight deadline, a modular monolith is often the lower-risk default. For independent domains with sustainable ownership and mature operations, microservices may be the better fit. Neither statement is a law; both are decisions that should be revisited as the system changes.
 
-- Small team, few features, tight deadlines: Monolith is king.
-- Large team, complex domains, high traffic: Microservices are the savior.
+## Closing
 
-## 8️. And What About You?
+The useful conclusion is not that microservices are bad. It is that architecture should follow the problem, the team, the domain boundaries, and the operational capability.
 
-Do you have a brilliant microservices success story? Or a failure that "shattered your face"? I'd really love to hear your story, so we can learn together, share experiences, and not waste time "taking detours" like I did.
+If you have operated either a monolith or a microservices system, the valuable discussion is not which label is best. It is which constraints shaped the decision, and whether the resulting complexity was worth paying for.

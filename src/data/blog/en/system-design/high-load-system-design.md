@@ -1,6 +1,6 @@
 ---
-title: "High-Load System Design: Comprehensive Solutions from Front-end to Back-end"
-description: "A comprehensive guide to high-load system design: from frontend optimization, caching, query optimization, backend patterns, request management, to monitoring and autoscaling."
+title: "High-Load System Design: Managing Traffic Spikes End to End"
+description: "A practical guide to reducing load across the frontend, cache, database, backend, request path, monitoring, and autoscaling layers."
 pubDatetime: 2025-09-21T04:32:00+07:00
 featured: true
 draft: false
@@ -12,219 +12,114 @@ tags:
 
 ## 1. Context and Challenges
 
-Modern software systems — from e-commerce, fintech, SaaS, social networks to streaming — all face situations of sudden traffic spikes. This could be a flash sale, holiday shopping season, end-of-month financial reporting, or an unexpected event causing millions of users to access simultaneously.
+Systems such as e-commerce platforms, fintech products, SaaS applications, social networks, and streaming services can all experience sudden traffic spikes. Examples include flash sales, holiday shopping periods, end-of-month financial reporting, and unexpected events that cause many users to access the system at the same time.
 
-Without thorough preparation, systems easily fall into slow response, CPU/memory overload, or even complete shutdown. This leads to revenue loss, brand reputation damage, and negative user experience. That's why high-load, high-traffic resilient system design is one of the most important requirements for system architects.
+**[ANALYSIS]** Without preparation, the usual failure modes are increased latency, CPU or memory exhaustion, and service unavailability. The resulting user and business impact makes high-load design a cross-layer problem rather than a single infrastructure decision.
 
-To achieve this, multiple layers of solutions must be combined — from frontend, caching, query optimization, backend patterns, request management, data architecture, to monitoring and autoscaling. There's no single "silver bullet", but rather a combination of many techniques, each solving a part of the problem.
+This article covers techniques across the request path: frontend behavior, caching, precomputation, query and data processing, backend architecture, request management, and operational controls such as monitoring and autoscaling. There is no single solution that handles every bottleneck. The design has to combine techniques that address different sources of load.
 
 ## 2. Frontend Optimization to Reduce Backend Load
 
-An important but often overlooked principle: reduce load starting from the frontend. With smart interface design, the system can avoid countless unnecessary requests to the backend.
+Load reduction can start in the frontend. A UI that requests only the data needed for the current interaction avoids unnecessary work in the backend.
 
 ### 2.1 Performance-Oriented UX/UI
 
-- Prioritize important information: Users typically only care about certain key parts. For example: in eCommerce, product pages should show name, price, and image first; less important info like detailed reviews or sales history can go in separate tabs.
-- Lazy loading & skeleton UI: Display the interface first, data is only fetched when needed. This not only increases the perception of "speed" but also reduces simultaneous requests.
-- Pagination & infinite scroll: Don't load all data at once. For example, product lists only need the first 20 items; fetch more when the user scrolls.
-- Hide secondary data: Statistics rarely needed can go in accordions or modals, only fetched when opened.
+- **Prioritize important information.** Render the fields users need first. On an e-commerce product page, that might be the name, price, and image. Less frequently needed information, such as detailed reviews or sales history, can be placed in a separate tab.
+- **Use lazy loading and skeleton UI.** Render the structure first and fetch data when it is needed. This improves perceived responsiveness and can reduce the number of simultaneous requests.
+- **Use pagination or infinite scroll.** Do not load an entire collection at once. **[ILLUSTRATIVE ASSUMPTION]** A product list may request the first 20 items and fetch another page as the user scrolls.
+- **Defer secondary data.** Statistics that are rarely viewed can be placed in an accordion or modal and fetched only when opened.
 
-Example: An admin dashboard displaying 1,000 orders/day. Instead of loading everything, the frontend only calls an API returning the first 20 orders. When the user scrolls or filters, more are fetched. This way, the backend system doesn't have to process unnecessary heavy queries.
+**[ILLUSTRATIVE ASSUMPTION]** For an admin dashboard that displays 1,000 orders per day, the initial request could return only the first 20 orders. Additional orders would be fetched when the user scrolls or applies a filter. This prevents every page load from triggering a query for the full result set.
 
 ### 2.2 Frontend Cache
 
-- LocalStorage/SessionStorage: Store rarely changing data, e.g., product categories, dashboard configuration info.
-- Service Worker / PWA cache: Enables fast reloading without hitting the server, even supporting offline.
-- Cache API responses: For rarely changing data (e.g., banners, menus, user profile info), the frontend can keep a cached copy for reuse.
+- **LocalStorage or SessionStorage:** Store data that changes infrequently, such as product categories or dashboard configuration.
+- **Service Worker or PWA cache:** Reuse cached resources on reload and support offline behavior for the resources and flows that have been explicitly cached.
+- **Cached API responses:** Keep a client-side copy of data that is safe to reuse, such as banners, menus, or selected profile data. The invalidation and freshness policy must match the data's consistency requirements.
 
-Benefits: Backend load is significantly reduced, system responds faster, users have a smoother experience.
+Client-side caching can reduce repeated backend requests and improve response time. It does not replace server-side controls: cached data must still have an appropriate lifetime and access policy.
 
-## 3. Caching and Pre-computation
+## 3. Caching and Precomputation
 
-One of the causes of system overload is heavy computation in real-time. Reports, statistics, or aggregate calculations need to be processed before users request them.
+Real-time computation is a common source of load. Reports, statistics, and aggregates that do not need to be calculated for every request can be prepared before they are requested.
 
-### 3.1 Precompute
+### 3.1 Precomputation
 
-- Perform precomputation for important data instead of processing directly when users query.
-- Store results in intermediate tables or materialized views in the database.
-- Schedule or trigger data refresh periodically or based on events.
+- Precompute important results instead of calculating them in the request path.
+- Store the results in intermediate tables or database materialized views.
+- Refresh them on a schedule or in response to relevant events.
 
-### 3.2 Pre-warming Cache
+### 3.2 Cache Pre-Warming
 
-Before peak hours, the system can preload hot data into cache. For example: before a flash sale, preload hot product information. This avoids millions of requests simultaneously querying the DB leading to mass cache misses.
+Before a known peak, preload hot data into the cache. **[PROPOSED DESIGN]** Before a flash sale, for example, the system could load frequently accessed product data. This reduces the chance that many requests miss the cache and query the database at the same time.
 
-### 3.3 Cache Multi-layer
+Pre-warming is useful only when the hot set and freshness requirements are understood. It should not be treated as a substitute for handling cache misses safely.
 
-- Edge cache (CDN): Distribute static content (images, videos, CSS, JS).
-- Application cache (Redis): Cache dynamic data, sessions, tokens.
-- Database cache: Query result cache.
+### 3.3 Multi-Layer Caching
 
-Combining multiple cache layers helps the system better withstand peak traffic.
+- **Edge cache (CDN):** Distribute static assets such as images, video, CSS, and JavaScript.
+- **Application cache (for example, Redis):** Cache dynamic data, sessions, or tokens where the security and invalidation model permits it.
+- **Database cache:** Cache eligible query results according to the database and application consistency requirements.
 
-### 3.4 Cache Promise
+Multiple cache layers can absorb different parts of the request volume, but each layer needs an explicit TTL, invalidation strategy, and capacity policy.
 
-- Principle: When a request is being processed, the promise stores the pending result. If a similar request arrives, the system waits for the promise result instead of sending a new request.
-- Benefits: Avoids multiple simultaneous duplicate requests, reduces load on backend and DB.
-- Example: Multiple users simultaneously requesting hot product details → promise cache holds one in-progress request, other requests "wait" for the result, not hitting the DB multiple times.
+### 3.4 Promise Cache / Single-Flight
+
+In this context, a promise cache stores the in-progress result for a request. If an equivalent request arrives while the first one is still running, it waits for that result instead of starting another backend or database request. This pattern is also commonly called request coalescing or single-flight.
+
+**[PROPOSED DESIGN]** If several users request the details of the same hot product at once, one request can query the database while the other requests await the shared promise. The implementation must also handle rejection and expiry so a failed or abandoned request is not retained indefinitely.
 
 ## 4. Query Optimization and Data Processing
 
-A common mistake is querying too much unnecessary data and performing heavy tasks directly in real-time. Combined with batch processing, Bloom Filter, and Request Coalescing techniques, the system can significantly reduce load.
+Querying more data than the request needs and doing expensive work synchronously both increase load. Batch processing, Bloom filters, and request coalescing can reduce unnecessary database work, but they solve different problems.
 
-### 4.1 Only Query Necessary Data
+### 4.1 Query Only What Is Needed
 
-- Only select needed fields, avoid SELECT \*.
-- Use pagination (LIMIT, OFFSET or cursor-based pagination).
-- Avoid complex multi-table joins; if needed, process offline via batch jobs.
-- Use appropriate indexes.
+- Select only required fields instead of using `SELECT *`.
+- Use pagination with `LIMIT`/`OFFSET` or cursor-based pagination, depending on the access pattern.
+- Avoid complex multi-table joins in latency-sensitive requests when the work can be performed offline by a batch job.
+- Add indexes that match the actual query patterns and verify their effect with the database's query plans.
 
 Examples:
 
-- Top-selling products statistics: only need product_id, category_id, sold_quantity.
-- Transaction reports: only query user_id, amount, status, no need for long text fields.
+- A top-selling-products result may need only `product_id`, `category_id`, and `sold_quantity`.
+- A transaction report may need `user_id`, `amount`, and `status`, not long text fields.
 
-Benefits: Reduce IO, reduce memory footprint, increase throughput, avoid OOM.
+Selecting less data reduces I/O and memory use, which can improve throughput and reduce the risk of out-of-memory failures. Indexes and pagination still need to be chosen for the specific workload; neither is automatically beneficial for every query.
 
 ### 4.2 Batch Processing
 
-- Group many small tasks into batches for simultaneous processing.
-- Reduce overhead when calling APIs or DB multiple times.
-- Combine with queues to regulate speed.
+Batch processing groups many small operations into a larger operation. It can reduce per-call overhead when interacting with APIs or databases. A queue can be used alongside batching to regulate processing speed and provide backpressure.
 
-Example: Update status of 1,000 orders → group into one batch update instead of updating each individually.
+**[ILLUSTRATIVE ASSUMPTION]** To update the status of 1,000 orders, the application could send one batch update rather than issue one database update per order, provided the transaction, error-handling, and locking requirements allow it.
 
 ### 4.3 Bloom Filter
 
-- Probabilistic data structure used to check element existence.
-- Returns "definitely not present" or "possibly present".
-- No false negatives, only false positives.
+A Bloom filter is a probabilistic data structure for testing whether an element may exist in a set. It returns either “definitely not present” or “possibly present.” A correctly configured Bloom filter has no false negatives, but it can have false positives, so a positive result still requires verification by the source of truth.
 
-Applications:
+Possible uses include:
 
-- Check coupon codes before querying DB.
-- Prevent cache penetration (requests for non-existent keys).
-- Filter bot requests.
+- Rejecting coupon codes that are definitely absent before querying the database.
+- Reducing cache penetration, where requests repeatedly target keys that do not exist.
+- Filtering some bot or unwanted requests before more expensive processing.
 
-Example: User enters a coupon. Bloom filter check → if not present, reject immediately, no DB hit.
+**[PROPOSED DESIGN]** For a coupon entry, a negative Bloom-filter result can reject the request without a database lookup. A positive result must continue to normal validation because it may be a false positive.
 
 ### 4.4 Request Coalescing
 
-- When multiple identical requests arrive at the backend within a short time, merge into a single request.
-- Backend returns the result, remaining requests use that result.
-- Reduces DB query count, reduces peak load.
+When equivalent requests arrive close together, the backend can merge them into one operation and share the result with the waiting requests. This reduces duplicate database queries and smooths short-lived load spikes. The design needs a definition of request equivalence, a maximum wait time, and behavior for failures.
 
-Example: 500 users simultaneously querying top 10 best-selling products → request coalescing merges into one query, then returns results to all users.
+**[ILLUSTRATIVE ASSUMPTION]** If 500 users request the top 10 best-selling products at the same time, request coalescing can turn those equivalent lookups into one query whose result is returned to the waiting callers.
 
 ## 5. Backend Architecture
 
-Architectural patterns and techniques play a crucial role in enabling systems to scale and handle load.
+Backend architecture determines how reads, writes, and expensive work are isolated and scaled. The right choice depends on consistency, query patterns, and operational constraints; the patterns below are design options, not universal requirements.
 
-### 5.1 CQRS + Search Engine
+### 5.1 CQRS and a Search Engine
 
-- CQRS (Command Query Responsibility Segregation): Separate read and write models.
-  - Write model optimized for transactional.
-  - Read model optimized for queries.
-- Use search engines (ElasticSearch, OpenSearch) to serve complex queries instead of querying directly from DB.
-- Materialized views / pre-computed tables for fast results.
+CQRS (Command Query Responsibility Segregation) separates write and read models:
 
-Example: In eCommerce, searching products by price, category, keywords → use ElasticSearch. Inventory updates go through transactional DB.
+- The write model is optimized for transactional updates.
+- The read model is optimized for query and retrieval patterns.
 
-### 5.2 Bulkhead
-
-- Separate components into individual "compartments".
-- If one compartment is overloaded, others still function.
-- Commonly applied in microservices or queues.
-
-Example: Separate payment queue, separate email queue. If email service is overloaded, payments still run normally.
-
-## 6. Request Management and Flow Control
-
-During peak traffic, not only is the backend important, but request control is also needed to prevent system collapse.
-
-### 6.1 Backpressure
-
-- Feedback mechanism from consumer to producer when unable to keep up.
-- Prevents producers from sending too fast, leading to full queues and OOM.
-- Commonly used in streaming (Kafka, gRPC streaming, reactive systems).
-
-### 6.2 Admission Control
-
-- Control requests from the start, early rejection of non-critical requests.
-- Apply quotas, priorities.
-- Example: checkout requests prioritized over statistics requests.
-
-### 6.3 Load Shedding
-
-- When the system is overloaded, proactively drop less important requests.
-- Example: reduce real-time dashboard update frequency to keep checkout running smoothly.
-
-### 6.4 Async Processing
-
-- Separate non-real-time tasks to background.
-- Example: send order confirmation emails → push to queue, don't block payment requests.
-
-### 6.5 Circuit Breaker
-
-- Temporarily disconnect from failing services.
-- Prevents the entire system from hanging due to one sub-service.
-
-## 7. Data Management
-
-Large data is also a cause of bottlenecks. Some commonly used techniques:
-
-### 7.1 Hot vs Cold Data Separation
-
-- Separate frequently accessed (hot) and rarely accessed (cold) data.
-- Hot data stored in fast DB (Redis, in-memory, SSD).
-- Cold data stored in slower DB (HDD, archive storage).
-
-### 7.2 Sharding / Partitioning
-
-- Divide data into multiple shards/partitions for parallel processing.
-- Example: user_id % 4 → store in 4 different DB shards.
-- Increases horizontal scalability.
-
-### 7.3 Read Replicas
-
-- Create multiple read-only DB replicas.
-- Complex queries can be redirected to read replicas.
-- Master focuses only on writes.
-
-## 8. Monitoring & Autoscaling
-
-### 8.1 Monitoring
-
-- Track CPU, memory, request latency, error rate.
-- Use Prometheus, Grafana, ELK stack.
-- Alert when thresholds are exceeded.
-
-### 8.2 Autoscaling
-
-- Increase/decrease instances based on demand.
-- Horizontal Pod Autoscaler in Kubernetes.
-- Scale by CPU/memory or custom metrics (request count/queue length).
-
-### 8.3 Chaos Testing
-
-- Simulate failures to test load resilience.
-- Example: use Chaos Monkey to randomly shut down a service.
-
-## 9. Anti-patterns to Avoid
-
-- SELECT \* in large queries.
-- No cache invalidation: stale data causes errors.
-- Too much synchronization: every request is sync → easy to bottleneck.
-- No rate limiting: bot floods easily crash the system.
-- Tight coupling between services: one service dying drags down the entire system.
-
-## 10. Conclusion
-
-High-load system design has no fixed formula, but is a collection of many techniques combined together. From smart frontend, caching, pre-computation (Cache Promise, pre-warming), query optimization, backend patterns (CQRS, Bulkhead, Batch processing, Bloom filter), request management (backpressure, admission control, load shedding, Request Coalescing), data management (hot/cold, sharding, replicas) to monitoring and autoscaling.
-
-Each solution has trade-offs in cost, complexity, and effectiveness. The important thing is choosing the right technique for the right context: eCommerce may focus on cache & search engine, fintech emphasizes transaction consistency, SaaS needs autoscaling and multi-tenant isolation, streaming prioritizes backpressure and sharding.
-
-By applying these techniques, the system will:
-
-- Better withstand peak hour loads.
-- Avoid downtime, maintain stable user experience.
-- Optimize operational costs.
+**[PROPOSED DESIGN]** A search engine such as Elasticsearch or OpenSearch can serve suitable complex queries instead of sending every query to the transactional database. Materialized views can provide another read-optimized representation for aggregates and predefined queries. The read model must be updated from the write side, and the resulting consistency delay must be acceptable for the product requirement.
