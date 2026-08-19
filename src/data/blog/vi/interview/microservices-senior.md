@@ -1,6 +1,6 @@
 ---
-title: "Ôn thi Java #6: Microservices — Junior đến Senior"
-description: "Microservices ở cấp senior chủ yếu là biết khi NÀO KHÔNG nên dùng chúng — các resilience pattern, service communication và distributed transaction."
+title: "Ôn thi Java #6: Thiết kế và đánh đổi trong Microservices"
+description: "Hướng dẫn phỏng vấn thực tế về service boundary, giao tiếp, resilience và distributed transaction trong Spring."
 pubDatetime: 2026-08-10T10:10:00+07:00
 featured: false
 draft: false
@@ -11,44 +11,49 @@ tags:
   - resilience
 ---
 
-Microservices là chủ đề đòi hỏi khả năng phán đoán của senior nhiều nhất, vì câu trả lời sai thường là "chia monolith ra đi". Junior vẽ các ô service; senior giải thích vì sao monolith đã là lựa chọn đúng trong nhiều năm và điều gì cụ thể buộc phải tách nó ra. Bài này đi từ service boundary đến cái bẫy distributed transaction: 50 câu hỏi, mỗi câu trả lời theo hướng code-first với Spring thực tế. Hãy chọn cấp độ bạn đang phỏng vấn và đọc thêm một cấp cao hơn.
+Microservices không phải kiến trúc mặc định. Đây là cách để có deployment, scaling và ownership độc lập hơn, đổi lại phải xử lý network failure, distributed data và nhiều công việc vận hành hơn. Phần khó là quyết định lợi ích đó có đáng với chi phí hay không.
 
-> Mindset: junior liệt kê lợi ích của microservices; senior nêu được ba cái giá cụ thể chúng tạo ra và trigger chính xác biện minh cho việc trả những cái giá đó.
+Bài này đi từ giao tiếp cơ bản giữa các service đến Saga, observability, capacity và architecture review. Code chỉ là ví dụ Spring, không phải ứng dụng hoàn chỉnh. Khi một con số xuất hiện trong ví dụ, nó được ghi rõ là giả định minh họa, không phải khuyến nghị chung.
 
-## Junior — nền tảng
+> Dấu hiệu của senior: nêu được chi phí của thiết kế, điều kiện biện minh cho chi phí đó và cách phát hiện khi trade-off không còn phù hợp.
+
+## Junior: nền tảng
 
 **Q1. Microservice là gì và khác monolith thế nào?**
-Một microservice là một service nhỏ có thể deploy độc lập, sở hữu một business capability và data riêng. Monolith là một đơn vị deploy duy nhất phục vụ mọi capability. Microservices mang lại khả năng scale độc lập, cô lập lỗi và quyền tự chủ cho team, nhưng phải trả giá bằng network call, distributed data và độ phức tạp vận hành. Hình thức rẻ nhất của một microservice là một Spring Boot app chỉ làm đúng một việc:
+
+Microservice là một service có thể deploy độc lập, tổ chức quanh một business capability. Service nên sở hữu data của mình và expose một contract rõ ràng. Monolith là một đơn vị deploy chứa nhiều capability. Microservices có thể đem lại khả năng scale độc lập, cô lập lỗi và ownership theo team, nhưng thêm network call, distributed consistency và operational overhead.
 
 ```java
 @SpringBootApplication
 public class OrderService {
     public static void main(String[] args) {
-        SpringApplication.run(OrderService.class, args);   // một capability, một khối deploy được
+        SpringApplication.run(OrderService.class, args);
     }
 }
 ```
 
-Một khối deploy được nghĩa là một build, một rollout và một rollback. Hai mươi service nghĩa là hai mươi lần cho mỗi việc — cái giá đó chỉ đáng trả khi sự độc lập là có thật.
+**[ANALYSIS]** Modular monolith thường là điểm bắt đầu tốt hơn. Chỉ tách khi ownership, deployment hoặc scaling độc lập giải quyết một vấn đề đã được chứng minh.
 
-**Q2. Khác nhau giữa synchronous và asynchronous communication là gì?**
-Sync (HTTP/RPC): caller block cho tới khi nhận được câu trả lời — coupling chặt, callee chậm sẽ làm thread của bạn bị kẹt. Async (event): caller publish rồi tiếp tục — coupling lỏng và có resilience, nhưng phải chấp nhận eventual consistency và việc debug khó hơn. Chọn sync khi user phải chờ câu trả lời, async cho các side effect kiểu fire-and-forget:
+**Q2. Synchronous và asynchronous communication khác nhau thế nào?**
+
+Trong synchronous communication, caller chờ response, thường qua HTTP hoặc RPC. Callee chậm sẽ tiêu tốn resource của caller và tăng coupling. Trong asynchronous communication, producer publish message hoặc event rồi tiếp tục. Cách này giảm temporal coupling nhưng tạo eventual consistency và khiến tracing khó hơn.
 
 ```java
-// Sync — caller chờ
+// Synchronous: caller cần kết quả.
 OrderSummary summary = restClient.get()
     .uri("http://order-service/api/orders/{id}", id)
     .retrieve()
-    .body(OrderSummary.class);        // block tới khi có response hoặc timeout 3s
+    .body(OrderSummary.class);
 
-// Async — publish và tiếp tục
-kafkaTemplate.send("order.placed", new OrderPlaced(orderId));   // không ai chờ
+// Asynchronous: publish một fact rồi tiếp tục.
+kafkaTemplate.send("order.placed", new OrderPlaced(orderId));
 ```
 
-Nguyên tắc kinh nghiệm: request trên happy path mà user phải chờ là sync; bất cứ việc gì có thể chấp nhận độ trễ đều nên là async.
+**[ANALYSIS]** Dùng synchronous khi response là một phần của quyết định mà user đang chờ. Dùng asynchronous cho công việc có thể hoàn thành sau, như notification.
 
-**Q3. API gateway là gì và nó làm gì?**
-Đó là một entry point duy nhất để route, xác thực, rate-limit và thường là aggregate. Nó che giấu service topology để client chỉ nói chuyện với một host thay vì hai mươi, đồng thời gom các policy cross-cutting vào một chỗ. Spring Cloud Gateway là một reactive proxy; route chỉ là các hàm:
+**Q3. API gateway là gì?**
+
+API gateway là entry point có thể route request, authenticate client, áp dụng rate limit và aggregate response. Nó có thể che giấu topology nội bộ và tập trung policy ở edge. Nó không thay thế authorization bên trong từng service.
 
 ```java
 @Bean
@@ -56,755 +61,410 @@ public RouteLocator routes(RouteLocatorBuilder b) {
     return b.routes()
         .route("orders", r -> r.path("/api/orders/**")
             .filters(f -> f.circuitBreaker(c -> c.setName("gatewayCB")
-                    .setFallbackUri("forward:/fallback/orders")))
+                .setFallbackUri("forward:/fallback/orders")))
             .uri("lb://ORDER-SERVICE"))
         .build();
 }
 ```
 
-Không có nó, client phải hardcode mọi địa chỉ service, mỗi team tự viết lại auth, và không thể rate-limit tập trung.
+**Q4. Service discovery là gì và vì sao tránh URL của instance được hardcode?**
 
-**Q4. Service discovery là gì và vì sao không thể hardcode URL?**
-Các instance scale, crash và bị reschedule; một IP hardcode có thể lỗi thời chỉ sau vài phút. Service đăng ký với registry (Eureka, Consul, K8s DNS) và phân giải lẫn nhau qua tên logic. Trong Spring, `@LoadBalanced` biến tên đó thành một instance thật, được chọn cho từng request:
+Instance được tạo, xóa và reschedule. Vì vậy địa chỉ cố định sẽ trở nên lỗi thời. Service discovery ánh xạ logical service name tới các instance hiện có. Cơ chế có thể là registry hoặc platform DNS; thuộc tính quan trọng là caller không phải quản lý việc đặt instance.
 
 ```java
 @Bean
 @LoadBalanced
 public RestClient.Builder loadBalancedRestClientBuilder() {
-    return RestClient.builder();               // phân giải lb://ORDER-SERVICE → IP:port của instance
+    return RestClient.builder();
 }
 
-// Gọi theo tên service, không phải theo IP:
-OrderSummary o = restClient.get().uri("http://ORDER-SERVICE/api/orders/{id}", id)
+OrderSummary order = restClient.get()
+    .uri("http://ORDER-SERVICE/api/orders/{id}", id)
     .retrieve().body(OrderSummary.class);
 ```
 
-Hostname hardcode hỏng ngay khi một pod được reschedule; registry khiến việc scale và restart trở nên vô hình với caller.
+**Q5. Circuit breaker là gì?**
 
-**Q5. Circuit breaker là gì và vì sao bạn cần nó?**
-Retry ngây thơ tới một dependency đang hấp hối sẽ chất đống và làm cạn thread — một service chết có thể kéo cả chuỗi xuống. Breaker trip sau N lần lỗi, fail fast trong thời gian cooldown, rồi chuyển sang half-open để kiểm tra khả năng phục hồi:
+Circuit breaker ngừng gửi call tới dependency đang lỗi. Khi open, nó fail fast; khi half-open, nó cho phép một số probe để kiểm tra recovery. Nhờ vậy caller không liên tục chờ timeout và thread được bảo vệ. Breaker không sửa dependency; nó giới hạn việc lỗi lan truyền.
 
 ```java
 @CircuitBreaker(name = "inventory", fallbackMethod = "fallback")
 public InventoryStatus check(String sku) {
     return restClient.get().uri("http://inventory-service/api/stock/{sku}", sku)
-            .retrieve().body(InventoryStatus.class);
+        .retrieve().body(InventoryStatus.class);
 }
 
-public InventoryStatus fallback(String sku, Throwable t) {
-    return new InventoryStatus(sku, 0, "unavailable");   // degraded, không phải chết
+public InventoryStatus fallback(String sku, Throwable error) {
+    return new InventoryStatus(sku, 0, "unavailable");
 }
 ```
 
-Nó giới hạn blast radius: fail fast ngay tại breaker thay vì chờ hết từng timeout.
+**Q6. API và event khác nhau thế nào?**
 
-**Q6. Khác nhau giữa API và event là gì?**
-API là một yêu cầu — "làm việc này và trả kết quả cho tôi". Event là một sự kiện đã xảy ra — "order placed" — được phát tới bất kỳ ai quan tâm. API tạo coupling giữa caller và callee; event decouple producer khỏi consumer. Cùng một hành động nghiệp vụ được thể hiện theo cả hai cách:
+API là yêu cầu một operation và response. Event là bản ghi về việc đã xảy ra. API tạo coupling giữa caller và callee tại thời điểm request; event cho phép nhiều consumer phản ứng độc lập. Không nên dùng event khi producer cần một quyết định nghiệp vụ ngay lập tức.
 
 ```java
 @RestController
 class OrderController {
-    @PostMapping("/api/orders")                       // API: yêu cầu mệnh lệnh
-    public Order create(@RequestBody CreateOrder cmd) { ... }
+    @PostMapping("/api/orders")
+    public Order create(@RequestBody CreateOrder command) { ... }
 }
 
 @Component
 class OrderEvents {
-    @KafkaListener(topics = "order.placed")           // Event: sự thật phát sóng
-    public void onOrderPlaced(OrderPlaced e) { ... }
+    @KafkaListener(topics = "order.placed")
+    public void onOrderPlaced(OrderPlaced event) { ... }
 }
 ```
 
-Nhầm lẫn hai thứ này tạo ra một đồ thị synchronous chatty và mong manh, trong khi event sẽ phù hợp hơn nhiều.
+**Q7. Nên dùng REST client nào trong Spring?**
 
-**Q7. Viết REST client trong Spring thế nào và chọn cái nào?**
-Có ba thế hệ: `RestTemplate` (blocking, legacy, không khuyến khích), `WebClient` (reactive, kéo theo Reactor), và `RestClient` (Spring 6.1+) — synchronous client hiện đại với cùng fluent API. Với 95% service request/response, hãy dùng `RestClient`:
+`RestTemplate` là blocking client cũ. `WebClient` phù hợp với reactive pipeline. `RestClient`, có từ Spring Framework 6.1, là fluent client hiện đại cho synchronous call. Hãy chọn theo execution model, không chỉ theo tuổi của project.
 
 ```java
-var requestFactory = new JdkClientHttpRequestFactory();
-requestFactory.setReadTimeout(Duration.ofSeconds(3));
+var factory = new JdkClientHttpRequestFactory();
+factory.setReadTimeout(Duration.ofSeconds(3)); // giả định minh họa
 
 RestClient client = RestClient.builder()
     .baseUrl("http://order-service/api")
-    .requestFactory(requestFactory)
+    .requestFactory(factory)
     .build();
-
-OrderSummary order = client.get().uri("/orders/{id}", id)
-    .retrieve()
-    .onStatus(HttpStatusCode::is5xxServerError,
-        (req, res) -> { throw new DownstreamException(res.getStatusCode()); })
-    .body(OrderSummary.class);
 ```
 
-Chọn `RestClient` cho synchronous call, và chỉ chọn `WebClient` khi toàn bộ luồng đã reactive từ đầu đến cuối — trộn Reactor vào một service blocking chỉ làm tăng độ phức tạp.
+**[ANALYSIS]** Một service blocking thường không được lợi nhiều khi chỉ thêm Reactor cho một outbound call. Dùng `WebClient` khi toàn bộ flow đã reactive.
 
 **Q8. `@RestController` thực sự làm gì?**
-Nó là `@Controller` + `@ResponseBody`: giá trị trả về được serialize thẳng vào HTTP body (JSON qua Jackson) thay vì được phân giải thành tên view. Nó cũng kết nối message conversion, exception handling và content negotiation:
+
+Annotation này kết hợp `@Controller` và `@ResponseBody`. Return value được ghi vào HTTP response qua message converter, thường là JSON, thay vì được coi là view name. Nó cũng tham gia vào content negotiation và exception handling.
 
 ```java
 @RestController
 @RequestMapping("/api/orders")
-public class OrderController {
+class OrderController {
     @GetMapping("/{id}")
-    public ResponseEntity<OrderSummary> get(@PathVariable Long id) {
-        return ResponseEntity.ok()
-            .header("Cache-Control", "max-age=5")
-            .body(orderService.getSummary(id));     // serialize thành JSON, không bao giờ là view
+    ResponseEntity<OrderSummary> get(@PathVariable Long id) {
+        return ResponseEntity.ok(orderService.getSummary(id));
     }
 }
 ```
 
-Một service, một REST contract có giới hạn — shape của response CHÍNH LÀ contract, vì vậy hãy trả DTO, không bao giờ trả JPA entity.
+Hãy trả DTO làm contract. Không expose JPA entity làm wire model.
 
-**Q9. Idempotency là gì và vì sao services quan tâm?**
-Một phép toán là idempotent nếu thực hiện hai lần có cùng tác dụng như thực hiện một lần. Service cần tính chất này vì network có thể giao duplicate: client timeout sau 3 s, retry, trong khi request đầu thực ra đã thành công. Không có idempotency, bạn sẽ tính phí hai lần:
+**Q9. Idempotency là gì?**
+
+Một operation là idempotent nếu thực hiện lại vẫn có cùng business effect. Điều này quan trọng vì timeout không chứng minh server đã fail; client có thể retry một request đã commit. Idempotency key cho phép service trả về kết quả đầu tiên thay vì thực hiện lại operation.
 
 ```java
-@PostMapping("/api/payments")
-public Payment create(@RequestBody @Valid PayRequest req,
-                      @RequestHeader("Idempotency-Key") String key) {
-    return paymentService.charge(key, req);   // key → cùng payment khi replay
-}
-
-public Payment charge(String key, PayRequest req) {
+public Payment charge(String key, PayRequest request) {
     Payment existing = paymentRepo.findByKey(key);
-    if (existing != null) return existing;    // replay: trả về kết quả đầu tiên
-    return paymentRepo.save(new Payment(key, req.amount()));
+    if (existing != null) return existing;
+    return paymentRepo.save(new Payment(key, request.amount()));
 }
 ```
 
-Idempotency key là một loại bảo hiểm rẻ; không dùng nó có thể dẫn đến một khoản thanh toán trùng mà bạn phải giải thích với khách hàng.
+Lookup và insert cần database uniqueness guarantee hoặc concurrency control tương đương.
 
 **Q10. Client-side load balancing hoạt động thế nào?**
-Discovery cung cấp mọi instance khỏe mạnh; load balancer chọn một instance cho mỗi request — round-robin theo mặc định, weighted khi các instance khác nhau, và sticky chỉ khi bắt buộc. Spring Cloud LoadBalancer chạy ngay trong caller nên không có hop thừa:
+
+Discovery cung cấp các instance đủ điều kiện; client-side load balancer chọn một instance cho mỗi request. Cách chọn có thể là round-robin, weighted hoặc policy khác. Health check nên loại instance không khỏe khỏi tập ứng viên.
 
 ```java
 @Bean
-public ServiceInstanceListSupplier instanceSupplier(ConfigurableApplicationContext ctx) {
+public ServiceInstanceListSupplier instanceSupplier(
+        ConfigurableApplicationContext context) {
     return ServiceInstanceListSupplier.builder()
-        .withDiscoveryClient()      // instance từ Eureka/Consul
-        .withHealthChecks()         // bỏ qua instance trượt health check
-        .build(ctx);
+        .withDiscoveryClient()
+        .withHealthChecks()
+        .build(context);
 }
 ```
 
-Cân bằng phía client là thứ cho phép 200 thread trải đều qua 5 instance thay vì đập vào một, và nó định tuyến lại ngay khi một instance chết.
+**Q11. Nên quản lý configuration thế nào?**
 
-**Q11. Quản lý configuration xuyên các service thế nào?**
-Mọi service cần configuration theo môi trường — URL, timeout và feature flag. `application.yml` theo profile sẽ nhanh chóng lệch nhau khi bạn có ba môi trường. Hãy tập trung configuration bằng Spring Cloud Config hoặc secrets store, rồi bind vào typed properties thay vì rải rác `@Value`:
+Để các giá trị theo môi trường nằm ngoài business code. Central configuration hoặc cơ chế của platform có thể quản lý URL, timeout và feature flag. Bind chúng vào typed properties để phát hiện configuration sai lúc startup.
 
 ```java
 @ConfigurationProperties(prefix = "inventory.client")
 public record InventoryClientProps(
-    String baseUrl,               // http://inventory-service
-    Duration connectTimeout,      // 2s
-    Duration readTimeout,         // 3s
-    int maxConnections            // 200
+    String baseUrl,
+    Duration connectTimeout,
+    Duration readTimeout,
+    int maxConnections
 ) {}
 ```
 
-Typed config fail lúc startup chứ không phải lúc runtime: typo trong `readTimeout` sẽ làm deploy thất bại, thay vì gây ra một outage kéo dài ba giờ.
+**Q12. Message broker là gì và khi nào nên thêm?**
 
-**Q12. Message broker là gì và khi nào nên đưa vào?**
-Broker (Kafka, RabbitMQ) decouple producer khỏi consumer, đệm các đợt burst và cung cấp at-least-once delivery. Hãy đưa broker vào khi cần fan-out, buffering hoặc replay — không phải vì "event nghe hay". Một Kafka producer chỉ có bốn dòng:
+Broker như Kafka hoặc RabbitMQ tách producer khỏi consumer, buffer work và thường hỗ trợ at-least-once delivery. Thêm broker khi có nhu cầu cụ thể như fan-out, buffering hoặc replay. Broker cũng thêm công việc vận hành, delivery semantics và failure mode.
 
 ```java
-@Service
-public class OrderPublisher {
-    private final KafkaTemplate<String, OrderPlaced> kafka;
-
-    public void publish(Order o) {
-        kafka.send("order.placed", o.id().toString(),
-                   new OrderPlaced(o.id(), o.userId(), o.total()));
-    }
+public void publish(Order order) {
+    kafka.send("order.placed", order.id().toString(),
+        new OrderPlaced(order.id(), order.userId(), order.total()));
 }
 ```
 
-Một broker xử lý 100k+ msg/s mỗi bộ partition nơi mà fan-out synchronous tới 5 service sẽ sụp dưới latency và partial failure.
+**Q13. Liveness và readiness khác nhau thế nào?**
 
-**Q13. Health checks là gì và vì sao readiness vs liveness quan trọng?**
-Liveness: process còn sống không? Nếu không, hãy kill và restart nó. Readiness: process đã sẵn sàng nhận traffic chưa? Nếu chưa, hãy đưa nó ra khỏi load balancer. Spring Boot Actuator cung cấp cả hai:
+Liveness hỏi process có nên được restart không. Readiness hỏi process đã nhận traffic được chưa. Process có thể còn sống nhưng chưa ready trong lúc khởi động, draining hoặc mất capability bắt buộc. Hãy expose hai trạng thái riêng, chẳng hạn qua Spring Boot Actuator.
+
+**Q14. Fallback là gì?**
+
+Fallback là response được xác định trước khi dependency unavailable: dữ liệu cache, default, kết quả rỗng hoặc trạng thái degraded rõ ràng. Chỉ dùng fallback khi an toàn về mặt nghiệp vụ. Không được che một payment thất bại bằng một response trông như thành công.
 
 ```java
-@Component
-public class InventoryHealthIndicator implements HealthIndicator {
-    @Override
-    public Health health() {
-        boolean ok = restClient.get()
-            .uri("http://inventory-service/actuator/health")
-            .retrieve().toBodilessEntity().getStatusCode().is2xxSuccessful();
-        return ok ? Health.up().build()
-                  : Health.down().withDetail("inventory", "unreachable").build();
-    }
+@CircuitBreaker(name = "catalog", fallbackMethod = "staleCatalog")
+public CatalogResponse catalog(String category) {
+    return catalogClient.fetch(category);
 }
 ```
 
-Config: liveness ở `/actuator/health/liveness`, readiness ở `/actuator/health/readiness`. Một process còn sống nhưng chưa sẵn sàng không được nhận traffic — sự phân biệt này ngăn rolling deploy làm mất request.
+**Q15. Timeout là gì và vì sao bắt buộc phải có?**
 
-**Q14. Fallback là gì và làm sao degrade một cách duyên dáng?**
-Fallback trả về thứ hữu ích khi dependency fail — một giá trị cache, một default hoặc một danh sách rỗng — để user nhận được phản hồi degraded-but-working thay vì lỗi 500:
-
-```java
-@Cacheable("catalog")
-public CatalogResponse getCatalog(String category) { ... }
-
-@CircuitBreaker(name = "catalog", fallbackMethod = "cachedCatalog")
-public CatalogResponse catalogOrStale(String category) {
-    try { return getCatalog(category); }
-    catch (Exception e) { return staleCatalog(category); }   // last known good
-}
-```
-
-Không có fallback, một dependency chập chờn biến p99 từ 80 ms thành các timeout 3 s và cả đống lỗi 500; có fallback, p99 giảm còn khoảng 100 ms nhờ phục vụ từ cache cũ.
-
-**Q15. Timeout là gì và điều gì xảy ra nếu bạn không bao giờ đặt?**
-Timeout giới hạn thời gian một call được phép chạy; không có nó, dependency bị treo sẽ giữ thread của bạn vĩnh viễn. Với 200 thread, một callee không bao giờ trả lời có thể làm cả service gục trong vài phút — mọi thread đều mắc kẹt trong một read không bao giờ trả về:
+Timeout giới hạn thời gian chờ. Không có timeout, dependency bị treo có thể giữ connection, thread hoặc queue slot vô thời hạn. Hãy đặt connect timeout và read timeout cho mọi outbound call, đồng thời bảo đảm tổng ngân sách phù hợp với SLO của caller.
 
 ```java
-var requestFactory = new JdkClientHttpRequestFactory();
-requestFactory.setConnectTimeout(Duration.ofSeconds(2));
-requestFactory.setReadTimeout(Duration.ofSeconds(3));     // câu trả lời phải đến trong 3s
-
-RestClient client = RestClient.builder()
-    .baseUrl("http://inventory-service")
-    .requestFactory(requestFactory)
-    .build();
+factory.setConnectTimeout(Duration.ofSeconds(2)); // giả định minh họa
+factory.setReadTimeout(Duration.ofSeconds(3));    // giả định minh họa
 ```
 
-Rule: mọi outbound call có timeout, và nó ngắn hơn SLA của chính bạn — lỗi hiện ra ở giây thứ 3 như một lỗi hữu hình, có giới hạn, debug được, thay vì một cú treo vô hình.
+**Q16. Retry là gì và khi nào không nên retry?**
 
-**Q16. Retry là gì và khi nào KHÔNG nên retry?**
-Retry thực hiện lại một call đã fail, thường kèm backoff. Hãy retry lỗi transient (connection reset, 503), nhưng không bao giờ retry lỗi 4xx (request của bạn sai, retry không sửa được) hoặc call không idempotent (bạn sẽ tạo duplicate):
-
-```java
-@Retry(name = "inventory", fallbackMethod = "fallback")
-public InventoryStatus check(String sku) {
-    return client.get().uri("/api/stock/{sku}", sku).retrieve().body(InventoryStatus.class);
-}
-```
+Retry thực hiện lại một operation đã fail, thường với exponential backoff và jitter. Chỉ retry lỗi có khả năng transient và khi việc lặp lại là an toàn. Không retry request `4xx` không hợp lệ hoặc operation non-idempotent nếu chưa có cơ chế idempotency.
 
 ```yaml
 resilience4j.retry:
   instances:
     inventory:
-      maxAttempts: 3 # lần gốc + 2 retry
-      waitDuration: 100ms
-      exponentialBackoffMultiplier: 3.0 # 100ms → 300ms → 900ms
-      retryExceptions:
-        [
-          java.net.ConnectException,
-          org.springframework.web.client.HttpServerErrorException,
-        ]
-      ignoreExceptions:
-        [org.springframework.web.client.HttpClientErrorException]
+      maxAttempts: 3 # giả định minh họa: call gốc cộng hai retry
+      enableExponentialBackoff: true
+      enableRandomizedWait: true
 ```
 
-Con số: failure rate 5% với 3 lần thử làm giảm lỗi user nhìn thấy xuống ~0,0125%; retry 4xx chỉ tạo ra một chuỗi lỗi 400 và khiến client càng khó hiểu.
+**Q17. DTO là gì và giúp ổn định contract thế nào?**
 
-**Q17. DTO là gì và làm sao giữ service contract ổn định?**
-DTO là wire shape của API — tách khỏi database entity để bạn có thể đổi storage mà không làm vỡ consumer, đồng thời version API mà không phải migrate code của họ. Đưa JPA entity ra ngoài sẽ làm lộ schema cho mọi consumer:
+DTO là data shape truyền qua wire. Nó tách public contract khỏi database entity, cho phép đổi storage mà không expose thay đổi schema cho consumer.
 
 ```java
-// SAI: entity trên wire — mọi đổi cột làm vỡ consumer
-public OrderEntity getEntity(Long id) { return orderRepo.findById(id).orElseThrow(); }
-
-// ĐÚNG: DTO tường minh = contract
-public record OrderSummary(Long id, String status, BigDecimal total,
-                           OffsetDateTime placedAt) {
-    public static OrderSummary from(OrderEntity e) { ... }
+public record OrderSummary(Long id, String status,
+                           BigDecimal total, OffsetDateTime placedAt) {
+    static OrderSummary from(OrderEntity entity) { ... }
 }
 ```
 
-Contract-first: DTO là interface; consumer phụ thuộc vào nó, không bao giờ phụ thuộc vào bảng của bạn.
+## Mid-level: trade-off và failure mode
 
-## Mid — đánh đổi & cạm bẫy
+**Q18. Vì sao shared database thường là dấu hiệu boundary có vấn đề?**
 
-**Q18. Database-per-service — vì sao shared DB là anti-pattern?**
-Khi hai service query cùng một schema, bạn có một distributed monolith với các hop thừa: thay đổi schema ở A làm vỡ query của B, transaction vắt ngang các service, và không service nào scale độc lập được. Cách sửa là để mỗi service sở hữu data riêng, chỉ expose qua API và event:
+Nếu hai service đọc và ghi cùng schema, thay đổi schema ở một bên có thể làm hỏng bên kia và mất deployment independence. Hãy ưu tiên private data ownership qua API hoặc event. Nếu bắt buộc share cùng bảng, trước hết cần hỏi hai phần đó có thực sự là một bounded context không.
+
+**Q19. 2PC và Saga khác nhau thế nào?**
+
+Two-phase commit điều phối transaction qua nhiều resource và có thể giữ lock trong lúc coordinator quyết định. Saga dùng local transaction và compensating action. 2PC có atomicity mạnh hơn nhưng đánh đổi availability và operational coupling; Saga chấp nhận eventual consistency.
 
 ```java
-// SAI: OrderService chui vào schema của inventory
-@Repository
-public interface OrderRepo extends JpaRepository<OrderEntity, Long> {
-    @Query(value = "SELECT stock FROM inventory.sku WHERE sku = :sku", nativeQuery = true)
-    int stockOnHand(@Param("sku") String sku);   // coupling hai schema vĩnh viễn
-}
+@Transactional
+public void reserve() { inventory.reserve(sku, quantity); }
 
-// ĐÚNG: hỏi InventoryService qua network
-InventoryStatus s = inventoryClient.stockOf(sku);
+@Transactional
+public void charge() { payment.charge(orderId, amount); }
+// Compensation có thể là release(...) hoặc refund(...).
 ```
 
-Dấu hiệu: nếu hai service phải share một bảng, chúng thực chất là một bounded context đang giả vờ thành hai — hãy merge chúng.
+**Q20. Implement orchestration Saga thế nào?**
 
-**Q19. Distributed transaction xuyên hai service — 2PC hay Saga?**
-2PC (two-phase commit qua JTA) khóa resource ở cả hai database trong khi coordinator ra quyết định — nó không scale và xử lý partial failure rất tệ: coordinator chết khiến mọi người mắc kẹt trên lock trong nhiều phút. Saga thay global lock bằng các local transaction và compensating action:
-
-```java
-// SAI: distributed lock — một coordinator, hai DB, cả hai bị khóa suốt quyết định
-@Transactional
-public void pay() {
-    orderDb.updateStatus(id, "PAID");      // lock giữ ở DB A ...
-    paymentDb.charge(id, amount);          // ... trong khi DB B quyết định — hàng phút dưới lỗi
-}
-
-// ĐÚNG: saga — local txn, compensation khi fail
-@Transactional
-public void reserve() { inventoryDb.reserve(sku, qty); }      // + compensate: release()
-@Transactional
-public void charge()  { paymentDb.charge(id, amount); }       // + compensate: refund()
-```
-
-2PC đánh đổi availability lấy atomicity nhưng rốt cuộc không có được điều nào trong thế giới phân tán; Saga chấp nhận eventual consistency và giữ hệ thống available. Đó chính là toàn bộ trade-off của distributed transaction.
-
-**Q20. Implement một orchestration saga cho order → inventory → payment.**
-Orchestration Saga có một coordinator (OrderService) điều phối các bước và chạy compensating action khi fail. Mỗi bước là một local `@Transactional`; coordinator bắt lỗi rồi quay lui:
+Một coordinator ghi progress, gọi các local operation và chạy compensation khi bước sau fail. Mỗi remote operation cần timeout và contract idempotent. Nếu workflow phải resume sau khi process restart, hãy persist progress.
 
 ```java
-public class OrderSaga {
-    private final InventoryClient inventory;
-    private final PaymentClient payments;
-
-    public OrderResult place(Order order) {
-        try {
-            inventory.reserve(order.sku(), order.qty());      // bước 1 (timeout 3s)
-            try {
-                payments.charge(order.id(), order.total());   // bước 2 (timeout 3s)
-            } catch (Exception e) {
-                inventory.release(order.sku(), order.qty());  // compensate bước 1
-                throw e;
-            }
-            return new OrderResult(order.id(), "CONFIRMED");
-        } catch (Exception e) {
-            return new OrderResult(order.id(), "FAILED");     // không trạng thái một phần nào sống sót
-        }
+public OrderResult place(Order order) {
+    inventory.reserve(order.sku(), order.quantity());
+    try {
+        payments.charge(order.id(), order.total());
+        return OrderResult.confirmed(order.id());
+    } catch (RuntimeException error) {
+        inventory.release(order.sku(), order.quantity());
+        return OrderResult.failed(order.id());
     }
 }
 ```
 
-Mỗi downstream call có timeout 3 s; Saga fail fast và compensate thay vì giữ lock. Orchestration phù hợp hơn choreography ở đây vì flow có thứ tự rõ ràng và một owner — choreography trở nên khó đọc khi quá ba bước.
+**Q21. Eventual consistency là gì?**
 
-**Q21. Eventual consistency là gì và điều gì vỡ cho user?**
-Sau một write, replica và derived data hội tụ theo thời gian thay vì atomic. Hệ quả là user sửa profile, refresh rồi vẫn thấy bản cũ; replica phục vụ stock count cũ khiến user đặt hàng quá số lượng. Cách giảm nhẹ gồm read-your-writes và trả về giá trị vừa ghi:
+Sau một write, replica và derived view có thể hội tụ sau đó thay vì cùng một thời điểm. User có thể đọc profile cũ hoặc stock view bị stale. Các lựa chọn gồm read-your-writes, đọc source of truth ở critical path và xác định staleness budget rõ ràng.
 
-```java
-@PostMapping("/api/users/{id}/profile")
-public UserProfile update(@PathVariable Long id, @RequestBody ProfileDto dto) {
-    userService.save(id, dto);
-    // read-your-writes: trả về giá trị vừa ghi, từ source of truth
-    return new UserProfile(id, dto.displayName(), "updated");
-}
-```
+**[PROPOSED DESIGN]** Staleness window chấp nhận được là quyết định của product. Không trình bày một khoảng thời gian cụ thể như system fact nếu không có requirement hoặc measurement.
 
-Hệ thống eventual consistency phải xác định ngân sách staleness: đọc trong 1 s, ghi trong 5 s, báo cáo trễ 5 phút — mỗi mức là một quyết định sản phẩm, không phải sự cố ngẫu nhiên.
+**Q22. Vì sao nên dùng idempotent consumer thay vì “exactly once”?**
 
-**Q22. Idempotency vs exactly-once — vì sao exactly-once là một lời nói dối?**
-Delivery là at-least-once: một retry có thể giao cùng message hai lần. Exactly-once thực sự từ đầu đến cuối (producer, broker và consumer) không khả thi trong thực tế. Vì vậy, hãy xây consumer idempotent và deduplicate ở biên — cho hiệu quả tương đương exactly-once nhưng bền vững hơn nhiều:
+At-least-once delivery nghĩa là consumer có thể nhận cùng message nhiều lần. Không nên giả định exactly-once end to end qua producer, broker, consumer và side effect. Hãy làm consumer idempotent bằng conditional update, unique key hoặc processed-message record.
 
 ```java
 @KafkaListener(topics = "payment.confirmed")
-public void onPayment(PaymentConfirmed e) {
-    int updated = orderRepo.markPaidIfNotAlready(e.orderId());
-    // UPDATE orders SET status='PAID' WHERE id=? AND status != 'PAID'
-    if (updated == 1) { notifyUser(e); }   // side effect chỉ ở lần giao đầu tiên
+public void onPayment(PaymentConfirmed event) {
+    int changed = orderRepo.markPaidIfNotAlready(event.orderId());
+    if (changed == 1) notifyUser(event);
 }
 ```
 
-Con số: một retry storm 3× trên stream 1k msg/s nghĩa là 2k duplicate cần hấp thụ; một conditional update hoặc unique constraint nuốt chúng, một insert ngây thơ thì không.
+**Q23. Outbox pattern là gì?**
 
-**Q23. Outbox pattern là gì và khi nào bạn cần nó?**
-Vấn đề dual-write là commit dòng DB và gửi Kafka là hai thao tác riêng, nên một trong hai có thể fail — event bị mất hoặc event không có dòng tương ứng. Outbox biến DB thành source of truth: ghi event trong cùng local transaction, rồi để một relay publish nó:
+Database commit và broker publish là hai operation riêng. Process có thể commit row rồi fail trước khi publish, hoặc publish trước khi row commit. Outbox ghi business row và event record trong cùng local transaction; relay publish các record đang chờ và retry an toàn.
 
 ```java
 @Transactional
-public void placeOrder(Order o) {
-    orderRepo.save(o);
-    outboxRepo.save(new OutboxEvent("order.placed", objectMapper.writeValueAsBytes(o)));
-    // cùng local txn — hoặc cả hai xảy ra, hoặc không cái nào
-}
-
-@Component
-public class OutboxRelay {
-    @Scheduled(fixedDelay = 200)
-    public void publish() {
-        for (OutboxEvent e : outboxRepo.findTop100ByPublishedFalse()) {
-            kafka.send(e.topic(), e.payload());   // retry cho tới khi được ack
-            e.published(true);
-        }
-    }
+public void placeOrder(Order order) {
+    orderRepo.save(order);
+    outboxRepo.save(new OutboxEvent("order.placed", serialize(order)));
 }
 ```
 
-Chi phí: thêm ~200 ms–1 s latency và phải vận hành một relay. Lợi ích: không mất event, không có bug dual-write — một pattern quan trọng trong event-driven services.
+**Q24. Vì sao `@Transactional` không chạy xuyên service?**
 
-**Q24. Vì sao `@Transactional` không hoạt động xuyên hai service?**
-`@Transactional` là một DB transaction local gắn với một data source và một thread. Nó không thể vắt ngang một HTTP call — proxy chỉ commit hoặc rollback connection local. Tệ hơn, giữ DB transaction mở qua network call 3 s sẽ ghim một connection và khóa các dòng:
+`@Transactional` của Spring thường bind local transaction vào một data source. HTTP call không tự động mở rộng transaction đó sang service khác. Giữ database transaction mở qua network call còn giữ connection và row lock lâu hơn cần thiết.
 
 ```java
-// SAI: txn giữ xuyên network — connection + row lock suốt HTTP call
-@Transactional
-public void placeOrder(Order o) {
-    orderRepo.save(o);
-    payments.charge(o.id(), o.total());        // network call 3s BÊN TRONG txn
-    inventory.reserve(o.sku(), o.qty());       // thêm một cái nữa — lock giữ 6s+
-}
-
-// ĐÚNG: chỉ txn local, network call ở ngoài, saga/compensation lo phần còn lại
-public void placeOrder(Order o) {
-    saveOrderLocal(o);                          // txn riêng, commit nhanh
-    try { payments.charge(o.id(), o.total()); }
-    catch (Exception e) { markOrderFailed(o.id()); }
+// Giữ local transaction ngắn; điều phối remote work riêng.
+public void placeOrder(Order order) {
+    saveOrderLocal(order);
+    payments.charge(order.id(), order.total());
 }
 ```
 
-Một cửa sổ khóa 6 s với 200 đơn hàng đồng thời là 1.200 lock-giây tranh chấp; giữ transaction local và ngắn, để saga lo phần orchestration.
+**Q25. Retry storm là gì?**
 
-**Q25. Retry storm là gì và retry khuếch đại outage thế nào?**
-Mọi client retry cùng lúc: dependency fail, và 100 client × 3 retry = 400 request dồn vào một service vốn đã hấp hối — lỗi chập chờn 5% biến thành DDoS do chính hệ thống gây ra. Cách sửa là exponential backoff có jitter để các retry giãn ra, một giới hạn toàn cục và circuit breaker để dừng hẳn luồng retry:
+Retry storm xảy ra khi nhiều caller retry một dependency đang lỗi cùng lúc, làm tải tăng và outage kéo dài. Dùng retry có giới hạn, exponential backoff, jitter, giới hạn concurrency và circuit breaker. Retry là load multiplier, không phải reliability miễn phí.
 
-```java
-// SAI: retry tức thì đồng bộ — 200 thread × 3 retry ngay lập tức = 600 rps đập
-@Retry(name = "inventory", maxAttempts = 3)      // không backoff — thundering herd
+**Q26. OpenFeign, `RestClient` và `WebClient` khác nhau thế nào?**
 
-// ĐÚNG: backoff + jitter + breaker để retry dãn ra, rồi dừng
-```
-
-```yaml
-resilience4j.retry:
-  instances:
-    inventory:
-      maxAttempts: 3
-      waitDuration: 100ms
-      exponentialBackoffMultiplier: 2.0
-      enableExponentialBackoff: true
-      enableRandomizedWait: true # jitter: 100ms ± 50% — đàn bò thành mưa phùn
-resilience4j.circuitbreaker:
-  instances:
-    inventory:
-      slidingWindowSize: 10
-      failureRateThreshold: 50 # >50% của 10 call fail → mở
-```
-
-Không có jitter, 200 thread retry đồng loạt và breaker không bao giờ có cửa sổ yên tĩnh để kiểm tra phục hồi; có jitter, service hấp hối chỉ phải xử lý một dòng request nhỏ giọt và có thể half-open an toàn.
-
-**Q26. OpenFeign vs RestClient vs WebClient — dùng cái nào khi nào?**
-Feign cung cấp một typed interface — contract là một Java type, còn retry và decoding được hỗ trợ sẵn. RestClient là lựa chọn synchronous nhẹ cho các call ad hoc. WebClient dành cho reactive stack. Chọn Feign khi một service là dependency chính thức với contract ổn định:
+OpenFeign cung cấp typed interface khai báo và phù hợp với dependency ổn định. `RestClient` trực tiếp và synchronous, phù hợp với ít call. `WebClient` phù hợp với reactive pipeline. Khi chọn, hãy so sánh generated behavior, error handling, observability và retry configuration.
 
 ```java
-@FeignClient(name = "inventory-service", url = "${inventory.base-url}",
-             configuration = InventoryClientConfig.class)
-public interface InventoryClient {
+@FeignClient(name = "inventory-service")
+interface InventoryClient {
     @GetMapping("/api/stock/{sku}")
     InventoryStatus stock(@PathVariable String sku);
-
-    @PostMapping("/api/stock/reserve")
-    Reservation reserve(@RequestBody ReserveRequest req);
 }
 ```
 
-Cái giá của Feign là một dynamic proxy cho mỗi interface và thêm một lớp magic. Với một call đơn lẻ tới service nội bộ, RestClient rõ ràng và dễ debug hơn; tôi mặc định dùng RestClient và chọn Feign từ 3 endpoint trở lên.
+**Q27. Bulkhead isolation là gì?**
 
-**Q27. Bulkhead isolation là gì và cấu hình nó thế nào?**
-Bulkhead giới hạn lượng resource mà một dependency được phép tiêu thụ — bằng thread pool hoặc semaphore riêng — để dependency bị treo chỉ làm đầy ngăn của nó, không phải pool dùng chung phục vụ mọi thứ khác. Không có nó, một callee chậm sẽ làm cả service thiếu tài nguyên:
+Bulkhead giới hạn resource mà một dependency được phép dùng, bằng semaphore hoặc pool riêng. Dependency chậm chỉ làm đầy compartment của nó thay vì lấy hết resource của endpoint không liên quan.
 
 ```java
-@Bulkhead(name = "inventory", type = Bulkhead.Type.THREADPOOL)
+@Bulkhead(name = "inventory", type = Bulkhead.Type.SEMAPHORE)
 @CircuitBreaker(name = "inventory")
-public InventoryStatus stock(String sku) {
-    return client.get().uri("/api/stock/{sku}", sku).retrieve().body(InventoryStatus.class);
-}
+public InventoryStatus stock(String sku) { ... }
 ```
 
-```yaml
-resilience4j.bulkhead:
-  instances:
-    inventory:
-      maxConcurrentCalls: 20 # chỉ 20 thread được chờ inventory
-      maxWaitDuration: 500ms # cái thứ 21 fail fast thay vì xếp hàng
-    payments:
-      maxConcurrentCalls: 30
-```
+**Q28. Trace request xuyên các service thế nào?**
 
-Con số: một pool chung 200 thread với một dependency timeout 3 s ở 200 rps cạn sạch trong ~1 s; tách 20/30/50 với 100 dự phòng, payments có thể treo mà orders vẫn được phục vụ.
+Distributed tracing truyền trace context qua boundary của các service. Mỗi service tạo span cho phần việc có ý nghĩa và ghi trace ID cùng span ID vào log. Spring Boot, Micrometer Tracing và OpenTelemetry có thể cung cấp instrumentation, nhưng propagation và sampling vẫn phải được kiểm chứng.
 
-**Q28. Trace một request xuyên 8 service thế nào?**
-Distributed tracing truyền một trace ID qua mọi hop, giúp bạn thấy toàn bộ waterfall và thời gian đã đi đâu. Spring Boot 3 + Micrometer Tracing + OpenTelemetry tự động kết nối việc này; cùng trace ID xuất hiện trong mọi dòng log:
+**Q29. Version API hoặc event thế nào?**
+
+Hãy coi wire format đã publish là contract. Thêm field theo cách backward-compatible, không đổi ý nghĩa field cũ và chỉ xóa field sau khi consumer migrate xong. Với thay đổi không tương thích của HTTP, dùng version rõ ràng hoặc content negotiation policy.
 
 ```java
-@Configuration
-public class TraceConfig {
-    @Bean
-    public ObservationRegistryCustomizer<ObservationRegistry> customizer() {
-        return registry -> registry.observationConfig()
-            .observationHandler(new LoggingObservationHandler());  // traceId/spanId trong log
-    }
-}
-```
-
-```yaml
-management:
-  tracing:
-    sampling:
-      probability: 0.1 # lấy mẫu 10% ở 10k rps = 1k trace — quá đủ
-  zipkin:
-    tracing:
-      endpoint: http://tracing:9411/api/v2/spans
-```
-
-Không có tracing bạn mù — log của mỗi service là một puzzle riêng không có đường nối. Chi phí là microsecond mỗi call; phần thưởng là tìm ra timeout 3 s chôn trong service thứ 6 thay vì đoán mò.
-
-**Q29. Version một API hoặc event thế nào mà không làm vỡ consumer?**
-Mọi contract đã publish đều sẽ tiến hóa; consumer không được vỡ khi contract thay đổi. Hãy version wire format, không phải code: `v1/orders` tiếp tục phục vụ client cũ trong khi `v2` được phát hành; với event, hãy thêm field mà không xóa field cũ (JSON tương thích hai chiều):
-
-```java
-// v1 của DTO đóng băng; v2 thêm một field mà payload cũ đơn giản là không có
 public record OrderSummaryV1(Long id, String status, BigDecimal total) {}
-
-public record OrderSummaryV2(Long id, String status, BigDecimal total,
-                             OffsetDateTime placedAt) {}
-
-@GetMapping(value = "/api/orders/{id}", headers = "Accept-version=v1")
-public OrderSummaryV1 getV1(@PathVariable Long id) { return toV1(service.get(id)); }
-
-@GetMapping(value = "/api/orders/{id}", headers = "Accept-version=v2")
-public OrderSummaryV2 getV2(@PathVariable Long id) { return toV2(service.get(id)); }
+public record OrderSummaryV2(Long id, String status,
+                             BigDecimal total, OffsetDateTime placedAt) {}
 ```
 
-Con số thực tế: phá vỡ contract mà không version có thể làm ~30% consumer hỏng chỉ sau một đêm; version chỉ tốn thêm vài DTO nhưng đổi lại là zero breakage.
+**Q30. Vì sao chatty call là vấn đề?**
 
-**Q30. Chatty calls — vì sao 8 HTTP call tuần tự là vấn đề?**
-Mỗi hop thêm latency và các độ trễ cộng dồn: 8 call tuần tự × 50 ms = tối thiểu 400 ms, trong khi tail behavior của p99 làm con số thực tế tệ hơn. Các call độc lập chạy song song; các call phụ thuộc được gộp ở phía server:
+Mỗi network hop tuần tự thêm latency và một cơ hội failure. Hãy chạy song song các call độc lập, aggregate ở một service boundary hoặc xây read model. Cần giới hạn parallelism và tổng thời gian chờ; nếu không fan-out chỉ chuyển overload sang chỗ khác.
 
 ```java
-// SAI: 8 round-trip tuần tự — 8 × 50ms = 400ms latency nối tiếp
-Order o = orderClient.get(id);
-User u = userClient.get(o.userId());
-Address a = addressClient.get(o.shippingAddressId());
-// ... năm cái nữa, hết cái này đến cái kia
-
-// ĐÚNG: fan-out song song, giới hạn bởi call chậm nhất
-CompletableFuture<Order> of = supplyAsync(() -> orderClient.get(id), pool);
-CompletableFuture<User> uf = of.thenCompose(o ->
+CompletableFuture<Order> order = supplyAsync(() -> orderClient.get(id), pool);
+CompletableFuture<User> user = order.thenCompose(o ->
     supplyAsync(() -> userClient.get(o.userId()), pool));
-CompletableFuture.allOf(of, uf).join(3, TimeUnit.SECONDS);   // chờ tối đa 3s
 ```
 
-Fan-out song song 8 call hạ p99 từ ~1,2 s xuống ~200 ms; mỗi hop tuần tự được song song hóa là latency được trả lại miễn phí.
+**Q31. Chọn threshold cho circuit breaker thế nào?**
 
-**Q31. Chọn circuit breaker threshold thế nào — và chuyện gì xảy ra khi tune sai?**
-Quá nhạy: cửa sổ 10 call trip chỉ vì một timeout 3 s, khiến bạn fail fast dù dependency vẫn ổn. Quá lỏng: breaker không bao giờ trip và bạn tiếp tục xếp hàng trên một dependency đã chết. Hãy tune dựa trên số liệu thực — failure rate, slow-call threshold và cooldown:
+Bắt đầu từ failure rate, slow-call rate, request volume và recovery behavior đã đo được. Window nhỏ có thể phản ứng với noise; window lớn có thể phản ứng quá chậm. Open duration và half-open probe nên được test theo đặc điểm recovery của dependency.
 
 ```java
-CircuitBreakerConfig cfg = CircuitBreakerConfig.custom()
-    .slidingWindow(10, 10, COUNT_BASED)            // quyết định trên 10 call gần nhất
-    .failureRateThreshold(50)                      // trip khi >50% fail
-    .slowCallDurationThreshold(Duration.ofSeconds(3))   // một call 3s tính là failure
-    .slowCallRateThreshold(60)
-    .permittedNumberOfCallsInHalfOpenState(3)      // dò bằng 3 call trước khi đóng
-    .waitDurationInOpenState(Duration.ofSeconds(30))   // mở 30s, rồi half-open
+CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+    .slidingWindowSize(10) // giả định minh họa
+    .failureRateThreshold(50) // giả định minh họa
+    .waitDurationInOpenState(Duration.ofSeconds(30)) // giả định minh họa
     .build();
 ```
 
-Ở p99 80 ms với ngưỡng 3 s, slow-call rate trên 60% thật sự nghĩa là dependency đang bệnh; cooldown 30 s cho nó thở, và 3 probe half-open xác minh phục hồi trước khi full traffic quay lại.
+**Q32. Service duy trì derived data thế nào?**
 
-**Q32. Các service giữ derived/denormalized data nhất quán thế nào?**
-Khi service A sở hữu source of truth và service B phục vụ một read model (search index, order list), B phản ứng với event của A và xây projection riêng. Cách còn lại — query A synchronously cho mỗi request — khiến latency và availability của B phụ thuộc vào A:
+Service sở hữu data phát hành domain event. Consumer xây projection riêng, như search index hoặc read model. Projection là eventually consistent nên consumer cần policy cho dữ liệu thiếu hoặc stale.
 
 ```java
-@Component
-public class OrderProjection {
-    @KafkaListener(topics = "order.placed", groupId = "search-index")
-    public void onPlaced(OrderPlaced e) {
-        indexService.index(new OrderDoc(e.orderId(), e.userId(), e.total()));
-    }
-
-    @KafkaListener(topics = "order.cancelled", groupId = "search-index")
-    public void onCancelled(OrderCancelled e) {
-        indexService.remove(e.orderId());
-    }
+@KafkaListener(topics = "order.placed", groupId = "search-index")
+public void onPlaced(OrderPlaced event) {
+    indexService.index(new OrderDoc(event.orderId(), event.total()));
 }
 ```
 
-Chi phí: projection trễ source khoảng ~100 ms–1 s và consumer phải chấp nhận staleness. Lợi ích: read local, nhanh và available ngay cả khi source service bị down.
+**Q33. Xử lý secrets thế nào?**
 
-**Q33. Xử lý secrets và environment configuration thế nào?**
-Secrets trong `application.yml` hoặc env file đã commit là một vụ lộ thông tin đang chờ xảy ra, đặc biệt khi chúng lọt vào log. Credential production phải nằm trong vault (HashiCorp Vault, AWS Secrets Manager, K8s Secrets); app lấy chúng lúc deploy và không bao giờ log chúng:
-
-```java
-@ConfigurationProperties(prefix = "payments")
-public record PaymentProps(String apiKey, String baseUrl) {}
-```
+Không commit credential production và không log chúng. Dùng secret manager hoặc platform secret facility, inject lúc runtime, rotate và audit quyền truy cập. Configuration và secret distribution là hai concern riêng, dù cùng một platform có thể cung cấp cả hai.
 
 ```yaml
-# application.yml — không có secrets
 payments:
-  base-url: ${PAYMENTS_URL:http://payments:8080}
-  api-key: ${PAYMENTS_API_KEY} # được inject từ vault lúc deploy
+  base-url: ${PAYMENTS_URL}
+  api-key: ${PAYMENTS_API_KEY}
 ```
 
-Key rotation, override theo env và audit đều thuộc về vault. Một key bị lộ có thể gây ra một incident; một vault chỉ cần thêm một config change.
+**Q34. JSON so với protobuf hoặc Avro?**
 
-**Q34. JSON vs binary serialization (protobuf/Avro) giữa các service — tradeoff là gì?**
-JSON dễ debug và phổ dụng; protobuf/Avro có schema, nhỏ hơn ~5–10×, parse nhanh hơn và hỗ trợ schema evolution qua registry. Với stream high-throughput nội bộ, binary format đáng để đánh đổi; với public API, JSON thắng về developer experience:
+JSON được hỗ trợ rộng và dễ inspect. Protobuf và Avro có schema, có thể giảm payload hoặc parsing work tùy data và implementation. Dùng schema-based format khi throughput, compatibility hoặc giới hạn payload được đo lường và biện minh cho tooling. Không khẳng định speedup cố định nếu chưa benchmark message thực tế.
 
-```java
-// JSON: đọc được, linh hoạt — payload ~120 bytes, parse ~1-2 µs
-record OrderEvent(Long id, String sku, int qty) {}
+## Senior: thiết kế và bảo vệ lựa chọn
 
-// Protobuf: có schema, gọn — payload ~30 bytes, parse ~200 ns
-message OrderEvent {
-  int64 id = 1;
-  string sku = 2;
-  int32 qty = 3;
-}
-```
+**Q35. Team muốn tách monolith thành 20 service. Bạn nói gì?**
 
-Con số: ở 50k events/s riêng khác biệt parse-time là ~50–90 ms CPU mỗi giây, và khác biệt wire-size cộng dồn trên consumer bị giới hạn bởi network. Bắt đầu với JSON; chuyển sang binary có schema khi volume hoặc schema evolution làm đau.
+**[ANALYSIS]** Hỏi việc tách giải quyết vấn đề gì. Nếu vấn đề là module chưa rõ hoặc build chậm, trước hết xây modular monolith với boundary được enforce. Chỉ extract service theo bounded context đã được chứng minh có nhu cầu ownership, scaling hoặc deployment khác biệt. Migrate dần, chẳng hạn bằng strangler approach, không rewrite một lần.
 
-## Senior — thiết kế & bảo vệ
+**Q36. Thiết kế payment qua Order, Inventory và Payment không dùng 2PC.**
 
-**Q35. Một team muốn chia monolith 3 năm tuổi thành 20 microservice. Bạn nói gì?**
-"Tôi sẽ phản đối mạnh và hỏi việc tách service giải quyết vấn đề gì. Nếu nỗi đau là module boundary lộn xộn hoặc deployment pipeline chậm, cách sửa là modular monolith — cùng codebase với package boundary nghiêm ngặt — chứ không phải 20 service. Tôi chỉ tách theo một bounded context _đã được chứng minh_ có nhu cầu scaling hoặc team ownership khác biệt, thực hiện incremental qua strangler fig, tuyệt đối không big-bang:"
+**[PROPOSED DESIGN]** Để Order điều phối một Saga: reserve inventory, charge payment và compensate bằng release nếu charge fail. Persist Saga state và làm reserve, charge, release, refund idempotent. Thứ tự chính xác phụ thuộc business risk; inventory reservation và payment authorization có thể có compensation khác nhau.
 
-```java
-// Modular monolith trước: dependency rule nghiêm ngặt, một khối deploy được
-module com.shop.orders {
-    exports com.shop.orders.api;
-    requires com.shop.shared.kernel;   // orders KHÔNG ĐƯỢC import internals của inventory
-}
-```
+**Q37. HTTP dependency flaky. Thiết kế resilience layer thế nào?**
 
-"Mỗi service trong số 20 service đồng nghĩa với build, deploy, rollback, on-call rotation và failure mode riêng. Nếu hai service không thể deploy hoặc scale độc lập, bạn đã trả microservice tax mà chẳng nhận được lợi ích gì — đó là lập luận thuyết phục trong phỏng vấn."
+**[PROPOSED DESIGN]** Bắt đầu bằng timeout, sau đó bounded retry với backoff và jitter cho transient failure an toàn, circuit breaker và bulkhead. Chỉ thêm fallback khi dữ liệu stale hoặc degraded vẫn đúng nghĩa nghiệp vụ. Tune từng lớp theo traffic và số liệu dependency, không copy default một cách máy móc.
 
-**Q36. Thiết kế payment flow qua Order, Inventory, và Payment service không dùng 2PC.**
-"Một orchestration Saga với OrderService làm coordinator. Các bước là reserve inventory (local transaction + compensation `release`), rồi charge payment (local transaction + compensation `refund`). Nếu payment fail, coordinator kích hoạt `release`. Saga log ghi lại từng bước để Saga có thể resume sau crash thay vì thực thi lại từ đầu:"
+**Q38. Khi nào monolith là lựa chọn tốt hơn?**
 
-```java
-@Service
-public class OrderSaga {
-    private final SagaLog log;
-    private final InventoryClient inventory;
-    private final PaymentClient payments;
-
-    public OrderResult place(Order o) {
-        String sagaId = log.start("order-placement", o.id());
-        try {
-            log.record(sagaId, "reserve");
-            inventory.reserve(o.sku(), o.qty());                 // timeout 3s
-            try {
-                log.record(sagaId, "charge");
-                payments.charge(o.id(), o.total());              // timeout 3s
-                log.record(sagaId, "done");
-                return OrderResult.confirmed(o.id());
-            } catch (Exception e) {
-                log.record(sagaId, "compensate:release");
-                inventory.release(o.sku(), o.qty());             // undo bước 1
-                return OrderResult.failed(o.id());
-            }
-        } finally {
-            log.record(sagaId, "complete");
-        }
-    }
-}
-```
-
-"Mỗi bước fail fast ở 3 s; worst case ~6 s, không global lock, và log trả lời 'saga này chết ở đâu?' sau một crash."
-
-**Q37. Một downstream HTTP call flaky (5% timeout ở 3 s). Thiết kế resilience layer.**
-"Bốn lớp, theo thứ tự: **timeout** (3 s, ngắn hơn SLA của tôi), **retry** với exponential backoff + jitter (3 lần, chỉ với call idempotent), **circuit breaker** (mở sau 50% lỗi trong cửa sổ 10 call, cooldown 30 s), và **bulkhead** (tối đa 20 call đồng thời tới dependency này). Thêm fallback về giá trị cache để user nhận được phản hồi degraded-but-working:"
-
-```java
-@Bean
-public Resilience4JCircuitBreakerFactory cbFactory() {
-    var cfg = new Resilience4JConfigBuilder("inventory")
-        .timeLimiterConfig(TimeLimiterConfig.custom()
-            .timeoutDuration(Duration.ofSeconds(3)).build())        // fail ở 3s
-        .circuitBreakerConfig(CircuitBreakerConfig.custom()
-            .slidingWindowSize(10)
-            .failureRateThreshold(50)
-            .waitDurationInOpenState(Duration.ofSeconds(30))
-            .build())
-        .retryConfig(RetryConfig.custom()
-            .maxAttempts(3)
-            .waitDuration(Duration.ofMillis(100))
-            .enableExponentialBackoff()
-            .enableRandomizedWait()
-            .build())
-        .bulkheadConfig(BulkheadConfig.custom()
-            .maxConcurrentCalls(20).build())                       // ngăn riêng của nó
-        .build();
-    var factory = new Resilience4JCircuitBreakerFactory();
-    factory.configureDefault(cbFactory, cfg);
-    return factory;
-}
-```
-
-"Với 5% timeout, 3 lần thử hạ lỗi user thấy được xuống ~0,0125%; breaker giới hạn thiệt hại trong một outage thật ở 20 call đồng thời thay vì 200; p99 vẫn trong ngân sách vì không gì chờ quá 3 s."
-
-**Q38. Khi nào monolith thực sự là lựa chọn tốt hơn, và giữ nó sạch thế nào?**
-"Với một team nhỏ, một sản phẩm còn mới hoặc một domain không có nhu cầu scale độc lập, modular monolith nhanh build, debug và deploy hơn — hoàn toàn không có distributed failure mode. Giữ nó sạch bằng các module boundary tường minh được test enforce, không phải bằng cảm tính:"
+**[ANALYSIS]** Modular monolith thường phù hợp với team nhỏ, product còn sớm hoặc domain không cần scaling độc lập. Enforce boundary bằng architecture test và package rule.
 
 ```java
 @ArchTest
-static final ArchRule modules_must_not_depend_on_each_other =
+static final ArchRule orders_are_isolated =
     classes().that().resideInAPackage("..orders..")
         .should().onlyDependOnClassesThat()
         .resideInAnyPackage("..orders..", "..shared..");
 ```
 
-"ArchUnit làm build fail khi `orders` import internals của `inventory`, nên boundary thật sự đứng vững cho tới khi một lý do đã chứng minh để chia xuất hiện. Migrate sang service chỉ khi nhu cầu scaling hoặc team-ownership của một boundary thật sự phân kỳ; premature splitting là sai lầm đắt nhất trong lĩnh vực này."
+**Q39. Chọn sync hay async giữa hai service cụ thể thế nào?**
 
-**Q39. Chọn sync vs async giữa hai service cụ thể thế nào?**
-"Hãy hỏi hai câu: caller có bị chặn bởi câu trả lời này không, và hệ thống có chấp nhận độ trễ không? Order→Inventory 'reserve stock' — sync: user đang chờ xác nhận và timeout là lỗi rõ ràng, có thể hiển thị. Order→Notification — async: không ai phải chờ nó, và tôi muốn nó tiếp tục hoạt động khi notifier bị down:"
+Hỏi caller có cần kết quả để hoàn thành operation hiện tại không và có chấp nhận delay không. Reserve stock thường là synchronous khi confirmation phụ thuộc vào nó. Notification thường là asynchronous vì response của order không cần chờ delivery. Đây là assumption thiết kế và phải khớp product semantics.
 
-```java
-// Order → Inventory: sync — user đang chờ, timeout 3s = lỗi hiện được
-InventoryStatus s = inventoryClient.reserve(req);
+**Q40. Bảo vệ service boundary thế nào?**
 
-// Order → Notification: async — decouple, sống sót qua outage
-orderEvents.publish(new OrderPlaced(o));    // broker đệm, retry sau
-```
-
-"Trộn chúng sai — sync-call năm service nối tiếp — tạo một chuỗi latency gãy theo tốc độ của link chậm nhất, và mỗi cái dính một retry storm khi link yếu nhất chết."
-
-**Q40. Phòng thủ service boundary — làm sao biết một lần chia là đúng?**
-"Một boundary đúng là một bounded context: một lý do để thay đổi, một team sở hữu, có thể deploy và scale độc lập, cùng data riêng. Câu hỏi kiểm tra là: 'Nếu tôi đổi schema của service A, B có phải redeploy không?' Nếu có, chúng là một context đang giả vờ thành hai. Bằng chứng phải thể hiện trong vận hành — tần suất deploy độc lập và failure isolation:"
+Boundary hữu ích có lý do thay đổi rõ, team sở hữu, data riêng và deployment cùng scaling độc lập. Một test thực tế là schema change ở A có bắt B deploy không. Nếu có, hãy xem boundary có thật không hay hệ thống đang là distributed monolith.
 
 ```java
-// Orders context publish sự thật; Billing tiêu thụ — không shared code, không shared schema
-@Component
-public class OrderPublisher {
-    public void placed(Order o) { events.publish(new OrderPlaced(o.id(), o.total())); }
-}
-
-@Component
-public class BillingConsumer {
-    @KafkaListener(topics = "order.placed", groupId = "billing")
-    public void on(OrderPlaced e) { invoiceService.create(e.orderId(), e.total()); }
+@KafkaListener(topics = "order.placed", groupId = "billing")
+public void on(OrderPlaced event) {
+    invoiceService.create(event.orderId(), event.total());
 }
 ```
 
-"Boundary được kiểm chứng bằng deploy/scale/failure independence, không phải bằng vẽ ô. Nếu A và B luôn ship cùng nhau và share schema, tôi đã xây một distributed monolith và nên merge chúng."
+**Q41. Bảo vệ lựa chọn 2PC hay Saga bằng con số thế nào?**
 
-**Q41. 2PC vs Saga — bảo vệ lựa chọn bằng con số.**
-"2PC giữ một global lock: ở 1k order/phút, coordinator crash trong pha prepare sẽ chặn transaction hàng phút — availability chết, không chỉ latency. Saga giữ mỗi bước là một local transaction ngắn: p50 ~10 ms, p99 ~200 ms, với vài giây đến vài phút bất nhất được compensation xử lý:"
+Không tự tạo số liệu latency hoặc availability. Trước hết hãy nêu business tolerance. Nếu operation cần atomic cross-resource commit và platform hỗ trợ chấp nhận được, 2PC có thể hợp lý. Nếu nghiệp vụ chấp nhận reconcile và compensate, Saga tránh global transaction nhưng phải trả inconsistency window.
 
-```java
-// 2PC: atomic nhưng giòn — coordinator crash = lock bị chặn = hàng phút mất availability
-// Saga: không global lock, eventual consistency, compensation đóng khoảng trống
-public void shipAndBill(Shipment s) {
-    try {
-        inventory.ship(s);                    // local txn, ~10ms
-        billing.invoice(s);                   // local txn, ~10ms
-    } catch (Exception e) {
-        inventory.unship(s);                  // compensate — đóng khoảng trống
-    }
-}
-```
+**Q42. Service có p99 tail dài. Chẩn đoán thế nào?**
 
-"Nếu nghiệp vụ chấp nhận một cửa sổ đối soát 5 phút, Saga cho bạn p99 < 200 ms và 99,99% availability; 2PC cho bạn atomicity mà không ai thực sự quan sát được và bắt p99 của bạn làm con tin. Hệ thống thật chọn Saga và audit sau."
-
-**Q42. p99 của một service gấp 5 lần p50. Dẫn chẩn đoán.**
-"p50 80 ms và p99 1,2 s cho thấy một phân bố có tail dài. Ba nghi phạm theo thứ tự là GC pause (một full GC 1 s hiện ra như một vách đá), lock contention và downstream timeout/retry. Tracing cho biết nguyên nhân; percentile cho thấy hình dạng:"
+Tách vấn đề thành application pause, lock contention, queueing, downstream latency và retry. Dùng trace, runtime metric, database wait data và request histogram. So sánh p50/p99 cho thấy tail nhưng không tự cho biết nguyên nhân.
 
 ```java
 @Timed(name = "orders.get", histogram = true,
@@ -812,182 +472,78 @@ public void shipAndBill(Shipment s) {
 public OrderSummary get(Long id) { ... }
 ```
 
-```yaml
-management:
-  metrics:
-    distribution:
-      percentiles-histogram:
-        orders.get: true
-```
+**Q43. Size outbound thread pool thế nào?**
 
-"Nếu vách đá p99 trùng với một full GC trên đồ thị heap, là JVM; nếu trùng với timeout 3 s downstream, là config retry/breaker; nếu rải rác, thường là lock contention. Tôi sửa cái sở hữu lát lớn nhất của cái đuôi — đo được, không phải đoán."
-
-**Q43. Size outbound thread pool thế nào — và chuyện gì xảy ra khi size sai?**
-"Little's Law: để duy trì N request đồng thời với latency L, bạn cần pool ≥ N. Với pool 200 và downstream timeout 3 s, service gánh tối đa ~200 in-flight call đồng thời — nếu cả 200 thread đều mắc kẹt trong timeout 3 s, throughput sụp còn ~66 rps. Hãy size từ concurrency đo được, giới hạn queue và fail fast ở biên:"
+Bắt đầu từ concurrency, latency, CPU, connection limit và SLO đã đo được. Áp dụng Little's Law cẩn thận: trong hệ thống ổn định, concurrency xấp xỉ throughput nhân latency. Queue phải có giới hạn và overload behavior phải rõ.
 
 ```java
-ThreadPoolExecutor pool = new ThreadPoolExecutor(
-    50,                       // core
-    200,                      // max — 200 outbound call đồng thời, mãi mãi
-    60, TimeUnit.SECONDS,
-    new ArrayBlockingQueue<>(1000),            // queue có giới hạn
-    new ThreadPoolExecutor.CallerRunsPolicy()  // backpressure, không drop thầm lặng
-);
+new ThreadPoolExecutor(
+    50, 200, 60, TimeUnit.SECONDS,
+    new ArrayBlockingQueue<>(1000), // giả định minh họa
+    new ThreadPoolExecutor.CallerRunsPolicy());
 ```
 
-"Thiếu: queue phình và latency vượt SLA. Thừa: mỗi thread tốn ~1 MB stack cộng overhead context-switch. Con số đến từ concurrency đo được × headroom, không phải cảm hứng — và queue phải có giới hạn để overload hiện ra, không bị hấp thụ cho tới OOM."
+**Q44. Saga crash giữa chừng thì resume thế nào?**
 
-**Q44. Một saga crash ở bước 3 của 5. Làm nó resumable thế nào?**
-"Một Saga trong bộ nhớ sẽ chết cùng process, để lại các bước thực hiện dở dang. Hãy persist Saga state: mỗi lần chuyển bước ghi vào Saga table trong cùng local transaction với effect của bước đó. Khi restart, quét các Saga đang in-progress và tiếp tục hoặc compensate từ bước cuối đã ghi:"
+Persist Saga state và các bước chuyển trạng thái. Khi restart, tìm các instance đang chạy rồi retry bước tiếp theo nếu idempotent hoặc compensate từ state durable cuối cùng. State record không được ghi là hoàn tất trước khi effect của bước đã durable.
 
 ```java
 @Entity
-public class SagaInstance {
+class SagaInstance {
     @Id String sagaId;
-    String status;       // STARTED / IN_PROGRESS / DONE / COMPENSATING
-    int lastStep;        // 1=reserve, 2=charge, 3=ship, ...
-}
-
-@Component
-public class SagaRecovery {
-    @EventListener(ApplicationReadyEvent.class)
-    public void resume() {
-        sagaRepo.findByStatusIn(List.of("STARTED", "IN_PROGRESS")).forEach(s -> {
-            switch (s.lastStep()) {
-                case 1 -> compensateFrom(s, "reserve");
-                case 2 -> compensateFrom(s, "charge");
-                default -> retryForward(s);
-            }
-        });
-    }
+    String status;
+    int lastStep;
 }
 ```
 
-"Effect của mỗi bước được ghi cùng entry saga-log của nó trong một transaction, nên log luôn trung thực. Recovery chạy trong 30 s sau restart; cái giá là một bảng và một lần quét lúc startup."
+**Q45. Đặt SLO xuyên service chain thế nào?**
 
-**Q45. Đặt SLO và ngân sách error budget xuyên một chuỗi service thế nào?**
-"Mỗi hop tiêu hao độ tin cậy: ba service ở mức 99,9% cho 99,7% end to end — 3 request hỏng trên mỗi 1.000. Hãy lập ngân sách từ SLO mà user nhìn thấy: user p99 < 1 s nghĩa là order p99 < 900 ms, tức inventory và payment cộng lại phải < 700 ms. Mỗi dependency có ngân sách riêng và một breaker được tune để enforce ngân sách đó:"
+Bắt đầu từ SLO user nhìn thấy, sau đó phân bổ latency và error budget cho dependency. Nhân các availability figure độc lập chỉ là xấp xỉ; shared failure và retry phá vỡ giả định độc lập. Hãy đo chain thật và chừa budget cho retry, queue và vận hành.
 
-```java
-// Ngân sách: user SLO 99,9% → mỗi service trong 3 đốt tối đa 0,033%
-// Ở 1M request/tháng, một service có thể fail 333 lần trước khi page
-public class SloBudget {
-    public static final double CHAIN_SLO = 0.999;
-    public static final double PER_SERVICE = 1 - (1 - CHAIN_SLO) / 3;   // 0.99967
-}
-```
+**Q46. Rate-limit và backpressure thế nào?**
 
-```yaml
-prometheus:
-  alerts:
-    - expr: rate(http_server_requests_seconds_count{status=~"5.."}[5m]) > 0.001
-      for: 15m # đốt 0,1% ngân sách trong 15 phút → page
-```
-
-"Con số quan trọng: chuỗi 3 service ở 99,9% mỗi cái là 99,7% user thấy được. Nếu sản phẩm cần 99,95%, ai đó nhận SLO 99,99% với timeout chặt hơn, hoặc chuỗi ngắn lại."
-
-**Q46. Rate-limit và enforce backpressure xuyên chuỗi thế nào?**
-"Ở phía server, trả 429 cho client vượt quota để bảo vệ bạn khỏi burst 10×. Ở phía client, rate limiter trên outbound call để bảo vệ dependency. Resilience4j hỗ trợ cả hai phía:"
+Rate-limit ở edge để bảo vệ service và trên outbound call để bảo vệ dependency. Giới hạn queue, từ chối excess work một cách rõ ràng và expose `429` hoặc response overload phù hợp. Backpressure là policy từ chối hoặc trì hoãn work, không chỉ là implementation của queue.
 
 ```java
 @RateLimiter(name = "payments-outbound", fallbackMethod = "quotaExceeded")
-public PaymentResult charge(PaymentRequest req) {
-    return paymentsClient.charge(req);
+public PaymentResult charge(PaymentRequest request) {
+    return paymentsClient.charge(request);
 }
 ```
 
-```yaml
-resilience4j.ratelimiter:
-  instances:
-    payments-outbound:
-      limitForPeriod: 50 # 50 call mỗi cửa sổ
-      limitRefreshPeriod: 1s # = 50 rps với payment provider
-      timeoutDuration: 500ms # chờ tối đa 500ms lấy permit, rồi fail fast
-```
+**Q47. Chứng minh resilience thế nào?**
 
-"Khi provider chậm lại, limiter phía client trải đều 50 rps của bạn thay vì burst 200 và ăn một đống 429s; kết hợp với chờ 500 ms, caller nhận một lỗi sạch trong nửa giây, không phải một timeout 3 s."
+Inject failure thực tế trong môi trường an toàn: dependency error, delay, broker unavailable và database failure. Assert latency có giới hạn, degradation đúng, retry không tăng mất kiểm soát và recovery hoạt động. Chạy lại sau mỗi thay đổi resilience và so sánh với SLO.
 
-**Q47. Chứng minh hệ thống thực sự phục hồi — và giữ nguyên phục hồi?**
-"Resilience chỉ là giả thuyết cho tới khi một test làm dependency ngừng hoạt động. Hãy fault injection ở staging — tắt inventory, Kafka hoặc một database — và assert rằng SLO vẫn được giữ. Tự động hóa việc này: chạy chaos theo lịch và so sánh metrics với error budget:"
+**Q48. Đổi tên field của event có nhiều consumer thế nào?**
+
+Dùng additive migration. Thêm field mới nhưng giữ field cũ, deploy consumer hiểu field mới, rồi chỉ xóa field cũ sau compatibility window và schema check. Schema registry có thể enforce compatibility nhưng không thay thế việc inventory consumer.
+
+**Q49. Xử lý authentication và authorization giữa các service thế nào?**
+
+Dùng một identity domain nhất quán. Gateway hoặc identity provider có thể phát signed token; service tự validate token và enforce authorization cho resource của mình. Local signature validation tránh một network hop bắt buộc, nhưng vẫn phải xử lý key rotation, audience, expiry và claim validation.
 
 ```java
-@Test
-@SpringBootTest(webEnvironment = RANDOM_PORT)
-class ResilienceChaosTest {
-    @Test
-    void order_survives_inventory_outage() {
-        wireMock.stubFor(post("/api/stock/reserve").willReturn(aResponse()
-            .withFixedDelay(5_000).withStatus(503)));   // inventory chết VÀ chậm
-
-        List<CompletableFuture<OrderResult>> calls = IntStream.range(0, 100)
-            .mapToObj(i -> supplyAsync(() -> orderSaga.place(order(i)), pool))
-            .toList();
-
-        assertThat(calls).allSatisfy(f ->
-            assertThat(f.join(5, SECONDS).status()).isIn("FAILED", "DEGRADED"));
-        // breaker đã mở, không gì treo, không thread rò rỉ — được assert, không phải giả định
-    }
+Jwt jwt = decoder.decode(extractToken(request));
+if (!allowed(request, jwt)) {
+    response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+    return;
 }
 ```
 
-"Chạy cùng test đó sau mọi thay đổi resilience; nếu một thay đổi tương lai lặng lẽ gỡ breaker, chaos test page team trước khi khách hàng làm điều đó."
+**Q50. Điều gì có thể làm hệ thống này hỏng trong production?**
 
-**Q48. Bạn cần đổi tên một field trong event được 10 service tiêu thụ. Làm sao?**
-"Không bao giờ rename theo cách gây breaking change. Thêm field mới, ship consumer đọc field đó, rồi bỏ field cũ — ba lần deploy, mỗi lần an toàn độc lập. Schema registry (Avro/JSON Schema) làm rõ quá trình evolution và chặn thay đổi không tương thích ngay tại producer:"
-
-```java
-// release 1: thêm field mới, giữ field cũ
-record OrderPlaced(Long orderId, String customerId, String customerRef /* mới */) {
-    public String legacyRef() { return customerRef != null ? customerRef : customerId; }
-}
-
-// release 2: consumer đọc customerRef
-// release 3: xóa customerId, bump schema version
-```
-
-"Với 10 consumer, một rename gây vỡ nghĩa là 10 lần deploy phối hợp hoặc ~10 incident page; migration ba bước chậm hơn nhưng không bao giờ cần cutover phối hợp — và schema registry biến 'tôi quên' thành một CI build fail thay vì một production outage."
-
-**Q49. AuthN/authZ xuyên các service thế nào?**
-"Dùng một identity domain duy nhất: gateway (hoặc auth service) phát JWT một lần, còn các service downstream validate chữ ký locally — không bao giờ gọi auth service trung tâm cho mỗi request, vì nó sẽ trở thành điểm lỗi chung. Mỗi service vẫn enforce authorization claim của riêng mình:"
+Ba rủi ro thường gặp là retry không giới hạn khi thiếu timeout hoặc breaker, shared schema hoặc distributed transaction làm mất service independence, và thiếu observability. Câu trả lời không phải một configuration cố định. Cần bounded call, operation idempotent, local transaction, ownership rõ, tracing, metric và failure test.
 
 ```java
-@Component
-public class JwtAuthFilter extends OncePerRequestFilter {
-    private final JwtDecoder decoder;   // shared public key — không network call mỗi request
-
-    @Override
-    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res,
-                                    FilterChain chain) throws IOException, ServletException {
-        Jwt jwt = decoder.decode(extract(req));     // verify chữ ký local (~100 µs)
-        String role = jwt.getClaimAsString("role");
-        if (!allowed(req, role)) { res.setStatus(403); return; }
-        chain.doFilter(req, res);
-    }
-}
+// Mọi outbound call cần timeout rõ ràng và được review.
+factory.setReadTimeout(Duration.ofSeconds(3)); // giả định minh họa
 ```
 
-"JWT validation local ~100 µs; introspection mỗi request tới auth service trung tâm là 1–5 ms cộng một dependency availability. Tin chữ ký, phân phối public key, giữ authorization local."
+**[SOURCE FACT]** Câu trả lời senior tốt nhất là một thiết kế nêu rõ assumption, đo được behavior và có rollback hoặc compensation path. Microservices chỉ là một lựa chọn; monolith được tổ chức tốt cũng là một lựa chọn.
 
-**Q50. Architecture review của bạn: kể ba thứ sẽ giết hệ thống microservices này trong production.**
-"Thứ nhất, không circuit breaker và retry hiếu chiến ở khắp nơi — một dependency chập chờn thành một retry storm kéo cả chuỗi xuống (200 thread × 3 retry ngay lập tức biến một outage 5% thành DDoS toàn phần trong một incident tôi từng sống qua). Thứ hai, distributed transaction và shared schema giả vờ là 2PC — distributed monolith không bao giờ deploy độc lập được. Thứ ba, không timeout: mọi call chờ vĩnh viễn và p99 trở thành 'đợi tới khi ai đó restart':"
+#### Tự kiểm tra
 
-```java
-// Ba kẻ giết người, trong code:
-// 1. Retry không backoff hay breaker — thundering herd
-@Retry(name = "x", maxAttempts = 10)              // 10 × đồng bộ = 10× tải
-// 2. Shared schema / 2PC xuyên service — distributed monolith
-@Transactional
-public void place(Order o) { orderRepo.save(o); paymentsDb.charge(...); }   // SAI
-// 3. Không timeout — một dependency treo sở hữu thread của bạn
-RestClient.builder().build();     // default: không read timeout — treo vĩnh viễn
-```
-
-"Câu trả lời của senior là điều ngược lại: mọi call đều có timeout (3 s), retry có giới hạn với backoff và jitter phía sau breaker, transaction là local, và boundary test — 'cái này có deploy một mình được không?' — được chạy trong mọi review. Nếu chỉ nhớ một câu sau buổi phỏng vấn này, hãy nhớ rằng: resilience bắt đầu từ configuration, trước cả code."
-
-#### Self-check
-
-- [ ] Junior: Tôi giải thích được microservice vs monolith, sync vs async, gateway, discovery, circuit breaker, REST client, timeout, retry, và DTO contract — mỗi cái với một snippet Spring chạy được trong đầu.
-- [ ] Mid: Tôi giải thích được database-per-service, 2PC vs Saga, outbox, vì sao `@Transactional` không vắt ngang service, retry storm, bulkhead, tracing, versioning, và song song hóa chatty call.
-- [ ] Senior: Tôi argument được chống premature splitting với modular monolith, thiết kế payment saga resume được sau crash, size pool 200 thread từ Little's Law, ngân sách SLO xuyên chuỗi, và kể được ba thứ giết một hệ thống microservices.
-- [ ] Phòng thủ: Tôi bảo vệ mọi lựa chọn bằng con số — timeout 3 s, retry 3× có backoff, ngân sách p99, và chi phí lock của 2PC so với cửa sổ compensation của Saga.
-- [ ] Bằng chứng: Tôi chứng minh phục hồi bằng fault-injection test và enforce boundary bằng ArchUnit — resilience là configuration trước khi nó là code.
+- [ ] Junior: Tôi giải thích được service boundary, sync và async communication, gateway, discovery, circuit breaker, client, timeout, retry, idempotency và DTO contract.
+- [ ] Mid-level: Tôi giải thích được private data, Saga, outbox, local transaction, retry storm, bulkhead, tracing, versioning, projection và backpressure.
+- [ ] Senior: Tôi biện minh được việc tách service, đo hoặc định lượng trade-off, thiết kế recovery và nói được khi nào không nên dùng microservices.

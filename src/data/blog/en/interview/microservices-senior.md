@@ -1,6 +1,6 @@
 ---
-title: "Java Interview Prep #6: Microservices — Junior to Senior"
-description: "Microservices at the senior level are mostly about knowing when NOT to use them — resilience patterns, service communication, and distributed transactions."
+title: "Java Interview Prep #6: Microservices Design and Trade-offs"
+description: "A practical interview guide to microservice boundaries, communication, resilience, and distributed transactions in Spring."
 pubDatetime: 2026-08-10T10:10:00+07:00
 featured: false
 draft: false
@@ -11,44 +11,49 @@ tags:
   - resilience
 ---
 
-Microservices are the topic where senior judgment matters most, because the wrong answer is "let's split the monolith." Junior developers draw service boxes; seniors explain why a monolith was the right call for years and what specifically forced the split. This post walks from service boundaries to the distributed-transaction trap: 50 questions, every answer code-first with real Spring. Pick the level you are interviewing for and read one level above it.
+Microservices are not a default architecture. They are a way to buy independent deployment, scaling, and ownership by accepting network failures, distributed data, and more operational work. The difficult part is deciding whether those benefits justify the cost.
 
-> Mindset: a junior lists the benefits of microservices; a senior can name three concrete costs they introduce and the exact trigger that justifies paying them.
+This guide moves from basic service communication to Saga, observability, capacity, and architecture review. The code is illustrative Spring code, not a complete application. Where a number appears in an example, it is marked as an illustrative assumption rather than a universal recommendation.
 
-## Junior — foundations
+> Senior signal: name the cost of a design, the condition that justifies it, and how you will detect when the trade-off is no longer acceptable.
 
-**Q1. What is a microservice and how does it differ from a monolith?**
-A microservice is a small, independently deployable service that owns one business capability and its own data. A monolith is one deployable unit serving every capability. Microservices buy independent scaling, isolated failures, and team autonomy; they come with the costs of network calls, distributed data, and operational complexity. The cheapest form of a microservice is a Spring Boot app that does exactly one job:
+## Junior: foundations
+
+**Q1. What is a microservice, and how does it differ from a monolith?**
+
+A microservice is an independently deployable service organized around a business capability. It should own its data and expose an explicit contract. A monolith is one deployable unit containing multiple capabilities. Microservices can provide independent scaling, failure isolation, and team ownership, but they introduce network calls, distributed consistency, and operational overhead.
 
 ```java
 @SpringBootApplication
 public class OrderService {
     public static void main(String[] args) {
-        SpringApplication.run(OrderService.class, args);   // one capability, one deployable
+        SpringApplication.run(OrderService.class, args);
     }
 }
 ```
 
-One deployable means one build, one rollout, one rollback. Twenty services mean twenty of each — that cost only pays off when the independence is real.
+**[ANALYSIS]** A modular monolith is often the better starting point. Split only when independent ownership, deployment, or scaling solves a demonstrated problem.
 
-**Q2. What is the difference between synchronous and asynchronous communication?**
-Sync (HTTP/RPC): the caller blocks until it gets an answer — tight coupling, and a slow callee stalls your thread. Async (events): the caller publishes and moves on — loose coupling and resilience, but eventual consistency and harder debugging. Choose sync when the user is waiting for the answer, and async for fire-and-forget side effects:
+**Q2. What is synchronous versus asynchronous communication?**
+
+In synchronous communication, the caller waits for a response, commonly over HTTP or RPC. A slow callee consumes caller resources and adds coupling. In asynchronous communication, the producer publishes a message or event and continues. This reduces temporal coupling, but introduces eventual consistency and makes tracing harder.
 
 ```java
-// Sync — the caller waits
+// Synchronous: the caller needs the result.
 OrderSummary summary = restClient.get()
     .uri("http://order-service/api/orders/{id}", id)
     .retrieve()
-    .body(OrderSummary.class);        // blocks until response or 3s timeout
+    .body(OrderSummary.class);
 
-// Async — publish and continue
-kafkaTemplate.send("order.placed", new OrderPlaced(orderId));   // nobody waits
+// Asynchronous: publish a fact and continue.
+kafkaTemplate.send("order.placed", new OrderPlaced(orderId));
 ```
 
-Rule of thumb: the happy-path request the user waits for is sync; anything that can tolerate a delay is async.
+**[ANALYSIS]** Use synchronous communication when the response is part of the current user-visible decision. Use asynchronous communication for work that can complete later, such as notifications.
 
-**Q3. What is an API gateway and what does it do?**
-An API gateway is one entry point that routes, authenticates, rate-limits, and often aggregates. It hides the service topology so clients talk to one host instead of twenty, and cross-cutting policies live in one place. Spring Cloud Gateway is a reactive proxy; routes are just functions:
+**Q3. What is an API gateway?**
+
+An API gateway is an entry point that can route requests, authenticate clients, apply rate limits, and aggregate responses. It can hide internal topology and centralize edge policies. It is not a replacement for authorization inside each service.
 
 ```java
 @Bean
@@ -56,755 +61,410 @@ public RouteLocator routes(RouteLocatorBuilder b) {
     return b.routes()
         .route("orders", r -> r.path("/api/orders/**")
             .filters(f -> f.circuitBreaker(c -> c.setName("gatewayCB")
-                    .setFallbackUri("forward:/fallback/orders")))
+                .setFallbackUri("forward:/fallback/orders")))
             .uri("lb://ORDER-SERVICE"))
         .build();
 }
 ```
 
-Without it, clients hardcode every service address, every team re-implements auth, and nobody can rate-limit anything centrally.
+**Q4. What is service discovery, and why avoid hardcoded instance URLs?**
 
-**Q4. What is service discovery and why can't you hardcode URLs?**
-Instances scale, crash, and get rescheduled; a hardcoded IP is stale within minutes. Services register with a registry (Eureka, Consul, K8s DNS) and resolve one another by logical name. In Spring, `@LoadBalanced` turns the name into a real instance selected per request:
+Instances are created, removed, and rescheduled. A fixed instance address therefore becomes stale. Service discovery maps a logical service name to available instances. The mechanism may be a registry or platform DNS; the important property is that callers do not own instance placement.
 
 ```java
 @Bean
 @LoadBalanced
 public RestClient.Builder loadBalancedRestClientBuilder() {
-    return RestClient.builder();               // resolve lb://ORDER-SERVICE → instance IP:port
+    return RestClient.builder();
 }
 
-// Call by service name, not by IP:
-OrderSummary o = restClient.get().uri("http://ORDER-SERVICE/api/orders/{id}", id)
+OrderSummary order = restClient.get()
+    .uri("http://ORDER-SERVICE/api/orders/{id}", id)
     .retrieve().body(OrderSummary.class);
 ```
 
-Hardcoded hostnames break the moment a pod reschedules; a registry makes scaling and restarts invisible to callers.
+**Q5. What is a circuit breaker?**
 
-**Q5. What is a circuit breaker and why do you need one?**
-Naive retries against a dying dependency pile up and exhaust your threads — one dead service can take down the whole chain. A breaker trips after N failures, fails fast during the cooldown, then half-opens to test recovery:
+A circuit breaker stops sending calls to a dependency that is failing. It fails fast while open, then permits limited probes in half-open state. This prevents repeated timeouts and protects the caller's threads. A breaker does not repair the dependency; it limits the failure's propagation.
 
 ```java
 @CircuitBreaker(name = "inventory", fallbackMethod = "fallback")
 public InventoryStatus check(String sku) {
     return restClient.get().uri("http://inventory-service/api/stock/{sku}", sku)
-            .retrieve().body(InventoryStatus.class);
+        .retrieve().body(InventoryStatus.class);
 }
 
-public InventoryStatus fallback(String sku, Throwable t) {
-    return new InventoryStatus(sku, 0, "unavailable");   // degraded, not dead
+public InventoryStatus fallback(String sku, Throwable error) {
+    return new InventoryStatus(sku, 0, "unavailable");
 }
 ```
 
-It contains the blast radius: fail fast at the breaker instead of waiting out every timeout.
-
 **Q6. What is the difference between an API and an event?**
-An API is a request — "do this and give me the result." An event is a fact — "order placed" — broadcast to whoever cares. APIs couple callers to callees; events decouple producers from consumers. The same business action expressed both ways:
+
+An API is a request for an operation and a response. An event is a record that something happened. APIs couple a caller to a callee at request time; events allow multiple consumers to react independently. Do not use an event when the producer needs an immediate business decision.
 
 ```java
 @RestController
 class OrderController {
-    @PostMapping("/api/orders")                       // API: imperative request
-    public Order create(@RequestBody CreateOrder cmd) { ... }
+    @PostMapping("/api/orders")
+    public Order create(@RequestBody CreateOrder command) { ... }
 }
 
 @Component
 class OrderEvents {
-    @KafkaListener(topics = "order.placed")           // Event: broadcast fact
-    public void onOrderPlaced(OrderPlaced e) { ... }
+    @KafkaListener(topics = "order.placed")
+    public void onOrderPlaced(OrderPlaced event) { ... }
 }
 ```
 
-Confusing the two produces chatty, fragile synchronous graphs where events would have been cleaner.
+**Q7. Which Spring REST client should you use?**
 
-**Q7. How do you write a REST client in Spring and which one do you pick?**
-There are three eras: `RestTemplate` (blocking, legacy, discouraged), `WebClient` (reactive, brings in Reactor), and `RestClient` (Spring 6.1+) — the modern synchronous client with the same fluent API. For 95% of request/response services, use `RestClient`:
+`RestTemplate` is the older blocking client. `WebClient` is suitable for a reactive pipeline. `RestClient`, available since Spring Framework 6.1, is the modern synchronous fluent client. Choose based on the execution model, not on the age of the project.
 
 ```java
-var requestFactory = new JdkClientHttpRequestFactory();
-requestFactory.setReadTimeout(Duration.ofSeconds(3));
+var factory = new JdkClientHttpRequestFactory();
+factory.setReadTimeout(Duration.ofSeconds(3)); // illustrative assumption
 
 RestClient client = RestClient.builder()
     .baseUrl("http://order-service/api")
-    .requestFactory(requestFactory)
+    .requestFactory(factory)
     .build();
-
-OrderSummary order = client.get().uri("/orders/{id}", id)
-    .retrieve()
-    .onStatus(HttpStatusCode::is5xxServerError,
-        (req, res) -> { throw new DownstreamException(res.getStatusCode()); })
-    .body(OrderSummary.class);
 ```
 
-Pick `RestClient` for synchronous calls and `WebClient` only when you are already reactive end to end — mixing Reactor into a blocking service buys nothing but complexity.
+**[ANALYSIS]** A blocking service gains little by introducing Reactor only for one outbound call. Use `WebClient` when the surrounding path is already reactive.
 
-**Q8. What does `@RestController` actually do?**
-It is `@Controller` + `@ResponseBody`: the return value is serialized straight into the HTTP body (JSON via Jackson) instead of being resolved to a view name. It also wires in message conversion, exception handling, and content negotiation:
+**Q8. What does `@RestController` do?**
+
+It combines `@Controller` and `@ResponseBody`. Return values are written to the HTTP response through message converters, commonly as JSON, rather than treated as view names. It also participates in content negotiation and exception handling.
 
 ```java
 @RestController
 @RequestMapping("/api/orders")
-public class OrderController {
+class OrderController {
     @GetMapping("/{id}")
-    public ResponseEntity<OrderSummary> get(@PathVariable Long id) {
-        return ResponseEntity.ok()
-            .header("Cache-Control", "max-age=5")
-            .body(orderService.getSummary(id));     // serialized to JSON, never a view
+    ResponseEntity<OrderSummary> get(@PathVariable Long id) {
+        return ResponseEntity.ok(orderService.getSummary(id));
     }
 }
 ```
 
-One service, one bounded REST contract — the response shape IS the contract, so return a DTO, never a JPA entity.
+Return a DTO as the contract. Do not expose a JPA entity as the wire model.
 
-**Q9. What is idempotency and why do services care?**
-An operation is idempotent if doing it twice has the same effect as doing it once. Services need idempotent operations because the network can deliver duplicates: a client times out at 3 s, retries, and the first request may have actually succeeded. Without idempotency, you double-charge:
+**Q9. What is idempotency?**
+
+An idempotent operation has the same business effect when repeated. This matters because a timeout does not prove that the server failed; a client may retry a request that already committed. An idempotency key lets the service return the first result instead of performing the operation again.
 
 ```java
-@PostMapping("/api/payments")
-public Payment create(@RequestBody @Valid PayRequest req,
-                      @RequestHeader("Idempotency-Key") String key) {
-    return paymentService.charge(key, req);   // key → same payment on replay
-}
-
-public Payment charge(String key, PayRequest req) {
+public Payment charge(String key, PayRequest request) {
     Payment existing = paymentRepo.findByKey(key);
-    if (existing != null) return existing;    // replay: return the first result
-    return paymentRepo.save(new Payment(key, req.amount()));
+    if (existing != null) return existing;
+    return paymentRepo.save(new Payment(key, request.amount()));
 }
 ```
 
-Idempotency keys are cheap insurance; the alternative is a duplicate payment you explain to a customer.
+The lookup and insert need a database uniqueness guarantee or equivalent concurrency control.
 
 **Q10. How does client-side load balancing work?**
-Discovery gives you all healthy instances; the load balancer picks one per request — round-robin by default, weighted when instances differ, and sticky only when necessary. Spring Cloud LoadBalancer runs inside the caller, so there is no extra hop:
+
+Discovery supplies eligible instances; a client-side load balancer selects one for each request. Selection may be round-robin, weighted, or another policy. Health checks should remove unhealthy instances from the candidate set.
 
 ```java
 @Bean
-public ServiceInstanceListSupplier instanceSupplier(ConfigurableApplicationContext ctx) {
+public ServiceInstanceListSupplier instanceSupplier(
+        ConfigurableApplicationContext context) {
     return ServiceInstanceListSupplier.builder()
-        .withDiscoveryClient()      // instances from Eureka/Consul
-        .withHealthChecks()         // skip instances failing health checks
-        .build(ctx);
+        .withDiscoveryClient()
+        .withHealthChecks()
+        .build(context);
 }
 ```
 
-Client-side balancing is what lets 200 threads spread across 5 instances instead of hammering one, and it re-routes the instant an instance dies.
+**Q11. How should configuration be managed?**
 
-**Q11. How do you manage configuration across services?**
-Every service needs environment-specific configuration — URLs, timeouts, and feature flags. Per-profile `application.yml` files drift as soon as you have three environments. Centralize configuration with Spring Cloud Config or a secrets store, and bind it to typed properties instead of scattering `@Value` annotations:
+Keep environment-specific values out of business code. Central configuration or a platform configuration mechanism can manage URLs, timeouts, and feature flags. Bind values to typed properties so invalid configuration is detected during startup.
 
 ```java
 @ConfigurationProperties(prefix = "inventory.client")
 public record InventoryClientProps(
-    String baseUrl,               // http://inventory-service
-    Duration connectTimeout,      // 2s
-    Duration readTimeout,         // 3s
-    int maxConnections            // 200
+    String baseUrl,
+    Duration connectTimeout,
+    Duration readTimeout,
+    int maxConnections
 ) {}
 ```
 
-Typed config fails at startup, not at runtime: a typo in `readTimeout` becomes a failed deploy, not a 3-hour outage.
+**Q12. What is a message broker, and when should you add one?**
 
-**Q12. What is a message broker and when do you introduce one?**
-A broker (Kafka, RabbitMQ) decouples producers from consumers, buffers bursts, and provides at-least-once delivery. Introduce one when you need fan-out, buffering, or replay — not because "events sound cool." A Kafka producer is four lines:
+A broker such as Kafka or RabbitMQ separates producers from consumers, buffers work, and commonly supports at-least-once delivery. Introduce one for a concrete need such as fan-out, buffering, or replay. It also adds operations, delivery semantics, and failure modes.
 
 ```java
-@Service
-public class OrderPublisher {
-    private final KafkaTemplate<String, OrderPlaced> kafka;
-
-    public void publish(Order o) {
-        kafka.send("order.placed", o.id().toString(),
-                   new OrderPlaced(o.id(), o.userId(), o.total()));
-    }
+public void publish(Order order) {
+    kafka.send("order.placed", order.id().toString(),
+        new OrderPlaced(order.id(), order.userId(), order.total()));
 }
 ```
 
-A broker handles 100k+ msg/s per partition set where a synchronous fan-out to 5 services would collapse under latency and partial failures.
+**Q13. What is the difference between liveness and readiness?**
 
-**Q13. What are health checks and why do readiness vs liveness matter?**
-Liveness: is the process alive? Kill and restart it if not. Readiness: is it ready to receive traffic? Take it out of the load balancer if not. Spring Boot Actuator exposes both:
+Liveness asks whether the process should be restarted. Readiness asks whether it should receive traffic. A process may be alive but not ready while it starts, drains, or loses a required capability. Expose the two states separately, for example through Spring Boot Actuator.
+
+**Q14. What is a fallback?**
+
+A fallback is a defined response when a dependency is unavailable: cached data, a default, an empty result, or an explicit degraded state. It is appropriate only when the fallback is safe for the business operation. Never hide a failed payment behind a successful-looking default.
 
 ```java
-@Component
-public class InventoryHealthIndicator implements HealthIndicator {
-    @Override
-    public Health health() {
-        boolean ok = restClient.get()
-            .uri("http://inventory-service/actuator/health")
-            .retrieve().toBodilessEntity().getStatusCode().is2xxSuccessful();
-        return ok ? Health.up().build()
-                  : Health.down().withDetail("inventory", "unreachable").build();
-    }
+@CircuitBreaker(name = "catalog", fallbackMethod = "staleCatalog")
+public CatalogResponse catalog(String category) {
+    return catalogClient.fetch(category);
 }
 ```
 
-Config: liveness at `/actuator/health/liveness`, readiness at `/actuator/health/readiness`. A process that is alive but not ready must not receive traffic — that distinction is what stops rolling deploys from black-holing requests.
+**Q15. What is a timeout, and why is it mandatory?**
 
-**Q14. What is a fallback and how do you degrade gracefully?**
-A fallback returns something useful when a dependency fails — a cached value, a default, or an empty list — so the user gets a degraded-but-working response instead of a 500:
-
-```java
-@Cacheable("catalog")
-public CatalogResponse getCatalog(String category) { ... }
-
-@CircuitBreaker(name = "catalog", fallbackMethod = "cachedCatalog")
-public CatalogResponse catalogOrStale(String category) {
-    try { return getCatalog(category); }
-    catch (Exception e) { return staleCatalog(category); }   // last known good
-}
-```
-
-Without fallbacks, one flaky dependency turns your p99 from 80 ms into 3 s timeouts and a heap of 500s; with them, p99 degrades to ~100 ms served from a stale cache.
-
-**Q15. What is a timeout and what happens if you never set one?**
-A timeout bounds how long a call may take; without one, a hung dependency holds your thread forever. With 200 threads, a callee that never responds can take the whole service down in minutes — every thread parked in a read that never returns:
+A timeout bounds waiting. Without one, a hung dependency can retain a connection, thread, or queue slot indefinitely. Set connect and read timeouts for every outbound call, and make the total budget compatible with the caller's own SLO.
 
 ```java
-var requestFactory = new JdkClientHttpRequestFactory();
-requestFactory.setConnectTimeout(Duration.ofSeconds(2));
-requestFactory.setReadTimeout(Duration.ofSeconds(3));     // the answer must come in 3s
-
-RestClient client = RestClient.builder()
-    .baseUrl("http://inventory-service")
-    .requestFactory(requestFactory)
-    .build();
+factory.setConnectTimeout(Duration.ofSeconds(2)); // illustrative assumption
+factory.setReadTimeout(Duration.ofSeconds(3));    // illustrative assumption
 ```
 
-Rule: every outbound call has a timeout, and it is shorter than your own SLA — the failure surfaces at 3 s as a visible, bounded, debuggable error instead of an invisible hang.
+**Q16. What is a retry, and when should you not retry?**
 
-**Q16. What is a retry and when should you NOT retry?**
-A retry re-executes a failed call, usually with backoff. Retry transient failures (connection reset, 503), but never retry 4xx responses (your request is wrong; retrying won't fix it) or non-idempotent calls (you will create duplicates):
-
-```java
-@Retry(name = "inventory", fallbackMethod = "fallback")
-public InventoryStatus check(String sku) {
-    return client.get().uri("/api/stock/{sku}", sku).retrieve().body(InventoryStatus.class);
-}
-```
+A retry repeats a failed operation, usually with exponential backoff and jitter. Retry only failures likely to be transient, and only when repeating the operation is safe. Do not retry invalid `4xx` requests or non-idempotent operations without an idempotency mechanism.
 
 ```yaml
 resilience4j.retry:
   instances:
     inventory:
-      maxAttempts: 3 # original + 2 retries
-      waitDuration: 100ms
-      exponentialBackoffMultiplier: 3.0 # 100ms → 300ms → 900ms
-      retryExceptions:
-        [
-          java.net.ConnectException,
-          org.springframework.web.client.HttpServerErrorException,
-        ]
-      ignoreExceptions:
-        [org.springframework.web.client.HttpClientErrorException]
+      maxAttempts: 3 # illustrative assumption: original call plus two retries
+      enableExponentialBackoff: true
+      enableRandomizedWait: true
 ```
 
-Numbers: a 5% failure rate with 3 attempts drops the user-visible failure to ~0.0125%; retrying 4xx gets you 400s in a row and a very confused client.
+**Q17. What is a DTO, and how does it stabilize a contract?**
 
-**Q17. What is a DTO and how do you keep a service contract stable?**
-A DTO is the wire shape of your API, decoupled from your database entity so you can change storage without breaking consumers and version the API without migrating their code. Exposing a JPA entity leaks your schema to every consumer:
+A DTO is the data shape sent over the wire. It separates the public contract from database entities, allowing storage changes without exposing schema changes to consumers.
 
 ```java
-// WRONG: entity on the wire — every column change breaks consumers
-public OrderEntity getEntity(Long id) { return orderRepo.findById(id).orElseThrow(); }
-
-// RIGHT: explicit DTO = the contract
-public record OrderSummary(Long id, String status, BigDecimal total,
-                           OffsetDateTime placedAt) {
-    public static OrderSummary from(OrderEntity e) { ... }
+public record OrderSummary(Long id, String status,
+                           BigDecimal total, OffsetDateTime placedAt) {
+    static OrderSummary from(OrderEntity entity) { ... }
 }
 ```
 
-Contract-first: the DTO is the interface; consumers depend on it, never on your tables.
+## Mid-level: trade-offs and failure modes
 
-## Mid — tradeoffs & pitfalls
+**Q18. Why is a shared database usually a service-boundary smell?**
 
-**Q18. Database-per-service — why is a shared DB an anti-pattern?**
-When two services query the same schema, you have a distributed monolith with extra hops: a schema change in A breaks B's queries, transactions span services, and nothing scales independently. The fix is private data for each service, exposed only through APIs and events:
+If two services read and write the same schema, a schema change in one can break the other and deployment independence is lost. Prefer private data ownership with APIs or events. If the same table must be shared, first question whether the two components are actually one bounded context.
+
+**Q19. How do 2PC and Saga differ?**
+
+Two-phase commit coordinates a transaction across resources and can hold locks while the coordinator decides. A Saga uses local transactions and compensating actions. 2PC offers stronger atomicity at the cost of availability and operational coupling; a Saga accepts eventual consistency.
 
 ```java
-// WRONG: OrderService reaches into the inventory schema
-@Repository
-public interface OrderRepo extends JpaRepository<OrderEntity, Long> {
-    @Query(value = "SELECT stock FROM inventory.sku WHERE sku = :sku", nativeQuery = true)
-    int stockOnHand(@Param("sku") String sku);   // couples two schemas forever
-}
+@Transactional
+public void reserve() { inventory.reserve(sku, quantity); }
 
-// RIGHT: ask InventoryService over the network
-InventoryStatus s = inventoryClient.stockOf(sku);
+@Transactional
+public void charge() { payment.charge(orderId, amount); }
+// Compensation might be release(...) or refund(...).
 ```
 
-Signal: if two services must share a table, they are one bounded context pretending to be two — merge them.
+**Q20. How would you implement an orchestration Saga?**
 
-**Q19. Distributed transaction across two services — 2PC or Saga?**
-2PC (two-phase commit via JTA) locks resources in both databases while the coordinator decides — it does not scale and fails badly under partial failure: a dead coordinator leaves everyone blocked on locks for minutes. A Saga replaces the global lock with local transactions and compensating actions:
-
-```java
-// WRONG: distributed lock — one coordinator, two DBs, both locked for the whole decision
-@Transactional
-public void pay() {
-    orderDb.updateStatus(id, "PAID");      // lock held in DB A ...
-    paymentDb.charge(id, amount);          // ... while DB B decides — minutes under failure
-}
-
-// RIGHT: saga — local txns, compensation on failure
-@Transactional
-public void reserve() { inventoryDb.reserve(sku, qty); }      // + compensate: release()
-@Transactional
-public void charge()  { paymentDb.charge(id, amount); }       // + compensate: refund()
-```
-
-2PC trades availability for atomicity and gets neither in the distributed world; a Saga accepts eventual consistency and keeps the system available. That trade-off is the whole story of distributed transactions.
-
-**Q20. Implement an orchestration saga for order → inventory → payment.**
-An orchestration Saga has one coordinator (OrderService) that drives the steps and runs compensating actions on failure. Each step is a local `@Transactional` transaction; the coordinator catches failures and walks back:
+One coordinator records progress, invokes local operations, and invokes compensation when a later step fails. Each remote operation needs a timeout and an idempotent contract. Persist progress if the workflow must resume after a process restart.
 
 ```java
-public class OrderSaga {
-    private final InventoryClient inventory;
-    private final PaymentClient payments;
-
-    public OrderResult place(Order order) {
-        try {
-            inventory.reserve(order.sku(), order.qty());      // step 1 (3s timeout)
-            try {
-                payments.charge(order.id(), order.total());   // step 2 (3s timeout)
-            } catch (Exception e) {
-                inventory.release(order.sku(), order.qty());  // compensate step 1
-                throw e;
-            }
-            return new OrderResult(order.id(), "CONFIRMED");
-        } catch (Exception e) {
-            return new OrderResult(order.id(), "FAILED");     // no partial state survives
-        }
+public OrderResult place(Order order) {
+    inventory.reserve(order.sku(), order.quantity());
+    try {
+        payments.charge(order.id(), order.total());
+        return OrderResult.confirmed(order.id());
+    } catch (RuntimeException error) {
+        inventory.release(order.sku(), order.quantity());
+        return OrderResult.failed(order.id());
     }
 }
 ```
 
-Each downstream call has a 3 s timeout; the saga fails fast and compensates rather than holding locks. Orchestration beats choreography here because the flow has clear order and one owner — choreography gets unreadable past three steps.
+**Q21. What is eventual consistency?**
 
-**Q21. What is eventual consistency and what breaks for users?**
-After a write, replicas and derived data converge over time rather than atomically. What breaks: a user updates their profile, refreshes, and sees the old version; a replica serves a stale stock count and the user over-orders. Mitigations include read-your-writes and serving the value just written:
+After a write, replicas and derived views may converge later rather than at the same instant. User-visible effects include reading an older profile or a stale stock view. Options include read-your-writes, reading from the source of truth for critical paths, and defining an explicit staleness budget.
 
-```java
-@PostMapping("/api/users/{id}/profile")
-public UserProfile update(@PathVariable Long id, @RequestBody ProfileDto dto) {
-    userService.save(id, dto);
-    // read-your-writes: return the value just written, from the source of truth
-    return new UserProfile(id, dto.displayName(), "updated");
-}
-```
+**[PROPOSED DESIGN]** The acceptable staleness window is a product decision. Do not present a particular duration as a system fact without a requirement or measurement.
 
-Eventually consistent systems must decide their staleness budget: 1 s reads, 5 s writes, 5 minutes of reporting — each is a product decision, not an accident.
+**Q22. Why prefer idempotent consumers over “exactly once”?**
 
-**Q22. Idempotency vs exactly-once — why is exactly-once a lie?**
-Delivery is at-least-once: a retry can deliver the same message twice. True exactly-once delivery end to end (across producer, broker, and consumer) is not achievable in practice. So you build idempotent consumers and deduplicate at the edge — the same effect as exactly-once, but far more robust:
+At-least-once delivery means a consumer can receive a message more than once. End-to-end exactly-once behavior across a producer, broker, consumer, and side effects is not something to assume. Make the consumer idempotent using a conditional update, a unique key, or a processed-message record.
 
 ```java
 @KafkaListener(topics = "payment.confirmed")
-public void onPayment(PaymentConfirmed e) {
-    int updated = orderRepo.markPaidIfNotAlready(e.orderId());
-    // UPDATE orders SET status='PAID' WHERE id=? AND status != 'PAID'
-    if (updated == 1) { notifyUser(e); }   // side effect only on first delivery
+public void onPayment(PaymentConfirmed event) {
+    int changed = orderRepo.markPaidIfNotAlready(event.orderId());
+    if (changed == 1) notifyUser(event);
 }
 ```
 
-Numbers: a 3× retry storm on a 1k msg/s stream means 2k duplicates to absorb; a conditional update or unique constraint eats them, a naive insert does not.
+**Q23. What is the outbox pattern?**
 
-**Q23. What is the outbox pattern and when do you need it?**
-The dual-write problem is that committing the DB row and sending to Kafka are separate operations, so one can fail — resulting in a lost event or an event without the row. The outbox makes the DB the source of truth: write the event in the same local transaction, then have a relay publish it:
+The database commit and broker publish are separate operations. A process can commit the row and fail before publishing, or publish before the row commits. The outbox writes the business row and event record in one local transaction; a relay publishes pending records and retries safely.
 
 ```java
 @Transactional
-public void placeOrder(Order o) {
-    orderRepo.save(o);
-    outboxRepo.save(new OutboxEvent("order.placed", objectMapper.writeValueAsBytes(o)));
-    // same local txn — either both happen or neither
-}
-
-@Component
-public class OutboxRelay {
-    @Scheduled(fixedDelay = 200)
-    public void publish() {
-        for (OutboxEvent e : outboxRepo.findTop100ByPublishedFalse()) {
-            kafka.send(e.topic(), e.payload());   // retried until acked
-            e.published(true);
-        }
-    }
+public void placeOrder(Order order) {
+    orderRepo.save(order);
+    outboxRepo.save(new OutboxEvent("order.placed", serialize(order)));
 }
 ```
 
-Cost: ~200 ms–1 s of extra latency and a relay to operate. Benefit: no lost events and no dual-write bugs — one of the most important patterns in event-driven services.
+**Q24. Why does `@Transactional` not span services?**
 
-**Q24. Why does `@Transactional` not work across two services?**
-`@Transactional` is a local DB transaction bound to one data source and one thread. It cannot span an HTTP call — the proxy commits or rolls back only the local connection. Worse, holding a DB transaction open across a 3 s network call pins a connection and locks rows:
+Spring's `@Transactional` normally binds a local transaction to a data source. An HTTP call does not automatically extend that transaction to another service. Holding a database transaction open across network calls also retains connections and row locks unnecessarily.
 
 ```java
-// WRONG: txn held across the network — connection + row locks for the whole HTTP call
-@Transactional
-public void placeOrder(Order o) {
-    orderRepo.save(o);
-    payments.charge(o.id(), o.total());        // 3s network call INSIDE the txn
-    inventory.reserve(o.sku(), o.qty());       // another one — locks held for 6s+
-}
-
-// RIGHT: local txn only, network calls outside, saga/compensation for the rest
-public void placeOrder(Order o) {
-    saveOrderLocal(o);                          // own txn, fast commit
-    try { payments.charge(o.id(), o.total()); }
-    catch (Exception e) { markOrderFailed(o.id()); }
+// Keep the local transaction short; coordinate remote work separately.
+public void placeOrder(Order order) {
+    saveOrderLocal(order);
+    payments.charge(order.id(), order.total());
 }
 ```
 
-A 6 s lock window at 200 concurrent orders is 1,200 lock-seconds of contention; keep transactions local and short, and let the saga do the orchestration.
+**Q25. What is a retry storm?**
 
-**Q25. What is a retry storm and how do retries amplify an outage?**
-Everyone retries at once: the dependency fails, and 100 clients × 3 retries = 400 requests slamming a service that was already dying — a 5% intermittent failure becomes a self-inflicted DDoS. The fixes are exponential backoff with jitter so retries spread out, a global cap, and a circuit breaker so the stream stops entirely:
+A retry storm occurs when many callers retry a failing dependency at once, increasing its load and prolonging the outage. Use bounded retries, exponential backoff, jitter, concurrency limits, and a circuit breaker. Retries are a load multiplier, not free reliability.
 
-```java
-// WRONG: immediate synchronized retries — 200 threads × 3 instant retries = 600 rps of hammering
-@Retry(name = "inventory", maxAttempts = 3)      // no backoff — thundering herd
+**Q26. OpenFeign versus `RestClient` versus `WebClient`?**
 
-// RIGHT: backoff + jitter + breaker so retries fan out, then stop
-```
-
-```yaml
-resilience4j.retry:
-  instances:
-    inventory:
-      maxAttempts: 3
-      waitDuration: 100ms
-      exponentialBackoffMultiplier: 2.0
-      enableExponentialBackoff: true
-      enableRandomizedWait: true # jitter: 100ms ± 50% — the herd becomes a drizzle
-resilience4j.circuitbreaker:
-  instances:
-    inventory:
-      slidingWindowSize: 10
-      failureRateThreshold: 50 # >50% of 10 calls failing → open
-```
-
-Without jitter, 200 threads retry in lockstep and the breaker never gets a quiet window to test recovery; with it, the dying service sees a trickle and half-opens cleanly.
-
-**Q26. OpenFeign vs RestClient vs WebClient — when which?**
-Feign gives you a typed interface — the contract is a Java type, and retries and decoding come for free. RestClient is the lightweight synchronous option for ad hoc calls. WebClient is for reactive stacks. Pick Feign when a service is a formal dependency with a stable contract:
+OpenFeign provides a declarative typed interface and fits stable service dependencies. `RestClient` is direct and synchronous, useful for a small number of calls. `WebClient` fits a reactive pipeline. Compare generated behavior, error handling, observability, and retry configuration before choosing.
 
 ```java
-@FeignClient(name = "inventory-service", url = "${inventory.base-url}",
-             configuration = InventoryClientConfig.class)
-public interface InventoryClient {
+@FeignClient(name = "inventory-service")
+interface InventoryClient {
     @GetMapping("/api/stock/{sku}")
     InventoryStatus stock(@PathVariable String sku);
-
-    @PostMapping("/api/stock/reserve")
-    Reservation reserve(@RequestBody ReserveRequest req);
 }
 ```
 
-Feign's cost is a generated dynamic proxy for each interface and a layer of magic. For a single call to an internal service, RestClient is straightforward and debuggable; I default to RestClient and reach for Feign at three or more endpoints.
+**Q27. What is bulkhead isolation?**
 
-**Q27. What is bulkhead isolation and how do you configure it?**
-A bulkhead limits how many of your resources one dependency may consume — using its own thread pool or semaphore — so a hung dependency fills its own compartment rather than the shared pool that serves everything else. Without one, a single slow callee starves the whole service:
+A bulkhead limits the resources a dependency can consume, using a semaphore or a separate pool. A slow dependency then fills its own compartment instead of exhausting resources used by unrelated endpoints.
 
 ```java
-@Bulkhead(name = "inventory", type = Bulkhead.Type.THREADPOOL)
+@Bulkhead(name = "inventory", type = Bulkhead.Type.SEMAPHORE)
 @CircuitBreaker(name = "inventory")
-public InventoryStatus stock(String sku) {
-    return client.get().uri("/api/stock/{sku}", sku).retrieve().body(InventoryStatus.class);
-}
+public InventoryStatus stock(String sku) { ... }
 ```
 
-```yaml
-resilience4j.bulkhead:
-  instances:
-    inventory:
-      maxConcurrentCalls: 20 # only 20 threads may wait on inventory
-      maxWaitDuration: 500ms # the 21st fails fast instead of queueing
-    payments:
-      maxConcurrentCalls: 30
-```
+**Q28. How do you trace a request across services?**
 
-Numbers: a shared pool of 200 threads with one 3 s-timeout dependency at 200 rps exhausts everything in ~1 s; split 20/30/50 with 100 spare, and payments can hang while orders still get served.
+Distributed tracing propagates a trace context across service boundaries. Each service creates spans for meaningful work and emits trace and span identifiers in logs. Spring Boot, Micrometer Tracing, and OpenTelemetry can provide the instrumentation, but propagation and sampling still need verification.
 
-**Q28. How do you trace a request across 8 services?**
-Distributed tracing propagates one trace ID across every hop, so you can see the full waterfall and where time went. Spring Boot 3 + Micrometer Tracing + OpenTelemetry wire this automatically; the same trace ID lands in every log line:
+**Q29. How do you version an API or event?**
+
+Treat published wire formats as contracts. Add fields in a backward-compatible way, avoid changing the meaning of an existing field, and remove old fields only after consumers have migrated. For incompatible HTTP changes, expose an explicit version or content negotiation policy.
 
 ```java
-@Configuration
-public class TraceConfig {
-    @Bean
-    public ObservationRegistryCustomizer<ObservationRegistry> customizer() {
-        return registry -> registry.observationConfig()
-            .observationHandler(new LoggingObservationHandler());  // traceId/spanId in logs
-    }
-}
-```
-
-```yaml
-management:
-  tracing:
-    sampling:
-      probability: 0.1 # 10% sampled at 10k rps = 1k traces — plenty
-  zipkin:
-    tracing:
-      endpoint: http://tracing:9411/api/v2/spans
-```
-
-Without tracing you are blind — each service's logs are a separate puzzle with no path. Cost is microseconds per call; the payoff is finding the 3 s timeout buried in service 6 instead of guessing.
-
-**Q29. How do you version an API or an event without breaking consumers?**
-Any published contract will evolve; consumers must not break when it does. Version the wire format, not the code: `v1/orders` keeps serving old clients while `v2` ships. For events, add fields without removing old ones (forward- and backward-compatible JSON):
-
-```java
-// v1 of the DTO stays frozen; v2 adds a field the old payload simply lacks
 public record OrderSummaryV1(Long id, String status, BigDecimal total) {}
-
-public record OrderSummaryV2(Long id, String status, BigDecimal total,
-                             OffsetDateTime placedAt) {}
-
-@GetMapping(value = "/api/orders/{id}", headers = "Accept-version=v1")
-public OrderSummaryV1 getV1(@PathVariable Long id) { return toV1(service.get(id)); }
-
-@GetMapping(value = "/api/orders/{id}", headers = "Accept-version=v2")
-public OrderSummaryV2 getV2(@PathVariable Long id) { return toV2(service.get(id)); }
+public record OrderSummaryV2(Long id, String status,
+                             BigDecimal total, OffsetDateTime placedAt) {}
 ```
 
-Real numbers: breaking a contract without versioning takes down ~30% of consumers overnight; versioning costs a few extra DTOs and pays off in zero breakage.
+**Q30. Why are chatty calls a problem?**
 
-**Q30. Chatty calls — why is 8 sequential HTTP calls a problem?**
-Each hop adds latency, and the delays stack: 8 sequential calls × 50 ms = 400 ms minimum, while p99 tail behavior makes the real number worse. Independent calls run in parallel; dependent ones are aggregated server-side:
+Each sequential network hop adds latency and another failure opportunity. Parallelize independent calls, aggregate them behind a service boundary, or build a read model. Bound the parallelism and total wait; otherwise fan-out simply moves the overload.
 
 ```java
-// WRONG: 8 sequential round-trips — 8 × 50ms = 400ms of serial latency
-Order o = orderClient.get(id);
-User u = userClient.get(o.userId());
-Address a = addressClient.get(o.shippingAddressId());
-// ... five more, one after another
-
-// RIGHT: parallel fan-out, bounded by the slowest call
-CompletableFuture<Order> of = supplyAsync(() -> orderClient.get(id), pool);
-CompletableFuture<User> uf = of.thenCompose(o ->
+CompletableFuture<Order> order = supplyAsync(() -> orderClient.get(id), pool);
+CompletableFuture<User> user = order.thenCompose(o ->
     supplyAsync(() -> userClient.get(o.userId()), pool));
-CompletableFuture.allOf(of, uf).join(3, TimeUnit.SECONDS);   // wait at most 3s
 ```
 
-Parallel fan-out of 8 calls takes p99 from ~1.2 s to ~200 ms; every sequential hop you can parallelize is free latency back.
+**Q31. How do you choose circuit-breaker thresholds?**
 
-**Q31. How do you pick circuit breaker thresholds — and what happens when you tune them wrong?**
-Too sensitive: a 10-call window trips on a single 3 s timeout, so you fail fast while the dependency is fine. Too lenient: the breaker never trips, and you keep queueing on a dead dependency. Tune from real numbers — failure rate, slow-call threshold, and cooldown:
+Start with measured failure rate, slow-call rate, request volume, and recovery behavior. A small window may react to noise; a large window may react too slowly. The open duration and half-open probes should be tested against the dependency's recovery characteristics.
 
 ```java
-CircuitBreakerConfig cfg = CircuitBreakerConfig.custom()
-    .slidingWindow(10, 10, COUNT_BASED)            // decide on the last 10 calls
-    .failureRateThreshold(50)                      // trip when >50% fail
-    .slowCallDurationThreshold(Duration.ofSeconds(3))   // a 3s call counts as a failure
-    .slowCallRateThreshold(60)
-    .permittedNumberOfCallsInHalfOpenState(3)      // probe with 3 calls before closing
-    .waitDurationInOpenState(Duration.ofSeconds(30))   // stay open 30s, then half-open
+CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+    .slidingWindowSize(10) // illustrative assumption
+    .failureRateThreshold(50) // illustrative assumption
+    .waitDurationInOpenState(Duration.ofSeconds(30)) // illustrative assumption
     .build();
 ```
 
-At p99 80 ms and a 3 s threshold, a slow-call rate above 60% genuinely means the dependency is sick; the 30 s cooldown lets it breathe, and the 3 half-open probes verify recovery before full traffic returns.
+**Q32. How do services maintain derived data?**
 
-**Q32. How do services keep derived or denormalized data consistent?**
-When service A owns the source of truth and service B serves a read model (search index, order list), B reacts to A's events and builds its own projection. The alternative — querying A synchronously for every request — couples B's latency and availability to A:
+The owning service publishes domain events. A consumer builds its own projection, such as a search index or read model. The projection is eventually consistent, so consumers need a policy for missing or stale data.
 
 ```java
-@Component
-public class OrderProjection {
-    @KafkaListener(topics = "order.placed", groupId = "search-index")
-    public void onPlaced(OrderPlaced e) {
-        indexService.index(new OrderDoc(e.orderId(), e.userId(), e.total()));
-    }
-
-    @KafkaListener(topics = "order.cancelled", groupId = "search-index")
-    public void onCancelled(OrderCancelled e) {
-        indexService.remove(e.orderId());
-    }
+@KafkaListener(topics = "order.placed", groupId = "search-index")
+public void onPlaced(OrderPlaced event) {
+    indexService.index(new OrderDoc(event.orderId(), event.total()));
 }
 ```
 
-Cost: the projection lags the source by ~100 ms–1 s and consumers must tolerate staleness. Benefit: reads are local, fast, and available even when the source service is down.
+**Q33. How should secrets be handled?**
 
-**Q33. How do you handle secrets and environment configuration?**
-Secrets in `application.yml` or committed environment files are a breach waiting to happen, especially if they leak into logs. Production credentials live in a vault (HashiCorp Vault, AWS Secrets Manager, K8s Secrets); the app fetches them at deploy time and never logs them:
-
-```java
-@ConfigurationProperties(prefix = "payments")
-public record PaymentProps(String apiKey, String baseUrl) {}
-```
+Do not commit production credentials or log them. Use a secret manager or platform secret facility, inject values at runtime, rotate them, and audit access. Configuration and secret distribution are separate concerns even when the same platform provides both.
 
 ```yaml
-# application.yml — no secrets
 payments:
-  base-url: ${PAYMENTS_URL:http://payments:8080}
-  api-key: ${PAYMENTS_API_KEY} # injected from the vault at deploy time
+  base-url: ${PAYMENTS_URL}
+  api-key: ${PAYMENTS_API_KEY}
 ```
 
-Key rotation, per-env overrides, and audit all belong to the vault. A leaked key costs an incident; a vault costs a config change.
+**Q34. JSON versus protobuf or Avro?**
 
-**Q34. JSON vs binary serialization (protobuf/Avro) between services — what's the tradeoff?**
-JSON is debuggable and universal; protobuf/Avro are schema-based, ~5–10× smaller, faster to parse, and support schema evolution through a registry. For internal high-throughput streams, the binary format pays for itself; for public APIs, JSON wins on developer experience:
+JSON is widely supported and easy to inspect. Protobuf and Avro provide schemas and can reduce payload size or parsing work, depending on the data and implementation. Use schema-based formats when measured throughput, compatibility, or payload constraints justify the tooling. Do not claim a fixed speedup without a benchmark for the actual messages.
 
-```java
-// JSON: readable, flexible — payload ~120 bytes, parse ~1-2 µs
-record OrderEvent(Long id, String sku, int qty) {}
+## Senior: design and defense
 
-// Protobuf: schema'd, compact — payload ~30 bytes, parse ~200 ns
-message OrderEvent {
-  int64 id = 1;
-  string sku = 2;
-  int32 qty = 3;
-}
-```
+**Q35. A team wants to split a monolith into 20 services. What do you say?**
 
-Numbers: at 50k events/s the parse-time difference alone is ~50–90 ms of CPU per second, and the wire-size difference compounds on network-bound consumers. Start with JSON; move to schema'd binary when volume or schema evolution hurts.
+**[ANALYSIS]** Ask what problem the split solves. If the issue is unclear modules or slow builds, first create a modular monolith with enforced boundaries. Extract a service only along a proven bounded context with distinct ownership, scaling, or deployment needs. Migrate incrementally, for example with a strangler approach, not as a single rewrite.
 
-## Senior — design & defense
+**Q36. Design payment across Order, Inventory, and Payment without 2PC.**
 
-**Q35. A team wants to split a 3-year-old monolith into 20 microservices. What do you say?**
-"I'd push back hard and ask what problem the split solves. If the pain is a messy module boundary or a slow deployment pipeline, the fix is a modular monolith — the same codebase with strict package boundaries — not 20 services. I'd split only along a _proven_ bounded context with different scaling or team-ownership needs, incrementally via a strangler fig, never in a big bang:"
+**[PROPOSED DESIGN]** Let Order coordinate a Saga: reserve inventory, charge payment, and compensate with release if charging fails. Persist the Saga state and make reserve, charge, release, and refund idempotent. The exact order depends on business risk; payment authorization and inventory reservation may have different compensation semantics.
 
-```java
-// Modular monolith first: strict dependency rules, one deployable
-module com.shop.orders {
-    exports com.shop.orders.api;
-    requires com.shop.shared.kernel;   // orders may NOT import inventory internals
-}
-```
+**Q37. An HTTP dependency is flaky. What resilience layer do you design?**
 
-"Each of 20 services means its own build, deployment, rollback, on-call rotation, and failure mode. If two services can't deploy or scale independently, you paid the microservice tax for nothing — that's the argument that wins interviews."
+**[PROPOSED DESIGN]** Start with a timeout, then a bounded retry with backoff and jitter for safe transient failures, a circuit breaker, and a bulkhead. Add a fallback only when stale or degraded data is semantically safe. Tune each layer from traffic and dependency measurements, not copied defaults.
 
-**Q36. Design a payment flow across Order, Inventory, and Payment services without 2PC.**
-"An orchestration Saga with OrderService as coordinator. The steps are to reserve inventory (local transaction plus `release` compensation), then charge payment (local transaction plus `refund` compensation). If payment fails, the coordinator triggers `release`. A Saga log records each step so a crash resumes the Saga instead of re-executing it:"
+**Q38. When is a monolith the better choice?**
 
-```java
-@Service
-public class OrderSaga {
-    private final SagaLog log;
-    private final InventoryClient inventory;
-    private final PaymentClient payments;
-
-    public OrderResult place(Order o) {
-        String sagaId = log.start("order-placement", o.id());
-        try {
-            log.record(sagaId, "reserve");
-            inventory.reserve(o.sku(), o.qty());                 // timeout 3s
-            try {
-                log.record(sagaId, "charge");
-                payments.charge(o.id(), o.total());              // timeout 3s
-                log.record(sagaId, "done");
-                return OrderResult.confirmed(o.id());
-            } catch (Exception e) {
-                log.record(sagaId, "compensate:release");
-                inventory.release(o.sku(), o.qty());             // undo step 1
-                return OrderResult.failed(o.id());
-            }
-        } finally {
-            log.record(sagaId, "complete");
-        }
-    }
-}
-```
-
-"Each step fails fast at 3 s; worst case ~6 s, no global locks, and the log answers 'where did this saga die?' after a crash."
-
-**Q37. A downstream HTTP call is flaky (5% timeouts at 3 s). Design the resilience layer.**
-"Four layers, in order: **timeout** (3 s, shorter than my own SLA), **retry** with exponential backoff + jitter (3 attempts, idempotent calls only), **circuit breaker** (open after 50% failures in a 10-call window, 30 s cooldown), and **bulkhead** (a maximum of 20 concurrent calls to this dependency). Add a fallback to a cached value so users see a degraded-but-working response:"
-
-```java
-@Bean
-public Resilience4JCircuitBreakerFactory cbFactory() {
-    var cfg = new Resilience4JConfigBuilder("inventory")
-        .timeLimiterConfig(TimeLimiterConfig.custom()
-            .timeoutDuration(Duration.ofSeconds(3)).build())        // fail at 3s
-        .circuitBreakerConfig(CircuitBreakerConfig.custom()
-            .slidingWindowSize(10)
-            .failureRateThreshold(50)
-            .waitDurationInOpenState(Duration.ofSeconds(30))
-            .build())
-        .retryConfig(RetryConfig.custom()
-            .maxAttempts(3)
-            .waitDuration(Duration.ofMillis(100))
-            .enableExponentialBackoff()
-            .enableRandomizedWait()
-            .build())
-        .bulkheadConfig(BulkheadConfig.custom()
-            .maxConcurrentCalls(20).build())                       // own compartment
-        .build();
-    var factory = new Resilience4JCircuitBreakerFactory();
-    factory.configureDefault(cbFactory, cfg);
-    return factory;
-}
-```
-
-"With 5% timeouts, 3 attempts cut user-visible failure to ~0.0125%; the breaker caps damage during a real outage at 20 concurrent calls instead of 200; p99 stays under budget because nothing waits more than 3 s."
-
-**Q38. When is a monolith actually the better choice, and how do you keep it clean?**
-"For a small team, a young product, or a domain without independent scaling needs, a modular monolith is faster to build, debug, and deploy — with no distributed failure modes at all. Keep it clean with explicit module boundaries enforced by tests, not vibes:"
+**[ANALYSIS]** A modular monolith is often preferable for a small team, an early product, or a domain without independent scaling needs. Enforce module boundaries with architecture tests and package rules.
 
 ```java
 @ArchTest
-static final ArchRule modules_must_not_depend_on_each_other =
+static final ArchRule orders_are_isolated =
     classes().that().resideInAPackage("..orders..")
         .should().onlyDependOnClassesThat()
         .resideInAnyPackage("..orders..", "..shared..");
 ```
 
-"ArchUnit fails the build when `orders` imports `inventory` internals, so boundaries stay real until a proven reason to split appears. Migrate to services only when a boundary's scaling or team-ownership needs genuinely diverge; premature splitting is the most expensive mistake in this space."
+**Q39. How do you choose sync or async between two concrete services?**
 
-**Q39. How do you choose sync vs async between two specific services?**
-"Ask two questions: is the caller blocked on this answer, and can the system tolerate a delay? Order→Inventory 'reserve stock' — sync: the user is waiting for confirmation, and a timeout is a clear, user-visible failure. Order→Notification — async: nobody blocks on it, and I want it to survive the notifier being down:"
+Ask whether the caller needs the result to complete the current operation and whether delay is acceptable. Stock reservation is often synchronous when confirmation depends on it. Notification is often asynchronous because the order response need not wait for delivery. These are design assumptions that must match product semantics.
 
-```java
-// Order → Inventory: sync — user is waiting, 3s timeout = visible failure
-InventoryStatus s = inventoryClient.reserve(req);
+**Q40. How do you defend a service boundary?**
 
-// Order → Notification: async — decouple, survive outages
-orderEvents.publish(new OrderPlaced(o));    // broker buffers, retries later
-```
-
-"Mixing them wrongly — sync-calling five services in a row — creates a latency chain that fails at the speed of the slowest link, and each one gets a retry storm when the weakest dies."
-
-**Q40. Defend your service boundaries — how do you know a split is right?**
-"A correct boundary is a bounded context: one reason to change, one owning team, independent deployment and scaling, and private data. The test is: 'If I change service A's schema, must B redeploy?' If yes, they are one context pretending to be two. The proof is operational — independent deployment frequency and failure isolation:"
+A useful boundary has a clear reason to change, an owning team, private data, and independent deployment and scaling. A practical test is whether a schema change in A requires B to deploy. If yes, investigate whether the boundary is real or whether the system is a distributed monolith.
 
 ```java
-// Orders context publishes facts; Billing consumes them — no shared code, no shared schema
-@Component
-public class OrderPublisher {
-    public void placed(Order o) { events.publish(new OrderPlaced(o.id(), o.total())); }
-}
-
-@Component
-public class BillingConsumer {
-    @KafkaListener(topics = "order.placed", groupId = "billing")
-    public void on(OrderPlaced e) { invoiceService.create(e.orderId(), e.total()); }
+@KafkaListener(topics = "order.placed", groupId = "billing")
+public void on(OrderPlaced event) {
+    invoiceService.create(event.orderId(), event.total());
 }
 ```
 
-"Boundaries are validated by deploy/scale/failure independence, not by drawing boxes. If A and B always ship together and share a schema, I've built a distributed monolith and should merge them."
+**Q41. How do you defend 2PC versus Saga with numbers?**
 
-**Q41. 2PC vs Saga — defend the choice with numbers.**
-"2PC holds a global lock: at 1k orders/min, a coordinator crash during the prepare phase blocks transactions for minutes — availability dies, not just latency. A Saga keeps every step as a short local transaction: p50 ~10 ms, p99 ~200 ms, with seconds to minutes of inconsistency that compensation closes:"
+Do not invent latency or availability figures. State the business tolerance first. If the operation requires atomic cross-resource commit and the platform supports it acceptably, 2PC may be justified. If the business can reconcile and compensate, a Saga avoids a global transaction at the cost of an inconsistency window.
 
-```java
-// 2PC: atomic but fragile — coordinator crash = blocked locks = minutes of unavailability
-// Saga: no global lock, eventual consistency, compensation closes the gap
-public void shipAndBill(Shipment s) {
-    try {
-        inventory.ship(s);                    // local txn, ~10ms
-        billing.invoice(s);                   // local txn, ~10ms
-    } catch (Exception e) {
-        inventory.unship(s);                  // compensate — closes the gap
-    }
-}
-```
+**Q42. A service has a long p99 tail. How do you diagnose it?**
 
-"If the business can accept a 5-minute reconciliation window, Saga gives you p99 < 200 ms and 99.99% availability; 2PC gives you atomicity nobody can actually observe and takes your p99 hostage. Real systems choose Saga and audit later."
-
-**Q42. A service's p99 is 5× its p50. Walk the diagnosis.**
-"A p50 of 80 ms and p99 of 1.2 s indicates a long-tail distribution. Three suspects, in order: GC pauses (a 1 s full GC shows up as a cliff), lock contention, and downstream timeouts or retries. Tracing shows which one; percentiles show the shape:"
+Separate the problem into application pauses, lock contention, queueing, downstream latency, and retries. Use traces, runtime metrics, database wait data, and request histograms. A p50/p99 comparison identifies a tail but does not identify its cause.
 
 ```java
 @Timed(name = "orders.get", histogram = true,
@@ -812,182 +472,78 @@ public void shipAndBill(Shipment s) {
 public OrderSummary get(Long id) { ... }
 ```
 
-```yaml
-management:
-  metrics:
-    distribution:
-      percentiles-histogram:
-        orders.get: true
-```
+**Q43. How do you size an outbound thread pool?**
 
-"If the p99 cliff aligns with a full GC on the heap graph, it's the JVM; if it aligns with 3 s downstream timeouts, it's the retry/breaker config; if it's scattered, usually lock contention. I fix the one that owns the biggest slice of the tail — measured, not guessed."
-
-**Q43. How do you size the outbound thread pool — and what happens when you get it wrong?**
-"Little's Law: to sustain N concurrent requests with latency L, you need a pool ≥ N. With a pool of 200 and a 3 s downstream timeout, the service carries at most ~200 concurrent in-flight calls — if all 200 threads park on a 3 s timeout, throughput collapses to ~66 rps. Size from measured concurrency, bound the queue, and fail fast at the edge:"
+Start with measured concurrency, latency, CPU, connection limits, and the caller's SLO. Apply Little's Law carefully: concurrency is approximately throughput multiplied by latency for a stable system. Bound the queue and define overload behavior.
 
 ```java
-ThreadPoolExecutor pool = new ThreadPoolExecutor(
-    50,                       // core
-    200,                      // max — 200 concurrent outbound calls, ever
-    60, TimeUnit.SECONDS,
-    new ArrayBlockingQueue<>(1000),            // bounded queue
-    new ThreadPoolExecutor.CallerRunsPolicy()  // backpressure, not silent drops
-);
+new ThreadPoolExecutor(
+    50, 200, 60, TimeUnit.SECONDS,
+    new ArrayBlockingQueue<>(1000), // illustrative assumptions
+    new ThreadPoolExecutor.CallerRunsPolicy());
 ```
 
-"Under-provision: the queue grows and latency blows past the SLA. Over-provision: each thread costs ~1 MB of stack plus context-switch overhead. The number comes from measured concurrency × headroom, not vibes — and the queue must be bounded so overload is visible, not absorbed until OOM."
+**Q44. A Saga crashes partway through. How is it resumable?**
 
-**Q44. A saga crashes at step 3 of 5. How do you make it resumable?**
-"An in-memory Saga dies with the process, leaving half-applied steps. Persist the Saga state: every step transition writes to the Saga table in the same local transaction as the step's effect. On restart, scan for in-progress Sagas and continue or compensate from the last recorded step:"
+Persist the Saga state and step transitions. On restart, find in-progress instances and either retry the next idempotent step or compensate from the last durable state. The state record must not claim a step completed before the step's effect is durable.
 
 ```java
 @Entity
-public class SagaInstance {
+class SagaInstance {
     @Id String sagaId;
-    String status;       // STARTED / IN_PROGRESS / DONE / COMPENSATING
-    int lastStep;        // 1=reserve, 2=charge, 3=ship, ...
-}
-
-@Component
-public class SagaRecovery {
-    @EventListener(ApplicationReadyEvent.class)
-    public void resume() {
-        sagaRepo.findByStatusIn(List.of("STARTED", "IN_PROGRESS")).forEach(s -> {
-            switch (s.lastStep()) {
-                case 1 -> compensateFrom(s, "reserve");
-                case 2 -> compensateFrom(s, "charge");
-                default -> retryForward(s);
-            }
-        });
-    }
+    String status;
+    int lastStep;
 }
 ```
 
-"Each step's effect is written together with its saga-log entry in one transaction, so the log is always truthful. Recovery runs within 30 s of restart; the cost is one table and a startup scan."
+**Q45. How do you set SLOs across a service chain?**
 
-**Q45. How do you set SLOs and budget error budgets across a chain of services?**
-"Each hop consumes reliability: three services at 99.9% give 99.7% end to end — 3 failed requests per 1,000. Budget backward from the user-visible SLO: a user p99 < 1 s means an order p99 < 900 ms, which means inventory and payment together must stay below 700 ms. Every dependency gets its own budget and a breaker tuned to enforce it:"
+Start with the user-visible SLO, then allocate latency and error budgets across dependencies. Multiplying independent availability figures is only an approximation; shared failures and retries violate independence. Measure the real chain and reserve budget for retries, queues, and operational work.
 
-```java
-// Budget: user SLO 99.9% → each of 3 services burns at most 0.033%
-// At 1M requests/month, a service may fail 333 times before paging
-public class SloBudget {
-    public static final double CHAIN_SLO = 0.999;
-    public static final double PER_SERVICE = 1 - (1 - CHAIN_SLO) / 3;   // 0.99967
-}
-```
+**Q46. How do you rate-limit and apply backpressure?**
 
-```yaml
-prometheus:
-  alerts:
-    - expr: rate(http_server_requests_seconds_count{status=~"5.."}[5m]) > 0.001
-      for: 15m # burning 0.1% of budget in 15 minutes → page
-```
-
-"Numbers that matter: a 3-service chain at 99.9% each is 99.7% user-visible. If the product needs 99.95%, someone gets a 99.99% SLO with a tighter timeout, or the chain gets shorter."
-
-**Q46. How do you rate-limit and enforce backpressure across the chain?**
-"On the server side, a 429 for clients that exceed their quota protects you from a 10× burst. On the client side, a rate limiter on outbound calls protects your dependency. Resilience4j gives you both sides:"
+Rate-limit at the edge to protect the service and on outbound calls to protect dependencies. Bound queues, reject excess work clearly, and expose `429` or another explicit overload response where appropriate. Backpressure is a policy for refusing or delaying work, not merely a queue implementation.
 
 ```java
 @RateLimiter(name = "payments-outbound", fallbackMethod = "quotaExceeded")
-public PaymentResult charge(PaymentRequest req) {
-    return paymentsClient.charge(req);
+public PaymentResult charge(PaymentRequest request) {
+    return paymentsClient.charge(request);
 }
 ```
 
-```yaml
-resilience4j.ratelimiter:
-  instances:
-    payments-outbound:
-      limitForPeriod: 50 # 50 calls per window
-      limitRefreshPeriod: 1s # = 50 rps against the payment provider
-      timeoutDuration: 500ms # wait up to 500ms for a permit, then fail fast
-```
+**Q47. How do you prove resilience?**
 
-"When the provider slows, a client-side limiter spreads your 50 rps evenly instead of bursting 200 and eating 429s; combined with a 500 ms wait, the caller gets a clean failure in half a second, not a 3 s timeout."
+Inject realistic failures in a safe environment: dependency errors, delays, broker unavailability, and database failures. Assert bounded latency, correct degradation, no uncontrolled retry growth, and recovery. Run these tests after resilience changes and compare results with the service's SLO.
 
-**Q47. How do you prove the system actually recovers — and stays recovered?**
-"Resilience is a hypothesis until a test kills the dependency. Use fault injection in staging — kill inventory, Kafka, or a database — and assert that the SLOs still hold. Automate it: run chaos tests on a schedule and compare the metrics with the error budget:"
+**Q48. How do you rename an event field consumed by multiple services?**
+
+Use an additive migration. Add the new field while retaining the old one, deploy consumers that understand the new field, then remove the old field only after the compatibility window and schema checks are complete. A schema registry can enforce compatibility, but it cannot replace consumer inventory.
+
+**Q49. How do you handle authentication and authorization across services?**
+
+Use a consistent identity domain. A gateway or identity provider can issue a signed token; services validate it and enforce authorization for their own resources. Local signature validation avoids a mandatory authorization network hop, but key rotation, audience checks, expiry, and claim validation remain necessary.
 
 ```java
-@Test
-@SpringBootTest(webEnvironment = RANDOM_PORT)
-class ResilienceChaosTest {
-    @Test
-    void order_survives_inventory_outage() {
-        wireMock.stubFor(post("/api/stock/reserve").willReturn(aResponse()
-            .withFixedDelay(5_000).withStatus(503)));   // inventory dead AND slow
-
-        List<CompletableFuture<OrderResult>> calls = IntStream.range(0, 100)
-            .mapToObj(i -> supplyAsync(() -> orderSaga.place(order(i)), pool))
-            .toList();
-
-        assertThat(calls).allSatisfy(f ->
-            assertThat(f.join(5, SECONDS).status()).isIn("FAILED", "DEGRADED"));
-        // breaker opened, nothing hung, no thread leaked — asserted, not assumed
-    }
+Jwt jwt = decoder.decode(extractToken(request));
+if (!allowed(request, jwt)) {
+    response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+    return;
 }
 ```
 
-"Run the same test after every resilience change; if a future change silently removes the breaker, the chaos test pages the team before the customers do."
+**Q50. What can kill this system in production?**
 
-**Q48. You need to rename a field in an event consumed by 10 services. How?**
-"Never make a breaking rename. Add the new field, ship consumers that read it, then drop the old one — three deployments, each independently safe. A schema registry (Avro/JSON Schema) makes the evolution explicit and blocks incompatible changes at the producer:"
-
-```java
-// release 1: add the new field, keep the old
-record OrderPlaced(Long orderId, String customerId, String customerRef /* new */) {
-    public String legacyRef() { return customerRef != null ? customerRef : customerId; }
-}
-
-// release 2: consumers read customerRef
-// release 3: delete customerId, bump schema version
-```
-
-"With 10 consumers, a breaking rename means 10 coordinated deploys or ~10 incident pages; the three-step migration is slower but never requires a coordinated cutover — and the schema registry turns 'I forgot' into a failed CI build instead of a production outage."
-
-**Q49. How do you do authN/authZ across services?**
-"Use one identity domain: the gateway (or an auth service) issues the JWT once, and downstream services validate the signature locally — never make a per-request call to a central auth service, which becomes a shared point of failure. Each service still enforces its own authorization claims:"
+Three recurring risks are unbounded retries without timeouts or a breaker, shared schemas or distributed transactions that erase service independence, and missing observability. The answer is not a fixed configuration. It is bounded calls, idempotent operations, local transactions, explicit ownership, tracing, metrics, and failure tests.
 
 ```java
-@Component
-public class JwtAuthFilter extends OncePerRequestFilter {
-    private final JwtDecoder decoder;   // shared public key — no per-request network call
-
-    @Override
-    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res,
-                                    FilterChain chain) throws IOException, ServletException {
-        Jwt jwt = decoder.decode(extract(req));     // verify signature locally (~100 µs)
-        String role = jwt.getClaimAsString("role");
-        if (!allowed(req, role)) { res.setStatus(403); return; }
-        chain.doFilter(req, res);
-    }
-}
+// Every outbound call needs an explicit, reviewed timeout.
+factory.setReadTimeout(Duration.ofSeconds(3)); // illustrative assumption
 ```
 
-"Local JWT validation is ~100 µs; per-request introspection to a central auth service is 1–5 ms plus an availability dependency. Trust the signature, distribute the public key, keep authorization local."
-
-**Q50. Your architecture review: name the three things that will kill this microservices system in production.**
-"First, no circuit breakers and aggressive retries everywhere — one flaky dependency becomes a retry storm that takes the whole chain down (200 threads × 3 immediate retries turned a 5% outage into a full DDoS in one incident I lived through). Second, distributed transactions and shared schemas pretending to be 2PC — a distributed monolith that can never deploy independently. Third, no timeouts: every call waits forever, and p99 becomes 'until someone restarts it':"
-
-```java
-// The three killers, in code:
-// 1. Retry without backoff or breaker — the thundering herd
-@Retry(name = "x", maxAttempts = 10)              // 10 × synchronized = 10× the load
-// 2. Shared schema / 2PC across services — the distributed monolith
-@Transactional
-public void place(Order o) { orderRepo.save(o); paymentsDb.charge(...); }   // WRONG
-// 3. No timeout — a hung dependency owns your threads
-RestClient.builder().build();     // default: no read timeout — hangs forever
-```
-
-"The senior answer is the opposite: every call has a timeout (3 s), retries are bounded with backoff and jitter behind a breaker, transactions are local, and the boundary test — 'can this deploy alone?' — is run in every review. If you remember one sentence from this interview, make it this: resilience is configuration before it is code."
+**[SOURCE FACT]** The strongest senior answer is a design that states its assumptions, measures its behavior, and has a rollback or compensation path. Microservices are one option; a well-structured monolith is another.
 
 #### Self-check
 
-- [ ] Junior: I can explain microservice vs monolith, sync vs async, gateway, discovery, circuit breaker, REST clients, timeouts, retries, and DTO contracts — each with a working Spring snippet in my head.
-- [ ] Mid: I can explain database-per-service, 2PC vs Saga, the outbox, why `@Transactional` can't span services, retry storms, bulkhead, tracing, versioning, and chatty-call parallelization.
-- [ ] Senior: I can argue against premature splitting with a modular monolith, design a crash-resumable payment saga, size a 200-thread pool from Little's Law, budget SLOs across a chain, and name the three things that kill a microservices system.
-- [ ] Defense: I can defend every choice with numbers — 3 s timeouts, 3× retry with backoff, p99 budgets, and 2PC's lock cost versus Saga's compensation window.
-- [ ] Proof: I can demonstrate recovery with fault-injection tests and enforce boundaries with ArchUnit — resilience is configuration before it is code.
+- [ ] Junior: I can explain service boundaries, sync versus async communication, gateways, discovery, circuit breakers, clients, timeouts, retries, idempotency, and DTO contracts.
+- [ ] Mid-level: I can explain private data, Saga, outbox, local transactions, retry storms, bulkheads, tracing, versioning, projections, and backpressure.
+- [ ] Senior: I can justify a split, quantify or measure its trade-offs, design recovery, and say when not to use microservices.
