@@ -1,6 +1,6 @@
 ---
-title: "Security Considerations When Participating in Software Development Projects"
-description: "Comprehensive security best practices for developers, DevOps, QA, and project managers: from secure coding and secret management to threat modeling and SDL."
+title: "Security Responsibilities Across the Software Development Lifecycle"
+description: "Practical security responsibilities for developers, DevOps, QA, project managers, and organizations, from secure coding and secret management to threat-aware testing and incident response."
 pubDatetime: 2025-11-09T02:55:00+07:00
 featured: false
 draft: false
@@ -10,268 +10,128 @@ tags:
   - backend
 ---
 
-"Security is everyone's responsibility."
-— A familiar saying, but in real projects, it's often forgotten.
+Security is a shared engineering responsibility. It is easy to agree with that statement and still leave security to a specialist team. In practice, risk is introduced at every stage of a project: a developer can commit a credential, a pipeline can expose one, a tester can copy production data into a test environment, or an operator can leave an unnecessary port open.
 
-In today's software projects, security is not just the responsibility of the Security team but of the entire development team — from Developers, DevOps, QA, project managers, to the organization. Most security incidents don't come from super-sophisticated hackers but from basic human errors: accidentally committing API tokens to public repositories, sharing configuration files via email, opening test ports and forgetting to close them, or testing systems with real data without deleting it afterward.
+The difficult part is not memorizing a list of tools. It is applying the right controls throughout the Software Development Lifecycle (SDLC), without treating security as a final gate. This article maps common responsibilities to developers, DevOps and infrastructure, project management, QA, and the organization. It also distinguishes the supplied source facts from analysis and proposed process controls.
 
-For security to become culture and habit, it must be integrated from the design phase and throughout the Software Development Lifecycle (SDLC). This article analyzes in detail the various roles, common risks, supporting tools, best practices, and prevention methods to build a truly secure software project.
+## 1. Developer: Security in the Code
 
-## 1. Developer — Security Responsibility in Code
+> **[SOURCE FACT]** The supplied material identifies exposed credentials, unvalidated input, vulnerable dependencies, unsafe logging, and insufficient review as recurring developer-level risks.
 
-Developers are the front line of software security, because all data and system logic start from code. One insecure line of code can lead to serious risks affecting the entire application.
+### Protect Secrets
 
-### Don't Expose Sensitive Information
+Do not commit `.env`, `appsettings.json`, `config.yml`, database passwords, API keys, or secret keys to a repository. A public repository is not the only concern: credentials can also leak through build logs, chat, email, or artifacts.
 
-Problem: Accidentally committing .env, appsettings.json, config.yml files containing database passwords, API keys, secret keys to GitHub is one of the most common and serious mistakes.
+Use `.gitignore` to exclude local configuration files, but do not treat it as a secret-management system. Use environment variables on local machines and in CI/CD pipelines. For shared or production secrets, use a dedicated secret manager such as AWS Secrets Manager, HashiCorp Vault, or Azure Key Vault. Repository scanners such as GitGuardian and TruffleHog can help detect credentials that were committed accidentally.
 
-Solutions:
+**[ANALYSIS]** A detected secret should be considered exposed. Removing the line from the latest commit does not necessarily remove it from repository history or from copies already made. The appropriate response is to revoke or rotate the credential, then investigate where it may have been used.
 
-- Use .gitignore thoroughly to exclude configuration files.
-- Use environment variables on local machines and in CI/CD pipelines.
-- Use professional secret managers like AWS Secrets Manager, HashiCorp Vault, Azure Key Vault to store and manage sensitive information centrally and securely.
-- Regularly scan repositories with tools like GitGuardian or TruffleHog to detect accidentally committed credentials.
+### Validate Input and Output
 
-### Validate Input Data
+Never trust client input. Validate it on the server against an explicit schema, and apply the expected type, format, length, and range constraints.
 
-Problem: Absolutely trusting user input is a disaster. SQL Injection and Cross-Site Scripting (XSS) errors both originate from here.
+- Use Prepared Statements, also called parameterized queries, or a correctly used ORM such as Hibernate or Eloquent to reduce SQL injection risk.
+- Escape data for its output context before rendering HTML to reduce Cross-Site Scripting (XSS) risk. React, Vue, and Angular provide useful defaults, but those defaults do not make every rendering path safe.
+- Validate API request bodies with a schema library such as Joi, Yup, or Pydantic.
 
-Solutions:
+Validation and output encoding solve different problems. Validation limits what an application accepts; encoding prevents accepted data from being interpreted as markup or code in a particular output context.
 
-- Server-side: Always validate and sanitize data. Use Prepared Statements (Parameterized Queries) or ORMs (like Hibernate, Eloquent) to prevent SQL Injection.
-- Client & Server-side: Escape data before rendering to HTML to prevent XSS. Modern frameworks (React, Vue, Angular) often have automatic mechanisms, but don't rely on them blindly.
-- API: Validate request body schema (using libraries like Joi, Yup, Pydantic).
+### Manage Dependencies
 
-### Use Safe Libraries
+An application also inherits risk from its dependencies. A malicious or vulnerable open-source package can become a supply-chain attack vector.
 
-Problem: "Supply Chain Attack" — attackers inject malicious code into a popular open-source library you're using.
+Scan dependencies periodically with OWASP Dependency-Check, Snyk, or GitHub Dependabot. Prefer libraries that are maintained and have an established community, and apply security patches when they are available. Review the proposed change rather than updating blindly; compatibility and transitive dependencies still need to be checked.
 
-Solutions:
+### Log Deliberately
 
-- Scan dependencies periodically with tools like OWASP Dependency Check, Snyk, GitHub Dependabot. These tools will alert you immediately when new vulnerabilities appear in libraries you're using.
-- Prioritize well-maintained libraries with large communities.
-- Update versions (patches) immediately when security fixes are available.
+Do not log passwords, payment-card numbers, Personally Identifiable Information (PII), access tokens, or JWTs. Logs are operational data and must be handled accordingly.
 
-### Proper Logging
+In production, return a generic error to the user and keep detailed stack traces out of the response. Detailed diagnostic data can disclose code structure, database information, or other implementation details. Keep that information in protected server-side logs when it is needed for investigation.
 
-Problem: Logging passwords, credit card numbers, or JWT tokens turns log files into treasure troves for hackers.
+### Review Code and Security
 
-Solutions:
+Every Pull Request or Merge Request should receive review from another person, using a security checklist appropriate to the change. Static Application Security Testing (SAST) tools such as SonarQube and Checkmarx can identify potential issues automatically, but they do not replace human review or runtime testing.
 
-- Absolutely never log sensitive information (PII - Personally Identifiable Information).
-- Only return generic error messages to end users, never expose detailed stack traces (which can reveal code structure, database) in production environments.
+## 2. DevOps and Infrastructure: Security in Delivery and Operations
 
-### Code Review and Security Review
+> **[SOURCE FACT]** The supplied material recommends protected CI/CD variables, least-privilege access, non-root containers, vulnerability scanning, encrypted connections, restricted network access, monitoring, centralized logging, and an incident response plan.
 
-Solution: Every Pull Request/Merge Request should be reviewed by at least one other person, with a specific security checklist. Combine with Static Application Security Testing (SAST) tools like SonarQube, Checkmarx to automate finding potential vulnerabilities in code.
+### Secure the CI/CD Pipeline
 
-## 2. DevOps / Infrastructure — Security Responsibility for Infrastructure and Pipeline
+Do not hardcode secrets in pipeline scripts or configuration committed to the repository. Use the CI/CD platform's secret storage, such as GitHub Secrets, GitLab CI Variables, or Azure DevOps Secret Variables.
 
-### Secure Pipeline (CI/CD)
+**[PROPOSED DESIGN]** Require an approval step before production deployment when the project's risk and operating model justify it. Keep deployment credentials scoped to the actions and environments that the pipeline needs.
 
-Problem: Hardcoding secrets in CI/CD scripts.
+### Apply Least Privilege
 
-Solution: Use built-in secret storage of CI/CD systems (GitHub Secrets, GitLab CI Variables, Azure DevOps Secret Variables). Configure manual approval for deployment steps to production environments.
+Access should be granted according to the Principle of Least Privilege: each user, service, and pipeline receives only the permissions required for its job.
 
-### Environment Access Control (Principle of Least Privilege)
+The supplied baseline is that developers have read/write access to development environments, while production deployment rights are limited to the CI/CD system and a small number of authorized people. Avoid shared root or broadly privileged service accounts. Use Role-Based Access Control (RBAC), meaning permissions are assigned through defined roles rather than ad hoc user grants.
 
-Solutions:
+### Harden Containers and Network Paths
 
-- Developers only have read/write access to Dev environments.
-- Only CI/CD systems and a few people (Team Lead) have deployment rights to Production.
-- Absolutely avoid using root/service accounts with overly broad permissions. Use Role-Based Access Control (RBAC) strictly.
+Scan container images before deployment with tools such as Trivy or Grype. Configure containers to run as a specific non-root user where the application permits it.
 
-### Secure Containers and Infrastructure
+Use TLS for connections that require transport encryption. Configure security groups and firewalls to allow traffic only from necessary sources and on necessary paths. Encryption and network restriction are complementary controls; one does not replace the other.
 
-Solutions:
+### Monitor and Respond
 
-- Scan container images before deployment with Trivy or Grype to find vulnerabilities.
-- Never run containers as root user. Create a specific non-root user.
-- Enable TLS/SSL for all connections. Configure Security Groups/Firewalls to only allow traffic from necessary sources.
+Use monitoring such as Prometheus or Datadog and centralized logging such as an ELK Stack when those systems fit the environment. Alert on signals including repeated failed logins and unexpected traffic spikes.
 
-### Monitoring and Incident Response
+**[PROPOSED DESIGN]** Maintain an Incident Response Plan that defines how the team detects, contains, investigates, communicates, and recovers from an incident. The plan should identify responsibilities and escalation paths before an incident occurs.
 
-Solution: Deploy monitoring systems (Prometheus, Datadog) and centralized logging (ELK Stack). Set up alerts for abnormal behavior: repeated failed logins, sudden traffic spikes. Have an Incident Response Plan ready for when incidents occur.
+## 3. Project Management: Security in Process and Access
 
-## 3. Project Management — Security Responsibility for Process and Personnel
+> **[SOURCE FACT]** The supplied material places security review, personnel access management, and security awareness within project and organizational responsibilities.
 
-### Establish Security Processes
+### Put Security in the Definition of Done
 
-Action: Make "Security Review" a mandatory part of the Definition of Done (DoD) for every user story. Create a simple, easy-to-understand security checklist for the entire team.
+Make a security review part of the Definition of Done (DoD) for each user story when the change has security impact. A short checklist is more useful than a process that exists only in a policy document. It can cover authentication and authorization, input handling, secrets, logging, data exposure, dependencies, and operational changes.
 
-### Personnel and Access Management
+### Manage Workforce Access
 
-Action: Apply Single Sign-On (SSO). Revoke access immediately when employees change teams or leave the company. Review access rights quarterly.
+Use Single Sign-On (SSO) where available. Revoke access promptly when someone changes teams or leaves the company. Review access rights quarterly, as specified in the supplied material, and remove permissions that are no longer justified.
 
-### Training and Awareness
+### Train and Encourage Reporting
 
-Action: Organize internal sharing sessions on OWASP Top 10, how to identify phishing emails. Encourage a culture of reporting bugs without fear of punishment.
+Run internal sessions on topics such as the OWASP Top 10 and phishing detection. Make it safe to report suspected vulnerabilities and mistakes. Early reporting gives the team a chance to rotate credentials, contain exposure, and correct the issue before it becomes a larger incident.
 
-## 4. QA / Tester — Security Responsibility for Testing and Data
+## 4. QA and Testing: Security in Verification and Test Data
 
-### Basic Security Testing
+> **[SOURCE FACT]** The supplied material recommends basic attack-oriented checks, authorization testing, OWASP ZAP scanning, and synthetic data in staging and test environments.
 
-Action: Play the role of an attacker. Try entering script snippets (`<script>alert('XSS')</script>`) into forms, or special SQL characters (`' OR '1'='1`) into search boxes. Use tools like OWASP ZAP to automate vulnerability scanning.
+### Test Common Input Attacks
 
-### Role-Based Testing
+Test forms and APIs with security-focused cases. For example, an XSS test string is `<script>alert('XSS')</script>`, and a SQL injection test string is `' OR '1'='1`. These are test inputs, not proof that a system is vulnerable. Use OWASP ZAP to automate vulnerability scanning where appropriate, and verify findings manually.
 
-Action: Ensure User A cannot view User B's information by changing IDs in URLs (Insecure Direct Object Reference - IDOR). Thoroughly test admin/regular user permission features.
+### Test Authorization, Not Only Authentication
 
-### Environment Testing
+Verify that one user cannot access another user's data by changing an identifier in a URL or request. This is commonly called Insecure Direct Object Reference (IDOR). Test both regular-user and administrator permissions, including attempts to call endpoints directly rather than through the user interface.
 
-Action: Absolutely never use real data (especially customer information) in Staging/Test environments. Use generated fake data.
+### Keep Test Data Safe
 
-## 5. Organization — Responsibility for Building Security Culture and Policies
+Do not use real customer data in staging or test environments. Generate fake data instead. If a project has a concrete need to use derived data, define and review a suitable de-identification process; the supplied material's direct recommendation is to use generated data.
 
-### Security Policies and Procedures
+## 5. Organization: Security Culture and Policy
 
-Action: Build a clear Security Policy document, specifying password requirements, data handling, and incident response.
+> **[SOURCE FACT]** The supplied material calls for clear security policies and procedures, including password requirements, data handling, and incident response, together with periodic independent assessment.
 
-### Periodic Audits and Assessments
+### Define Policies and Procedures
 
-Action: Hire an independent third party to perform Penetration Testing at least once a year for an objective and in-depth perspective.
+Maintain a security policy that explains password requirements, data handling expectations, and the incident response process. The policy should be understandable to the people expected to follow it and should connect to the controls used in development and operations.
 
-### "Security First" Culture
+### Assess the System Periodically
 
-Action: Leadership must drive and champion security culture. Reward those who find serious vulnerabilities.
+Use periodic audits and assessments to check whether the documented controls work in practice. The supplied material specifically recommends engaging an independent third party for penetration testing. The scope and timing of such testing should be determined by the system's risk and applicable requirements; no universal schedule is asserted here.
 
-## 6. Threat Modeling — Analyzing Risks from the Start
+## A Practical Security Baseline
 
-This is the process of identifying and assessing potential threats right from the beginning of a project.
+The responsibilities above are different, but they reinforce one another:
 
-Step 1: Identify Assets: Customer data, databases, API keys, source code.
+- Developers protect secrets, validate input, manage dependencies, avoid sensitive logs, and participate in review.
+- DevOps and infrastructure teams protect delivery credentials, restrict access, harden runtime environments, and prepare monitoring and response.
+- Project managers make security visible in delivery criteria and access processes.
+- QA tests authorization and common attack paths and keeps test data synthetic.
+- The organization provides policies, training, reporting channels, and independent assessment.
 
-Step 2: Draw Data Flow Diagrams: Illustrate how data moves through the system.
-
-Step 3: List Threats: Use the STRIDE framework (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) for a comprehensive view.
-
-Step 4: Assess Risks: For each threat, evaluate the Impact and Likelihood to prioritize handling.
-
-Step 5: Plan Mitigation: For example, the "Spoofing" threat is mitigated by strong authentication (MFA).
-
-## 7. Secure Development Lifecycle (SDL) — Secure Software Development Lifecycle
-
-This is a framework for integrating security into each phase of the software lifecycle.
-
-### Phase 1: Planning & Design
-
-"Security by Design": Security must be a non-functional requirement from the start. Perform Threat Modeling to understand risks.
-
-Apply secure design principles: "Principle of Least Privilege" (each component has only the minimum necessary permissions), "Defense in Depth" (multi-layered defense).
-
-### Phase 2: Implementation
-
-Secure Coding: Follow secure coding rules, use verified libraries.
-
-Automated Checks: Integrate SAST (Static Analysis) and SCA (Software Composition Analysis) tools into the pipeline to automatically scan for code errors and dependency vulnerabilities.
-
-### Phase 3: Testing
-
-Security Testing: Combine multiple testing forms: DAST (Dynamic Analysis) like OWASP ZAP to scan running applications, manual Penetration Testing, and permission testing.
-
-QA & Security Collaboration: QA and Security teams (if available) work closely to write test scenarios for attack situations.
-
-### Phase 4: Deployment
-
-Secure Pipeline: Ensure CI/CD pipeline is secured (secret management, approval steps).
-
-Secure Infrastructure: Configure infrastructure (cloud, containers) in a hardened manner. Scan container images before deployment. Apply RBAC for Kubernetes and cloud services.
-
-### Phase 5: Maintenance & Operation
-
-Continuous Monitoring: Use SIEM (Security Information and Event Management) systems to monitor and detect anomalies in real-time.
-
-Vulnerability Management: Continuously update patches for OS, frameworks, and libraries. Have a process for quickly handling new vulnerability reports (CVEs).
-
-## 8. Useful Tips to Apply Immediately
-
-- Enable MFA (Multi-Factor Authentication) whenever possible: For both end-user accounts and internal accounts (cloud, repository, CI/CD). This is the strongest protection against password loss.
-- "Never Trust" Principle: Apply Zero Trust practically: don't trust the network, don't trust users (always verify), and always validate input.
-- Update, update, and update: Don't delay updating security patches for OS, frameworks, and libraries. Delay is an opportunity for attackers.
-- Principle of Least Privilege: Apply to everything: users, service accounts, database users, API permissions. Only grant permissions necessary to perform the job.
-- Encrypt data: Encrypt data "at-rest" (when stored) and "in-transit" (when transmitted — use TLS).
-- Smart Logging and Monitoring: Not just logging, but setting up alerts for important events (like logins from unfamiliar IPs, bulk data deletion).
-- Use Fake/Anonymized Data for dev/test environments: Reduce the risk of real data leakage.
-- Have a Security Checklist for Pull Requests: For example: [ ] Validated input? [ ] No hardcoded secrets? [ ] Updated dependencies? [ ] Tested permissions?
-
-## 9. Other Important Notes to Remember
-
-### Session and Token Management:
-
-- Set reasonable session timeout durations.
-- Use JWT securely: set short expiration times, use refresh tokens safely (secure storage, revocable).
-
-### API Security:
-
-- Rate Limiting: Prevent DDoS or brute force attacks.
-- Strong Authentication: Use OAuth 2.0, API keys combined with secrets.
-- Thoroughly validate API input and output.
-
-### Data Protection:
-
-- Masking/Anonymization: Partially hide sensitive data (e.g., only show last 4 digits of credit card).
-- Secure Data Deletion: When no longer needed, data must be thoroughly deleted.
-
-### Environment and Configuration Separation:
-
-- Configurations for Dev, Staging, Production must be completely separated, using different secrets and environment variables.
-
-### Incident Response:
-
-- Have a clear playbook ready: Who gets notified? How to isolate the incident? How to notify customers? What lessons were learned?
-
-### People Are the Key Factor:
-
-- Train against Social Engineering. One click on a phishing link can neutralize all technical defense layers.
-
-## 10. AI-assisted Coding — Security Considerations When Developing Software with AI
-
-With the popularity of AI-assisted coding like GitHub Copilot, ChatGPT, Tabnine, or Codeium, using AI for code suggestions increases productivity but also carries unique security risks. Here are important considerations:
-
-### Carefully Review AI-Suggested Code
-
-AI can generate insecure code or code containing vulnerabilities (SQL Injection, XSS, hardcoded secrets).
-
-Never copy-paste AI-suggested code directly into production repositories. Every line of code must be reviewed as carefully as developer-written code.
-
-### Don't Expose Sensitive Information
-
-Avoid pasting credentials, API keys, tokens, or sensitive data into public AI (like ChatGPT free).
-
-When needing to use AI with internal data, prioritize local AI or enterprise AI with security mechanisms that don't store data externally.
-
-### Audit AI-Generated Code
-
-All AI-generated code must be scanned with SAST, dependency scanning, and secret scanning before merging.
-
-Especially check code related to input/output, logging, authentication, and permissions.
-
-### Establish AI Usage Policies
-
-Clear regulations: what types of data can be used with AI, how to check suggested code.
-
-Limit repo or production access from AI tools.
-
-Train developers to recognize prompt injection and risks of AI revealing internal information.
-
-### Integrate into CI/CD Pipeline
-
-If using AI to auto-generate code or tests, ensure the pipeline checks security with automatic scanning steps.
-
-Maintain audit trails to trace the origin of AI-generated code if needed.
-
-By applying these principles, you can leverage AI to accelerate development while ensuring a high level of safety and security for your project.
-
-## 11. Conclusion
-
-Security is a continuous journey, not a destination. It cannot be "added" at the end of a project but must be "woven" into every thread of the development process.
-
-- Developers write code with a security mindset.
-- DevOps builds secure infrastructure and proactive monitoring.
-- Management creates processes and environments that encourage security.
-- QA is the watchful eye, checking every corner.
-- The organization builds a culture where "security is everyone's responsibility."
-
-Only when all these pieces work together will your software product be truly sustainable and trustworthy against increasingly sophisticated threats.
-
-"Security isn't something you build once. It's something you maintain every single day."
+**[ANALYSIS]** No single scanner, checklist, or security role can compensate for gaps across the lifecycle. The useful goal is not to promise that a project is perfectly secure; it is to make risks discoverable, permissions deliberate, sensitive data controlled, and incident handling repeatable.

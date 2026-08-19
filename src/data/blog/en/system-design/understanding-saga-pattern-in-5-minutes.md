@@ -1,6 +1,6 @@
 ---
-title: "Understanding Saga Pattern in 5 Minutes"
-description: "Explaining Saga Pattern: distributed transactions in microservices, Event-Driven vs Orchestration, compensation, and eventual consistency."
+title: "Saga Pattern: Coordinating Distributed Workflows"
+description: "A practical introduction to Saga transactions in microservices, including event-driven and orchestration-based designs, compensation, and eventual consistency."
 pubDatetime: 2025-09-02T11:59:00+07:00
 featured: false
 draft: false
@@ -10,163 +10,87 @@ tags:
   - microservices
 ---
 
-If you're new to microservices, you've probably heard of Saga Pattern — a design pattern for managing distributed transactions in microservices. It helps services coordinate smoothly, keep data synchronized, and maintain eventual consistency even when a service encounters issues. This article will help you understand Saga Pattern quickly, with intuitive examples and basic technical concepts.
+In a monolith, several data changes can usually share one database transaction. In a microservice system, the same business operation often crosses service boundaries and databases. A failure after one service commits cannot be handled with a single local rollback.
 
-## 1. Context and Problem
+This article explains the Saga pattern, the difference between event-driven and orchestration-based Sagas, and the trade-offs around compensation, partial failure, and eventual consistency. The order flow below is an illustrative example, not a claim about a particular company or production system.
 
-In traditional (monolithic) systems, you can use transactions to ensure data is always consistent:
+## The problem: one workflow, several local transactions
 
-If all steps succeed → commit
-If any step fails → rollback
+**[SOURCE FACT]** A traditional transaction provides ACID properties: Atomicity, Consistency, Isolation, and Durability. In a monolithic ordering flow, the application might deduct payment, reserve inventory, and record the order within one database transaction. If a step fails before commit, the transaction can roll back.
 
-Example of ordering in a monolithic system:
+With microservices, those responsibilities commonly belong to separate services, each with its own database:
 
-1. Deduct customer's money
-2. Deduct product inventory
-3. Send confirmation email
+- Payment Service charges the customer.
+- Inventory Service reserves or deducts stock.
+- Notification Service sends a confirmation.
 
-Everything is within one transaction, so if any step fails → rollback everything, data remains consistent.
+**[ANALYSIS]** These are separate local transactions. Payment may commit before Inventory reports that stock is unavailable. A database rollback in Inventory cannot undo a committed payment, and a message retry cannot safely repeat a charge unless the operation is idempotent (safe to repeat with the same result).
 
-However, with microservices, each step is typically managed by a separate service with its own database:
+## What a Saga does
 
-- Payment Service: deduct money
-- Inventory Service: deduct inventory
-- Notification Service: send email
+**[SOURCE FACT]** A Saga breaks a distributed business transaction into a sequence of local transactions. Each step commits independently. For steps that have a meaningful reversal, the service also exposes a compensation action. If a later step fails, the workflow runs the compensations required for the earlier completed steps.
 
-If one step fails, previous steps may have already committed, leading to inconsistent data.
+Compensation is a new business operation, not a distributed database rollback. A refund, for example, may be asynchronous, fail temporarily, or require reconciliation. The system therefore aims for a valid final state over time rather than atomic visibility across all services.
 
-Example: customer's money is deducted but the product is out of stock, or confirmation email hasn't been sent.
+**[ANALYSIS]** Consider this illustrative order flow:
 
-This is the problem Saga Pattern solves: helping services in microservices coordinate smoothly and maintain data consistency even when errors occur.
+1. Payment Service charges the customer: success.
+2. Inventory Service attempts to reserve stock: out of stock.
+3. Notification Service is not started.
 
-## 2. What is Saga Pattern?
+Without a Saga, the payment can remain committed even though the order cannot be fulfilled. With a Saga, the failed inventory step causes the workflow to request a payment refund. The notification step is skipped. The result is not instantaneous atomic consistency; it is a controlled recovery path with an explicit business outcome.
 
-Saga Pattern is a design pattern for managing distributed transactions in microservices.
+## Two implementation styles
 
-Instead of using traditional transactions (rollback everything if one step fails), each service manages its own transaction, and if a subsequent step fails, the system performs compensation for previous steps.
+### Event-driven Saga
 
-Example of online ordering:
+**[SOURCE FACT]** In an event-driven Saga, a service publishes an event after a local transaction completes. Other services consume the event and start their own work. A simplified flow is:
 
-1. Payment Service: deduct money → success
-2. Inventory Service: deduct inventory → error (out of stock)
-3. Notification Service: send email → not yet executed
+1. Payment Service charges the customer and publishes `PaymentSuccess`.
+2. Inventory Service consumes the event and attempts to reserve stock.
+3. If reservation fails, Inventory Service publishes `InventoryFailed`.
+4. Payment Service consumes that event and starts a refund.
 
-- Without Saga Pattern: Payment Service has deducted money → customer loses money but gets no product
-- With Saga Pattern: Inventory Service error → Payment Service refunds, Email not sent → avoids confusion
+**[ANALYSIS]** This style avoids a dedicated central orchestrator and lets services react to events. It can be a reasonable fit when the workflow is naturally event-oriented. The trade-off is distributed workflow state: events can be delayed, delivered more than once, or processed out of order. Consumers need idempotency, durable event handling, and an operational way to inspect the workflow.
 
-Core idea: Each step takes responsibility and has a compensation mechanism, allowing operations in distributed transactions to coordinate without breaking the entire system.
+### Orchestration Saga
 
-## 3. Two Ways to Implement Saga Pattern
+**[SOURCE FACT]** In an orchestration Saga, an orchestrator owns the workflow state and sends commands to participating services. A simplified flow is:
 
-### 3.1 Event-Driven Saga
+1. The orchestrator commands Payment Service to charge the customer: success.
+2. It commands Inventory Service to reserve stock: failure.
+3. It commands Payment Service to refund the charge.
+4. It does not command Notification Service to send the confirmation.
 
-- Each step sends a message (event) when completed or failed
-- The next step listens for events to decide whether to execute or compensate
+**[ANALYSIS]** Centralized workflow state makes complex paths, status tracking, and compensation ordering easier to reason about. The orchestrator is also another component to operate. If it is unavailable or becomes a bottleneck, workflow progress is affected. This is an availability and capacity concern, not proof that the pattern is inherently unsafe.
 
-Example:
+## Design considerations
 
-- Payment Service deducts money → sends "PaymentSuccess" event
-- Inventory Service listens for event → proceeds to deduct inventory
-- If Inventory Service fails → sends "InventoryFailed" event
-- Payment Service listens for event → performs refund
+**[PROPOSED DESIGN]** For either style, define the following before implementing the workflow:
 
-Advantages:
+- The local transaction owned by each service.
+- The compensation, if one exists, and whether it is safe to retry.
+- An idempotency key for commands and events that may be delivered more than once.
+- Timeout and retry behavior, including a fallback when a dependency remains unavailable.
+- The terminal business states, such as `RefundPending` or `OrderCancelled`, instead of assuming every failure can be hidden.
+- Monitoring for stuck workflows, failed compensations, and messages that exceed their expected processing time.
 
-- No centralized orchestrator needed, services self-manage and coordinate flexibly
-- Easy to extend when adding new services to the workflow
+Do not use compensation as a generic undo button. Some actions cannot be reversed exactly, and a notification failure does not necessarily justify reversing a successful payment. The business policy should decide which failures trigger compensation.
 
-Disadvantages:
+## Key terms
 
-- Difficult to track overall transaction status
-- Prone to duplicate events or delayed events, requiring idempotency mechanisms
+- **Transaction:** A sequence of data operations governed by transactional guarantees such as ACID. A bank transfer is a common example: if debiting one account succeeds but crediting the other fails, the transaction should not leave a half-applied result.
+- **Distributed transaction:** A business transaction that spans multiple services or databases. A Saga is one way to coordinate it without requiring one database transaction across all participants.
+- **Saga:** A sequence of local transactions with coordination and, where needed, compensating actions.
+- **Compensation:** A new operation intended to counteract a previously committed business action, such as issuing a refund.
+- **Event:** An asynchronous message that records something that happened, such as `PaymentSuccess`.
+- **Command:** A message asking a service to perform an action, such as `ReserveInventory`.
+- **Orchestrator:** A component that coordinates Saga steps and tracks workflow state in the orchestration style.
+- **Partial failure:** A condition where one step fails while another step has already committed.
+- **Consistency:** Compliance with the system's data constraints and business rules. It does not always mean that every service observes the same state at the same instant.
+- **Eventual consistency:** A model in which independently committed services converge toward a valid state over time.
+- **Idempotency:** The property that repeating the same request does not create an additional business effect. For example, processing the same payment command twice should not charge the customer twice.
 
-### 3.2 Orchestration Saga
+## Summary
 
-- A central orchestrator coordinates the steps
-- When a step fails, the orchestrator commands rollback of previous steps
-
-Example:
-
-- Orchestrator commands Payment Service to deduct money → success
-- Orchestrator commands Inventory Service to deduct inventory → failure
-- Orchestrator commands Payment Service to refund
-- Notification Service does not send email
-
-Advantages:
-
-- Easy to manage complex workflows, centralized state control
-- Easy tracking and reduced risk of duplicate or missing events
-
-Disadvantages:
-
-- Orchestrator becomes a central point; if it fails or bottlenecks → affects the entire transaction
-- Requires additional central component → increases implementation complexity
-
-## 4. Illustrative Example: Online Ordering
-
-Suppose the ordering process has 3 steps:
-
-1. Payment Service: deduct customer's money → success
-2. Inventory Service: deduct inventory → error (out of stock)
-3. Notification Service: send email → not yet executed
-
-Without Saga Pattern:
-
-- Payment Service has deducted money → customer loses money but gets no product
-- Inventory Service error → data is inconsistent
-
-With Saga Pattern (Event-Driven or Orchestration):
-
-- Inventory Service error → Payment Service refunds
-- Email not sent → avoids confusion
-- Consistent process, good customer experience
-
-Saga Pattern allows each operation in a distributed transaction to be independent while still coordinating effectively, ensuring data consistency and good user experience.
-
-## 5. Technical Terms
-
-- Transaction: A sequence of data operations ensuring ACID (Atomicity, Consistency, Isolation, Durability).
-  Example: Transferring money from account A to B in banking; if deducting A succeeds but crediting B fails → rollback.
-
-- Distributed Transaction: A transaction occurring across multiple services or separate databases, requiring compensation or eventual consistency.
-  Example: Online ordering: Payment Service deducts money, Inventory Service deducts stock, Notification Service sends email.
-
-- Saga Pattern: A design pattern managing distributed transactions by performing compensation when a subsequent step fails.
-  Example: Inventory Service reports out of stock → Payment Service refunds.
-
-- Compensation: Undoing a committed step if another step fails.
-  Example: Payment Service has deducted money but Inventory Service errors → Payment Service refunds.
-
-- Event: An asynchronous message between services, reporting transaction status.
-  Example: Payment Service sends "PaymentSuccess", Inventory Service listens and deducts stock.
-
-- Orchestrator: The central component in Orchestration Saga, coordinating steps and rollback when needed.
-  Example: Orchestrator sends command to deduct money → deduct stock → rollback if needed.
-
-- Partial Failure: One step in a distributed transaction fails while others have committed.
-  Example: Payment Service deducts money successfully but Inventory Service reports out of stock.
-
-- Consistency: Data always satisfies constraints and business rules after a transaction.
-  Example: After ordering, total deducted amount = total order value, inventory decreases by the correct quantity.
-
-- Eventual Consistency: The system will become consistent over time, not necessarily immediately.
-  Example: Payment Service commits first, Inventory Service commits later, eventually the overall state is correct.
-
-- Idempotency: Performing an operation multiple times without causing data corruption, preventing duplicate events.
-  Example: "PaymentSuccess" event sent twice → Payment Service only deducts money once.
-
-- Orchestration Saga: Implementing Saga Pattern with a central orchestrator coordinating steps.
-  Example: Orchestrator commands Payment → Inventory → Notification; rollback if Inventory fails.
-
-- Event-Driven Saga: Implementing Saga Pattern where each service self-manages its transaction, publishes/listens to events, no central component needed.
-  Example: Payment sends "PaymentSuccess" → Inventory deducts stock → Inventory sends "InventoryFailed" → Payment refunds.
-
-## 6. Conclusion
-
-Saga Pattern is a design pattern for managing distributed transactions in microservices, helping:
-
-- Each service self-manages its own transaction and has compensation capability when errors occur
-- Independent services coordinate smoothly to ensure the overall process operates stably
-- Risk mitigation: data is synchronized, user experience is guaranteed, operational processes are continuous
-
-Saga Pattern is an important design pattern that helps complex systems operate efficiently, reliably, and more manageably.
+The Saga pattern replaces one cross-service transaction with coordinated local transactions and explicit recovery. Event-driven Sagas distribute coordination through events; orchestration Sagas centralize workflow state in an orchestrator. Neither approach removes partial failure. The design must make retries, idempotency, timeouts, compensation, and terminal business states explicit.
