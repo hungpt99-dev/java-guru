@@ -1,6 +1,6 @@
 ---
-title: "KYC Document Intake with Vision LLMs"
-description: "Cách identity-service của FinPay trích xuất các trường KYC từ giấy tờ định danh được tải lên bằng vision LLM và chuyển chúng sang duyệt thủ công thay vì tự động phê duyệt."
+title: "Thiết kế pipeline tiếp nhận tài liệu KYC bằng Vision LLM"
+description: "Thiết kế thực tế để trích xuất trường KYC từ giấy tờ định danh, kiểm tra bằng các rule xác định và chuyển các trường hợp không chắc chắn sang người duyệt."
 pubDatetime: 2026-08-15T10:00:00+07:00
 tags: [java, ai, fintech, architecture]
 draft: false
@@ -9,42 +9,46 @@ featured: false
 
 Repo: <https://github.com/finpay-lab/identity-service>
 
-# AI-6: Tiếp nhận tài liệu KYC bằng Vision và LLM
+# AI-6: Thiết kế tiếp nhận tài liệu KYC bằng Vision và LLM
 
-KYC (Know Your Customer) là pipeline có khối lượng xử lý lớn nhất và rủi ro cao nhất trong bất kỳ fintech nào. Mỗi thẻ căn cước bị đọc sai, mỗi ảnh chân dung bị xếp nhầm, hay mỗi hộ chiếu hợp lệ bị từ chối oan đều có thể dẫn đến một khoản phạt tuân thủ hoặc làm mất một khách hàng. Feature `kyc-document-intake-llm` của `identity-service` là cổng AI biến dữ liệu byte thô của tài liệu thành một yêu cầu xác minh có cấu trúc, có thể kiểm toán và sẵn sàng cho việc ra quyết định.
+Tiếp nhận giấy tờ KYC (Know Your Customer) chỉ có vẻ đơn giản cho đến khi hệ thống phải xử lý ảnh kém chất lượng, nhiều định dạng giấy tờ, sự kiện gửi trùng, lỗi từ nhà cung cấp và yêu cầu audit. Vision language model (VLM, mô hình ngôn ngữ có khả năng xử lý hình ảnh) có thể hỗ trợ trích xuất trường dữ liệu, nhưng không nên là hệ thống lưu trữ chuẩn hay bên tự quyết định cuối cùng.
 
-Đây là bài viết đi sâu ở **cấp kỹ sư senior**, với kiến trúc thực tế, các chế độ hỏng thực tế và code đã thực sự được đưa lên production (rồi được sửa). Tôi sẽ trình bày cách WRONG trước, vì đó là cách mọi tích hợp AI đầu tiên thường được xây dựng: một lần gọi HTTP nằm trong transaction, một blob JSON thô trong DB và coi mô hình là phán quyết cuối cùng. Sau đó là cách RIGHT: hexagonal, hướng sự kiện, idempotent và có các cơ chế bảo vệ.
+Bài viết trình bày một thiết kế ưu tiên ranh giới cho feature `kyc-document-intake-llm`: chuẩn hóa file tải lên thành domain command, trích xuất các trường có cấu trúc, áp dụng các kiểm tra xác định, chỉ dùng LLM cho những câu hỏi cần đánh giá và chuyển kết quả không chắc chắn sang người duyệt. Bài viết cũng đối chiếu thiết kế này với một cách triển khai synchronous phổ biến và giải thích các failure mode cần xử lý rõ ràng.
 
-## Pipeline cốt lõi
+Code và package tree dưới đây mang tính minh họa. Chúng mô tả các ranh giới dự kiến, không phải bằng chứng về một provider, model hay sự cố production cụ thể.
 
+## Pipeline
+
+```text
+DocumentUploaded (Kafka) -> IntakeCommand -> VisionExtractionPort (VLM)
+     |                                              |
+     +-> DocumentSnapshot (domain model)            +-> StructuredFields + Confidence
+                         |                                      |
+                         v                                      v
+              FraudScreeningPort <- RiskAssessment (domain) -> LlmJudgePort
+                         |                                      |
+                         v                                      v
+                DecisionEvent -> outbox -> Kafka -> OpenSearch (decision index)
 ```
-DocumentUploaded (Kafka) ─▶ IntakeCommand ─▶ VisionExtractionPort (VLM)
-     │                                            │
-     └─▶ DocumentSnapshot (domain model)          └─▶ StructuredFields + Confidence
-                        │                                    │
-                        ▼                                    ▼
-              FraudScreeningPort ◀── RiskAssessment (domain) ──▶ LLM JudgePort
-                        │                                    │
-                        ▼                                    ▼
-                DecisionEvent ──▶ outbox ──▶ Kafka ──▶ OpenSearch (index/decision-v1)
-```
 
-Luồng xử lý:
+**[SOURCE FACT]** Thiết kế được cung cấp sử dụng `DocumentUploaded` trên Kafka, một S3 key và `eventId`, một vision extraction port, các trường có cấu trúc kèm confidence, một fraud check dựa trên rule, một LLM judge, outbox, Kafka và OpenSearch.
 
-1. **Kafka** chuyển `DocumentUploaded` (không phụ thuộc nhà cung cấp, chứa S3 key và `eventId`).
-2. Một **domain command** chuẩn hóa sự kiện này; không có `MultipartFile` nào lọt qua lớp adapter.
-3. Một **Vision port** gửi ảnh tới mô hình đa phương thức và trả về các trường có cấu trúc **kèm điểm tin cậy**, không phải văn xuôi.
-4. Một **rule engine** (Java thuần, zero AI) kiểm tra các luật cứng: loại tài liệu có được phép hay không, checksum có khớp hay không và tài liệu đã hết hạn hay chưa.
-5. Một **LLM judge** chấm điểm các câu hỏi mở: "người có tên trên ảnh chân dung và trên giấy tờ tùy thân có phải là cùng một người không?" Nó luôn **không có thẩm quyền quyết định** và luôn được ghi log.
-6. Một **Decision** được tạo ra, lưu vào OpenSearch để truy vấn và tìm kiếm, rồi được phát hành qua outbox pattern.
+**[PROPOSED DESIGN]** Trình tự xử lý:
 
-## Kiến trúc: hexagonal, ngay từ commit đầu tiên
+1. Kafka chuyển `DocumentUploaded`. Event nên chứa một object reference, chẳng hạn S3 key, cùng `eventId`; consumer không nên phụ thuộc vào kiểu multipart của web.
+2. Adapter ánh xạ event thành `IntakeCommand` và `DocumentSnapshot`.
+3. Vision adapter gửi tài liệu tới multimodal model và trả về một kết quả có kiểu rõ ràng. Kết quả gồm giá trị các trường, confidence, metadata của provider và trạng thái extraction cụ thể, thay vì văn xuôi tự do.
+4. Rule engine xác định kiểm tra các ràng buộc như loại giấy tờ được phép, checksum có nhất quán hay không và giấy tờ đã hết hạn chưa. Các kiểm tra này vẫn là application code thông thường.
+5. LLM judge có thể trả lời câu hỏi mở, chẳng hạn người trong ảnh selfie có vẻ khớp với người trên giấy tờ hay không. Kết quả chỉ là bằng chứng, không phải quyết định phê duyệt. Lưu kết quả và rationale cần cho việc review, tuân theo chính sách bảo mật của ứng dụng.
+6. Decision được lưu và event được phát hành qua outbox. OpenSearch có thể phục vụ việc truy xuất và tìm kiếm; không nên coi nó là nguồn dữ liệu bền vững duy nhất nếu đó chưa phải quyết định rõ ràng về storage.
 
-Feature này nằm trong monolith dạng mô-đun của `identity-service`. Package KYC tuân thủ nghiêm ngặt mô hình ports-and-adapters:
+## Ranh giới hexagonal
 
-```
+**[SOURCE FACT]** Package layout được cung cấp đặt domain code dưới `domain/` và các integration dưới `infrastructure/`:
+
+```text
 src/main/java/com/finpay/identity/kyc/
-├── domain/                      # Java thuần, zero Spring, zero SDK
+├── domain/                      # Java thuần, không import Spring hoặc SDK
 │   ├── model/
 │   │   ├── DocumentSnapshot.java
 │   │   ├── StructuredFields.java
@@ -53,7 +57,7 @@ src/main/java/com/finpay/identity/kyc/
 │   │   ├── Decision.java
 │   │   └── KycEvent.java
 │   ├── ports/
-│   │   ├── in/IntakeUseCase.java        # primary (driving) port
+│   │   ├── in/IntakeUseCase.java
 │   │   ├── in/AuditUseCase.java
 │   │   └── out/
 │   │       ├── VisionExtractionPort.java
@@ -64,7 +68,7 @@ src/main/java/com/finpay/identity/kyc/
 │   └── service/
 │       ├── DocumentIntakeService.java
 │       └── DecisionEngine.java
-└── infrastructure/              # Spring, Kafka, OpenSearch, SDK — tất cả ở đây
+└── infrastructure/              # adapter cho Spring, Kafka, OpenSearch và SDK
     ├── kafka/
     │   ├── DocumentUploadedConsumer.java
     │   └── DecisionEventProducer.java
@@ -78,359 +82,105 @@ src/main/java/com/finpay/identity/kyc/
         └── AuditLogWriter.java
 ```
 
-**Vì sao quan trọng:** `domain/` không import gì từ Spring, Kafka SDK, hay OpenAI. Nó có thể được test bằng JUnit thuần trong vài mili-giây. Toàn bộ câu chuyện AI — mô hình, prompt, token budget, nhà cung cấp — chỉ nằm trong một adapter có thể thay thế. Khi nhà cung cấp vision tăng giá gấp đôi, chúng tôi đổi adapter trong một buổi chiều, chứ không phải viết lại toàn bộ.
+**[ANALYSIS]** Không đưa provider SDK vào domain giúp application có một contract ổn định cho extraction và judgment. Decision engine cũng có thể được test mà không cần gọi network. Provider, prompt, token limit, timeout, retry và response parsing nên nằm trong adapter hoặc application service, không nằm trong controller.
 
-## WRONG: nỗ lực ngây thơ đầu tiên
+Không nên khẳng định một provider có thể được thay thế trong một khoảng thời gian cụ thể, hoặc một thay đổi về giá đã dẫn đến một migration cụ thể, nếu không có tài liệu chứng minh. Lợi ích của kiến trúc là giảm phạm vi thay đổi, không phải bảo đảm một lịch migration nhất định.
 
-Đây là thứ các đội ngũ có thiện chí thường đưa lên production. Lớp web gọi thẳng mô hình bên trong transaction và tin tuyệt đối vào output. Mỗi sai lầm dưới đây đều là một sự cố có thật mà chúng tôi (và các fintech sử dụng AI khác) từng gặp.
+## Phiên bản synchronous đơn giản
+
+Ví dụ rút gọn này chỉ mang tính minh họa. Nó cho thấy sự kết dính mà thiết kế đề xuất cần tránh.
 
 ```java
 @RestController
 public class KycIntakeController {
-
-    private final OpenAiClient openAiClient;  // SDK của nhà cung cấp trong controller
+    private final ProviderClient providerClient;
     private final JdbcTemplate jdbcTemplate;
 
-    @PostMapping("/v1/kyc/documents")
-    public Map<String, Object> intake(@RequestParam("file") MultipartFile file) {
+    @PostMapping("/kyc/documents")
+    public Map<String, Object> intake(@RequestParam("file") MultipartFile file)
+            throws IOException {
         String base64 = Base64.getEncoder().encodeToString(file.getBytes());
 
-        // 1. Gọi SDK của nhà cung cấp trực tiếp từ lớp web
-        ChatCompletionRequest request = ChatCompletionRequest.builder()
-                .model("gpt-4o-vision")
-                .messages(List.of(
-                        Message.ofUserContent("""
-                                Extract: fullName, docNumber, dateOfBirth,
-                                expiryDate, documentType, country. Return JSON.
-                                """),
-                        Message.ofUserPart(new ImageContent("data:image/jpeg;base64," + base64))
-                ))
-                .responseFormat("json_object")
-                .build();
+        ProviderResult result = providerClient.extract(
+                "Extract fullName, docNumber, dateOfBirth, expiryDate, "
+                        + "documentType, and country as JSON.",
+                "data:image/jpeg;base64," + base64);
+        String json = result.content();
 
-        ChatCompletionResult result = openAiClient.chatCompletions(request);
-        String json = result.getChoices().get(0).getMessage().getContent();
-
-        // 2. Coi output của LLM là ground truth, parse vỡ khi có văn xuôi
         String name = extract(json, "fullName");
         String docNumber = extract(json, "docNumber");
-        // ...
+        jdbcTemplate.update("INSERT INTO kyc_documents (data) VALUES (?)", json);
 
-        // 3. Lưu blob JSON thô: không truy vấn được, không kiểm toán được
-        jdbcTemplate.update(
-                "INSERT INTO kyc_documents (data) VALUES (?)",
-                json);
-
-        // 4. Lời của mô hình CHÍNH LÀ quyết định — không rule, không người duyệt
-        boolean approved = name != null && docNumber != null;
-        return Map.of("approved", approved);
+        return Map.of("approved", name != null && docNumber != null);
     }
 }
 ```
 
-### Sai ở đâu, chi tiết
+**[ANALYSIS]** Phiên bản này có nhiều vấn đề độc lập:
 
-1. **SDK của nhà cung cấp chi phối lớp web.** Đặt `OpenAiClient` trong controller nghĩa là transport, serialization, retry policy và tên mô hình đều bị gắn chặt với HTTP. Bạn không thể unit test `intake()` mà không mock SDK bên thứ ba, cũng không thể đổi nhà cung cấp.
-2. **HTTP timeout giờ chính là độ trễ của mô hình.** Mô hình có thể mất 10–60 giây khi quá tải. Thread pool của servlet và kết nối DB trong transaction bị giữ lại. Một lần nhà cung cấp gặp sự cố có thể làm cạn kiệt toàn bộ connection pool và khiến cả `identity-service` sập.
-3. **Không có idempotency.** Client retry thao tác upload, còn bạn insert hai lần. Kết quả là decision, rủi ro và các dòng audit đều bị nhân đôi.
-4. **JSON thô trong DB.** `SELECT ... WHERE data->>'docNumber'` yêu cầu full scan. Không có index, không có OpenSearch và không có chiến lược lưu trữ. Không ai trả lời được câu hỏi "tháng trước chúng ta đã duyệt bao nhiêu hộ chiếu hết hạn?" nếu không chạy script.
-5. **Không có guardrail.** Không có ngưỡng tin cậy, rule bổ sung cho mô hình, retry, circuit breaker hay audit. Mô hình vừa là bồi thẩm đoàn vừa là thẩm phán, và là thứ duy nhất đứng giữa bạn và một khoản phạt.
+1. Controller sở hữu provider SDK, request format, parsing, persistence và decision logic. Như vậy HTTP boundary cũng trở thành integration boundary, khiến việc thay provider tốn kém hơn.
+2. Request chạy synchronous. Provider chậm sẽ giữ HTTP worker và có thể giữ cả database connection. Khi tải tăng, connection pool hoặc thread pool có thể cạn trước khi provider phục hồi.
+3. Không có idempotency key hoặc inbox record. Kafka redelivery hay client retry có thể gọi extraction và persistence thêm lần nữa.
+4. JSON blob không cung cấp schema ổn định cho việc query, validation hay audit. Raw provider output vẫn có thể hữu ích, nhưng nên được lưu cùng normalized fields và metadata, với access control cho dữ liệu nhạy cảm.
+5. Chỉ kiểm tra hai trường có tồn tại không phải là approval policy. Cách này bỏ qua document validity, expiry, fraud signal, confidence threshold và human review.
+6. Ví dụ giả định response luôn thành công và JSON luôn đúng shape. Nó không có timeout, retry policy, fallback, circuit breaker, giới hạn kích thước, kiểm tra content type hay xử lý output malformed.
 
-## RIGHT: thiết kế đã lên production
+## Application flow an toàn hơn
 
-### Domain model trước tiên
+**[PROPOSED DESIGN]** Giữ use case độc lập với HTTP và kiểu dữ liệu của provider:
 
 ```java
-// domain/model/StructuredFields.java
-public record StructuredFields(
-        String fullName,
-        String docNumber,
-        LocalDate dateOfBirth,
-        LocalDate expiryDate,
-        String documentType,
-        String country,
-        Confidence confidence,
-        List<FieldWarning> warnings
-) {
-    public boolean hasHighConfidenceForCriticalFields() {
-        return confidence.isHighFor("fullName")
-                && confidence.isHighFor("docNumber")
-                && confidence.isHighFor("dateOfBirth");
+public Decision handle(IntakeCommand command) {
+    if (inbox.alreadyProcessed(command.eventId())) {
+        return inbox.previousDecision(command.eventId());
     }
-}
 
-// domain/model/Confidence.java
-public record Confidence(Map<String, Double> scores) {
-    private static final double CRITICAL_THRESHOLD = 0.90;
+    DocumentSnapshot snapshot = documents.load(command.objectKey());
+    ExtractionResult extraction = vision.extract(snapshot);
+    RiskAssessment rules = ruleEngine.check(extraction.fields(), snapshot);
+    JudgeResult judgment = rules.requiresJudgment()
+            ? judge.evaluate(snapshot, extraction.fields())
+            : JudgeResult.notRun();
 
-    public boolean isHighFor(String field) {
-        return scores.getOrDefault(field, 0.0) >= CRITICAL_THRESHOLD;
-    }
-}
-
-// domain/model/Decision.java
-public record Decision(
-        String eventId,
-        DecisionVerdict verdict,          // APPROVED, MANUAL_REVIEW, REJECTED
-        List<String> reasons,             // mã máy đọc được, không phải văn xuôi
-        LocalDateTime decidedAt,
-        DecisionTrace trace               // các check nào đã bắn, kèm nguồn
-) {}
-```
-
-Hãy chú ý những thứ **không có** trong domain: không `OpenAiClient`, không `Map<String,Object>` và không `String json`. Domain chỉ làm việc với record và enum. Output của AI chỉ là *một* tín hiệu đầu vào cho một decision engine xác định.
-
-### Ports: AI nằm sau một interface
-
-```java
-// domain/ports/out/VisionExtractionPort.java
-public interface VisionExtractionPort {
-    /**
-     * Trả về các trường có cấu trúc kèm điểm tin cậy từng trường.
-     * Triển khai: VLM provider, OCR theo template, hoặc fallback nội bộ.
-     * Không bao giờ throw vì "không đọc được" — đó là một verdict, không phải exception.
-     */
-    StructuredFields extract(DocumentSnapshot snapshot);
-}
-
-// domain/ports/out/LlmJudgePort.java
-public interface LlmJudgePort {
-    /**
-     * Chấm điểm không có thẩm quyền cho các bằng chứng mở.
-     * Trả về một score có chặn trên + một reason code. Không bao giờ là một approval.
-     */
-    JudgeVerdict score(String promptKey, Map<String, String> evidence);
+    Decision decision = decisionEngine.decide(extraction, rules, judgment);
+    decisions.save(decision);
+    outbox.append(DecisionEvent.from(decision));
+    inbox.markProcessed(command.eventId(), decision.id());
+    return decision;
 }
 ```
 
-Adapter của nhà cung cấp nằm trong `infrastructure/openai/`. Nó quản lý tên mô hình, phiên bản prompt, chính sách retry và token budget:
+Transaction bao quanh các database write cần được thiết kế để việc đánh dấu event đã xử lý và append outbox record là atomic. Publish lên Kafka diễn ra sau commit và phải chịu được retry. Các consumer của `DecisionEvent` cũng phải idempotent.
 
-```java
-// infrastructure/openai/OpenAiVisionAdapter.java
-@Component
-public class OpenAiVisionAdapter implements VisionExtractionPort {
+## Xử lý failure
 
-    private final ChatClient chatClient;
-    private final ObjectMapper mapper;
+**[ANALYSIS]** Model call là một external dependency. Hãy xử lý nó như vậy:
 
-    @Override
-    public StructuredFields extract(DocumentSnapshot snapshot) {
-        String prompt = PromptCatalog.visionExtraction(snapshot.documentType());
-        try {
-            String json = chatClient.chat()
-                    .system(prompt)
-                    .user(messageWithImage(snapshot.assetUri()))
-                    .call()
-                    .content();
-            return mapper.readValue(json, StructuredFields.class);
-        } catch (JsonProcessingException e) {
-            // Output không đọc được là một tín hiệu, không phải sập:
-            return StructuredFields.unreadable(snapshot, "vlm-json-parse-failure");
-        }
-    }
-}
-```
+- Đặt timeout phù hợp với asynchronous worker, không lấy timeout của interactive HTTP request làm mặc định.
+- Chỉ retry các lỗi tạm thời, dùng bounded exponential backoff và chính sách giới hạn số lần thử. Không retry validation error hoặc refusal như thể đó là lỗi network.
+- Dùng circuit breaker để ngừng gửi request trong lúc provider đang lỗi.
+- Dùng fallback state như `MANUAL_REVIEW` hoặc `EXTRACTION_UNAVAILABLE`; không biến việc model không khả dụng thành approval.
+- Áp dụng backpressure (giới hạn tốc độ nhận việc khi downstream quá tải) ở consumer hoặc queue boundary.
+- Giới hạn document size, image dimension và prompt payload trước khi gọi provider.
+- Ghi correlation ID, `eventId`, provider request ID nếu có, model configuration, extraction status và decision version. Mặc định không log image của giấy tờ hoặc raw personally identifiable information.
 
-### Driving service: xác định, idempotent và có cơ chế bảo vệ
+Confidence không phải là xác suất có ý nghĩa thống nhất trong mọi model. Threshold là một policy decision và cần được calibration bằng các case đã review. Nếu chưa có threshold được kiểm chứng, hãy chuyển case sang review thay vì trình bày một con số như một bảo đảm.
 
-```java
-// domain/service/DocumentIntakeService.java
-public class DocumentIntakeService implements IntakeUseCase {
+## Data và audit model
 
-    private final VisionExtractionPort vision;
-    private final LlmJudgePort judge;
-    private final DecisionStorePort decisionStore;
-    private final KycEventPublisherPort publisher;
-    private final FraudCheckPort fraudCheck;
-    private final DecisionEngine engine;      // rule engine Java thuần
+**[PROPOSED DESIGN]** Tách các representation theo mục đích sử dụng:
 
-    @Override
-    public void handle(DocumentUploaded command) {
-        // 1. IDEMPOTENCY: cùng eventId → cùng kết quả, đúng-một-lần
-        if (decisionStore.exists(command.eventId())) {
-            audit.info("duplicate intake suppressed", command.eventId());
-            return;
-        }
+- `DocumentSnapshot`: reference bất biến tới object đã tải lên, content metadata và event identity.
+- `StructuredFields`: giá trị đã normalize, confidence theo từng field, extraction status và validation error.
+- `RiskAssessment`: kết quả của các rule xác định và version của chúng.
+- `JudgeResult`: câu hỏi, model response, confidence hoặc uncertainty signal và provider metadata.
+- `Decision`: policy outcome, reason code, review status và decision version.
+- Raw provider payload: tùy chọn, phải được mã hóa hoặc kiểm soát quyền truy cập, và chỉ lưu khi policy yêu cầu.
 
-        DocumentSnapshot snapshot = DocumentSnapshot.from(command);
+Dùng schema version rõ ràng cho decision và event đã lưu. Audit record phải trả lời được ai hoặc thành phần nào tạo ra từng input, rule nào đã chạy, model configuration nào được dùng và vì sao status cuối cùng được chọn. Redact hoặc tokenize các trường nhạy cảm ở nơi policy audit cho phép.
 
-        // 2. Rule cứng TRƯỚC TIÊN — mô hình không bao giờ được lấn quyền luật
-        Optional<String> ruleViolation = engine.checkHardRules(snapshot);
-        if (ruleViolation.isPresent()) {
-            Decision rejected = Decision.rejected(command.eventId(), List.of(ruleViolation.get()));
-            persistAndPublish(command, rejected);
-            return;
-        }
+## LLM không được tự quyết định
 
-        // 3. Vision extraction → có cấu trúc, kèm điểm tin cậy
-        StructuredFields fields = vision.extract(snapshot);
+LLM không nên là bên duy nhất quyết định identity approval, document validity, sanctions decision hay policy exception. Nó có thể trích xuất giá trị ứng viên và cung cấp bằng chứng bổ sung. Deterministic validation, policy rules và reviewer có thẩm quyền vẫn chịu trách nhiệm cho hướng xử lý cuối cùng.
 
-        // 4. Cổng tin cậy: dưới ngưỡng là MANUAL_REVIEW, không phải REJECTED
-        if (!fields.hasHighConfidenceForCriticalFields()) {
-            Decision review = Decision.manualReview(command.eventId(),
-                    List.of("LOW_CONFIDENCE_CRITICAL_FIELDS"), fields.warnings());
-            persistAndPublish(command, review);
-            return;
-        }
-
-        // 5. Fraud check (danh sách cấm, DOB hợp lý, trùng số tài liệu)
-        FraudResult fraud = fraudCheck.evaluate(snapshot, fields);
-
-        // 6. LLM judge: chỉ tư vấn, có điểm, luôn được ghi log
-        JudgeVerdict judgeVerdict = judge.score("identity-selfie-match",
-                Map.of("nameOnId", fields.fullName(),
-                       "dobOnId", fields.dateOfBirth().toString()));
-
-        // 7. QUYẾT ĐỊNH LÀ CỦA ENGINE, KHÔNG PHẢI CỦA MÔ HÌNH
-        Decision decision = engine.combine(snapshot, fields, fraud, judgeVerdict);
-
-        persistAndPublish(command, decision);
-    }
-
-    private void persistAndPublish(DocumentUploaded command, Decision decision) {
-        decisionStore.save(command.eventId(), decision);   // ghi idempotent
-        audit.logDecision(command.eventId(), decision);    // mọi quyết định đều được audit
-        publisher.publish(new KycEvent(command.eventId(), decision)); // outbox
-    }
-}
-```
-
-### Engine xác định — đây mới là thành phần quyết định tiền
-
-```java
-// domain/service/DecisionEngine.java
-public class DecisionEngine {
-
-    public Decision combine(DocumentSnapshot snapshot,
-                            StructuredFields fields,
-                            FraudResult fraud,
-                            JudgeVerdict judgeVerdict) {
-        List<String> reasons = new ArrayList<>();
-
-        if (fraud.blocked()) reasons.add("FRAUD_SANCTION_HIT");
-        if (fields.expiryDate() != null && fields.expiryDate().isBefore(LocalDate.now()))
-            reasons.add("DOCUMENT_EXPIRED");
-        if (judgeVerdict.score() < 0.70) reasons.add("IDENTITY_MATCH_LOW");
-
-        // Ý kiến mô hình chỉ thêm được reasons, không bao giờ gỡ verdict của rules
-        if (reasons.contains("FRAUD_SANCTION_HIT") || reasons.contains("DOCUMENT_EXPIRED")) {
-            return Decision.rejected(snapshot.eventId(), reasons);
-        }
-        if (reasons.isEmpty() && fields.hasHighConfidenceForCriticalFields()) {
-            return Decision.approved(snapshot.eventId(), reasons);
-        }
-        return Decision.manualReview(snapshot.eventId(), reasons);
-    }
-}
-```
-
-### Infrastructure: Kafka + outbox + OpenSearch
-
-Consumer trong `infrastructure/kafka/` rất mỏng. Nó ánh xạ event trên wire thành domain command rồi gọi use case. Không có logic nghiệp vụ nào nằm ở đây.
-
-```java
-// infrastructure/kafka/DocumentUploadedConsumer.java
-@Component
-public class DocumentUploadedConsumer {
-
-    private final IntakeUseCase intake;
-
-    @KafkaListener(topics = "kyc.document.uploaded", groupId = "identity-kyc-intake")
-    public void on(DocumentUploadedEnvelope envelope) {
-        // envelope.eventId → command.eventId (khóa idempotency đi xuyên suốt)
-        intake.handle(envelope.toCommand());
-    }
-}
-```
-
-Các decision event được phát hành qua **outbox pattern**, để việc ghi DB và publish lên Kafka là nguyên tử. OpenSearch được nạp dữ liệu từ chính event stream đó để phục vụ tìm kiếm và báo cáo:
-
-```java
-// infrastructure/opensearch/OpenSearchDecisionStore.java
-@Component
-public class OpenSearchDecisionStore implements DecisionStorePort {
-
-    private final OpenSearchClient client;
-
-    @Override
-    public void save(String eventId, Decision decision) {
-        client.index(i -> i
-                .index("decision-v1")
-                .id(eventId)                                   // upsert idempotent
-                .document(DecisionDocument.from(decision)));
-    }
-
-    @Override
-    public boolean exists(String eventId) {
-        return client.exists(e -> e.index("decision-v1").id(eventId)).value();
-    }
-}
-```
-
-`DecisionDocument` là projection có thể tìm kiếm, gồm verdict, reason codes, timestamps và PII đã được che. Projection này được index để phục vụ dashboard nhanh và các truy vấn tuân thủ.
-
-## Guardrails: không thể thương lượng
-
-Tất cả những điều này đều là yêu cầu bắt buộc trong production, và từng điều đều hiện diện trong code RIGHT ở trên:
-
-1. **AI không phải là thành phần quyết định tiền.** Mô hình đóng góp các *tín hiệu* (trường có cấu trúc và một điểm số). Verdict cuối cùng luôn đến từ `DecisionEngine` xác định, nơi áp dụng các rule cứng. Một LLM không thể nói "không" khi phát hiện sanction hit; một rule thì có thể. *AI giảm công việc; luật quyết định.*
-2. **Idempotent theo `eventId`.** `eventId` đi từ Kafka envelope, qua command, tới key của `DecisionStorePort`. `decisionStore.exists(eventId)` đảm bảo replay và retry cho cùng một kết quả. Upload trùng bị loại bỏ thay vì bị ra quyết định hai lần.
-3. **Timeout, retry, circuit breaker.** Các adapter của nhà cung cấp dùng timeout có giới hạn (vision: 15 giây; judge: 5 giây), một lần retry có jitter và một circuit breaker ngắt khi lỗi lặp lại. Nhờ đó, khi nhà cung cấp gặp sự cố, intake chuyển sang `MANUAL_REVIEW` thay vì chặn toàn bộ service.
-
-```java
-// infrastructure/openai/OpenAiProviderConfig.java
-@Configuration
-public class OpenAiProviderConfig {
-
-    @Bean
-    public CircuitBreaker llmCircuitBreaker() {
-        return CircuitBreaker.ofDefaults("llm-provider")
-                .withFailureRateThreshold(50)
-                .withSlidingWindowSize(20);
-    }
-}
-```
-
-4. **BYOK — không bao giờ hardcode, không bao giờ log key.** Key của nhà cung cấp đến từ KMS secret manager và được inject dưới dạng secret lấy từ biến môi trường lúc deploy. Bộ lọc log che mọi header `Authorization` và mọi chuỗi có vẻ là secret (`sk-`/`ai21`/`gpt-`). Nếu một secret lọt vào dòng log, audit hook sẽ được kích hoạt và buộc phải xoay vòng key.
-
-```java
-// infrastructure/audit/SecretRedactingFilter.java
-public class SecretRedactingFilter implements Filter {
-    @Override
-    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) {
-        // Bọc response/request để che các pattern key trước khi log
-        chain.doFilter(req, res);
-    }
-}
-```
-
-5. **Audit mọi quyết định.** Mỗi intake ghi một dòng audit bất biến gồm `eventId`, verdict, mọi reason code, nhà cung cấp mô hình, phiên bản mô hình, phiên bản prompt, điểm tin cậy và correlation ID. `LlmJudgePort.score()` chỉ mang tính tư vấn, nên mọi output của nó đều được audit kèm đúng phiên bản prompt đã tạo ra output đó. Bạn phải có khả năng tái hiện *bất kỳ* quyết định nào mà cơ quan quản lý yêu cầu, kể cả output nguyên văn của mô hình.
-
-## Các chế độ hỏng chúng tôi thực sự gặp phải
-
-- **Nhà cung cấp gặp sự cố trong đợt onboarding tăng đột biến.** Không có circuit breaker, 1000 thread phải chờ upstream timeout 60 giây và làm cạn kiệt pool. Khi có breaker, nó ngắt ở mức tỷ lệ lỗi 50% trong cửa sổ 20 lần gọi, và intake chuyển về `MANUAL_REVIEW` với reason code `PROVIDER_UNAVAILABLE`.
-- **LLM "bịa" ra số tài liệu.** Một ảnh rõ kết hợp với prompt được thiết kế kém đã tạo ra một giá trị sai nhưng có độ tự tin cao. Cách sửa: cổng `LOW_CONFIDENCE_CRITICAL_FIELDS` hiện chuyển mọi kết quả dưới 0.90 ở ba trường quan trọng sang manual review, đồng thời audit độ tin cậy ở cấp trường.
-- **Upload trùng do mobile retry.** Client mobile retry sau khi mạng chập chờn; nếu không có idempotency, chúng tôi đã ghi hai decision. `exists(eventId)` loại bỏ decision thứ hai, còn OpenSearch upsert theo ID giữ lại một dòng chuẩn duy nhất.
-- **Secret lọt vào dòng log.** Một developer debug-log DTO request thô, trong đó có header chứa key của nhà cung cấp. Bộ lọc che secret cùng với unit test đưa secret giả qua logger hiện đã ngăn việc này tái diễn.
-
-## Observability và tuân thủ
-
-- Mọi decision được index trong OpenSearch tại `decision-v1` với chính sách lưu trữ 7 năm nhằm đáp ứng yêu cầu tuân thủ.
-- Dashboard theo dõi `intake_*_total`, `intake_*_p95_latency_ms`, `llm_provider_failures_total`, `llm_token_usage_total` và `manual_review_queue_depth`.
-- Metric Prometheus được xuất từ chính các lời gọi `DecisionEngine` và gắn tag theo verdict và reason code.
-- Trace ID được truyền từ header Kafka tới document OpenSearch, để một lần onboarding có thể được tái dựng end-to-end.
-
-## Lần sau chúng tôi sẽ làm khác gì
-
-1. **Eval harness ngay từ ngày đầu.** Xây dựng một golden set gồm 1.000 tài liệu được gán nhãn và chạy mọi thay đổi về prompt hoặc mô hình qua bộ này trước khi release. Chúng tôi đã làm việc này quá muộn; đây là công cụ cải thiện chất lượng AI có đòn bẩy lớn nhất.
-2. **Version hóa catalog prompt** như code: `PromptCatalog.visionExtraction()` trả về prompt có phiên bản, và phiên bản đó được ghi vào dòng audit.
-3. **Cost gating.** Thiết lập cảnh báo token budget theo từng loại tài liệu; các tài liệu có khối lượng lớn nhưng giá trị thấp nên đi qua đường OCR rẻ hơn trước.
-4. **Hàng đợi human-in-the-loop.** `MANUAL_REVIEW` không phải ngõ cụt; đó là một work queue có SLA, được cấp dữ liệu từ chính OpenSearch store.
-
-## Bài học rút ra
-
-Một feature AI trong fintech khi lên production không chỉ là "gọi mô hình, lưu câu trả lời". Đó là một pipeline xác định, trong đó mô hình là một *cảm biến được bảo vệ chặt chẽ*, cung cấp tín hiệu cho rule engine chịu trách nhiệm về quyết định; event stream chịu trách nhiệm về trạng thái; còn audit trail chịu trách nhiệm lưu giữ sự thật. Các port hexagonal giúp AI có thể thay thế; idempotency giúp retry an toàn; circuit breaker khiến sự cố của nhà cung cấp trở nên vô hại; và rule engine cứng bảo đảm luật luôn có thẩm quyền.
-
-AI đã giảm khoảng 70% công sức manual review đối với các tài liệu rõ ràng, đồng thời giúp những lượt review còn lại nhanh hơn và có căn cứ hơn. Nó chưa bao giờ — dù chỉ một lần — tự mình ra quyết định.
-
-Repo: <https://github.com/finpay-lab/identity-service>
+Đó là ràng buộc thiết kế chính. Abstraction hữu ích không phải là “một API endpoint gọi model”, mà là một workflow tiếp nhận có state rõ ràng, event bền vững, dependency được giới hạn và audit trail.
