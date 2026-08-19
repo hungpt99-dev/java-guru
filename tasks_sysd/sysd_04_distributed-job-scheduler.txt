@@ -1,0 +1,74 @@
+TOPIC (article 4 of 10): Designing a Distributed Job Scheduler
+VIETNAMESE TITLE: Thiết kế Bộ Lập lịch Công việc Phân tán (Distributed Job Scheduler)
+
+SCOPE SEED (use as concrete requirements; you may refine):
+Functional: cron + one-off + DAG workflows; at-least-once execution; retries w/ backoff; catch-up after downtime; timezone/DST correct. Non-functional: no double-execution, missed-task detection, horizontal scale, audit.
+
+You are a senior distributed-systems engineer and technical writer. Write ONE original, publication-ready system-design article. DO NOT copy or paraphrase existing articles — extract engineering principles from public Big Tech engineering blogs and create ORIGINAL content.
+
+OUTPUT — produce BOTH files:
+  /tmp/sysd_{N}/{slug}.en.md   (English)
+  /tmp/sysd_{N}/{slug}.vi.md   (Vietnamese — faithful translation, SAME depth, SAME code/SQL/tables/Mermaid diagrams, SAME references; do not simplify)
+
+FRONTMATTER (valid YAML, at the very top of EACH file):
+---
+title: "<title for this locale>"
+description: "<one-sentence summary>"
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: ["system-design", "architecture"]
+draft: false
+featured: false
+---
+
+REQUIRED STRUCTURE — use these EXACT headings, in order:
+## 1. Problem
+## 2. Scale Estimation
+## 3. API Design
+## 4. Data Model
+## 5. High-Level Architecture
+## 6. Deep Dive
+## 7. Consistency Model
+## 8. Failure Scenarios
+## 9. Observability
+## 10. Capacity Planning
+## 11. Bottlenecks and Evolution
+## 12. Trade-offs
+## 13. Production Checklist
+## 14. Engineering References
+
+PER-SECTION GUIDANCE:
+1. Problem: what we build, who uses it, functional requirements, non-functional requirements.
+2. Scale Estimation: explicit math (DAU x requests/day = total/day; /86400 = avg rps; 10x peak; storage = writes x size x retention; bandwidth; read:write; growth; availability target). Justify every assumption.
+3. API Design: HTTP method, endpoint, request, response, idempotency keys, auth where relevant.
+4. Data Model: entities/tables, PK, indexes (justify each), shard/partition key (justify), constraints, access patterns.
+5. High-Level Architecture: a Mermaid flowchart (flowchart LR / TD) named 'flowchart', every component explained + WHY it exists.
+6. Deep Dive: the hard parts — horizontal scaling, caching, DB scaling/sharding/replication, Kafka/queues, backpressure, retry, DLQ, idempotency, ordering, distributed locks, consistency, transactions, failure handling, rate limiting, load balancing, connection pools, hot partitions/keys, TTL, DR. Explain WHY a tech fits, never 'simply use X'.
+7. Consistency Model: where strong vs eventual; replication-lag behavior; write-succeeded-but-response-lost; duplicate prevention.
+8. Failure Scenarios: a table | Failure | Impact | Detection | Recovery | with REAL production failures (DB down, Kafka consumer stuck, cache failure, region failure), not generic.
+9. Observability: metrics, logs, traces, trace/request ID, SLOs/SLIs, alerts, consumer lag, error rate, latency percentiles, saturation, DB conn-pool, queue depth — which metric signals which failure.
+10. Capacity Planning: app instances, DB capacity, cache size, Kafka partitions, consumer count, conn-pool size, storage growth — real calculations.
+11. Bottlenecks and Evolution: first bottleneck; at 10x; at 100x; which component to redesign first; target architecture.
+12. Trade-offs: a table | Decision | Option A | Option B | Decision | Why | covering SQL vs NoSQL, Kafka vs RabbitMQ, Redis vs DB cache, sync vs async, active-active vs active-passive, range vs hash sharding, polling vs push, REST vs gRPC.
+13. Production Checklist: concise pre-deploy verify list.
+14. Engineering References: 2-4 REAL sources.
+
+REFERENCES RULE (CRITICAL): Only cite REAL, verifiable URLs from OFFICIAL Big Tech engineering blogs. Use these roots (prefer root if unsure of exact slug — NEVER invent a slug):
+  Google SRE Book: https://sre.google/sre-book/table-of-contents/
+  Google Research: https://research.google/pubs/
+  Netflix Tech Blog: https://netflixtechblog.com/
+  Meta Engineering: https://engineering.fb.com/
+  AWS Architecture Blog: https://aws.amazon.com/blogs/architecture/
+  Uber Engineering: https://www.uber.com/blog/engineering/
+  LinkedIn Engineering: https://engineering.linkedin.com/
+  Cloudflare Blog: https://blog.cloudflare.com/
+  Stripe Engineering: https://stripe.com/blog/engineering
+  Discord Blog: https://discord.com/blog
+  Airbnb Engineering: https://medium.com/airbnb-engineering
+For each reference give: Company, Article title, URL, Key engineering lesson, How it influenced this design. NEVER fabricate a URL. If you are not certain a specific article URL is real, cite the blog ROOT instead.
+
+STYLE: concrete numbers, tables, calculations, Mermaid diagrams, realistic trade-offs, senior-engineer tone. No marketing, no 'simply use Kafka', no over-engineering, no fake Big Tech claims.
+
+QUALITY BAR (self-check before finishing): scale math consistent; APIs match data model; indexes/shard key justified; failure scenarios realistic; retry+idempotency defined; backpressure addressed; observability concrete; capacity numbers consistent; trade-offs explained; references real.
+
+Write the two files now.
+
