@@ -1,0 +1,144 @@
+You are a senior Staff Engineer. REWRITE the given FinPay AI blog (EN+VI) into a problem-driven engineering narrative.
+RULES:
+- Architecture = result of reasoning, not start. Structure: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure -> Lessons.
+- AI is an engineering component, not magic: false +/-, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. Emphasize AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: use "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End with 3-7 lessons + interview questions.
+- Bilingual EN+VI parity. Keep frontmatter, pubDatetime unchanged. Only modify the two files.
+
+ARTICLE ai/smart-notifications-llm
+CURRENT EN (rewrite to /tmp/fp2_3_smart-notifications-llm/smart-notifications-llm.en.md):
+---
+title: "Designing Safe LLM-Generated Payment Notifications"
+description: "A practical design for using an LLM to write notification copy without letting it change payment facts, block delivery, or leak credentials."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags:
+  - java
+  - ai
+  - fintech
+  - architecture
+draft: false
+featured: false
+---
+
+> Repository: <https://github.com/finpay-lab/notification-service>
+
+## The problem
+
+Payment notifications have two different requirements. They must state the transaction accurately, and they must be readable in SMS, email, or push form. A fixed template is reliable but tends to multiply as product and legal requirements diverge. An LLM can vary the wording, but it introduces a more serious risk: the model may change a fact while trying to make the message sound natural.
+
+This article separates those responsibilities. The domain owns validated payment facts and delivery decisions. The LLM may propose wording only. The design also covers event idempotency, structured output, timeout and retry behavior, fallback templates, tenant-supplied provider keys, and audit records.
+
+> **[SOURCE FACT]** The supplied example uses `notification-service`, a Kafka consumer, Spring Boot, a hexagonal layout, an LLM adapter, an OpenSearch adapter, and a repository at the URL above. The diagrams and code below describe that shape; configuration values are examples from the source article, not universal defaults.
+
+## Start with the unsafe design
+
+Passing a raw event payload to a model and returning an untyped string leaves every important boundary implicit:
+
+```java
+// PROPOSED DESIGN: deliberately unsafe example; do not ship it
+@Service
+public class CopyService {
+    private final LlmClient llm;
+
+    public String copyFor(NotificationEvent event) {
+        String prompt = """
+            Write a friendly Vietnamese push notification about this event:
+            %s
+            """.formatted(event.rawPayload());
+        return llm.complete(prompt); // no timeout, retry policy, or schema
+    }
+}
+```
+
+There are five independent failures:
+
+1. **Facts are not protected.** Nothing requires the output to preserve the exact amount. The source example uses `2,431,876 VND`; changing that to `2.4M` would be a correctness and potentially a compliance problem.
+2. **The output has no contract.** A push sender may require `{ title, body, tone }`, but this method returns an arbitrary string.
+3. **The dependency has no failure policy.** Without a timeout, a slow provider can hold a request. Without bounded retry and a circuit breaker (a mechanism that temporarily stops calls to a failing dependency), provider degradation can spread to notification delivery.
+4. **The model is given too much authority.** It could introduce an amount due, refund, or charge that is absent from the event.
+5. **The operation is not idempotent.** Reprocessing one event can create different copy and duplicate delivery unless the pipeline has a stable event key and a deduplication policy.
+
+These are design failures, not prompt-quality problems. They need enforcement at the application boundaries.
+
+## Proposed architecture
+
+```text
+                     +-------------------------------------------+
+Kafka topic -------->|          notification-service              |
+ event.payment       |                                             |
+                     |  +-----------+       +------------------+   |
+                     |  | domain/   |<----->| infrastructure/  |
+=== VI CURRENT ===
+---
+title: "Thiết kế thông báo thanh toán sinh bằng LLM an toàn"
+description: "Thiết kế thực tế để dùng LLM viết nội dung thông báo mà không cho phép model thay đổi dữ kiện thanh toán, chặn việc gửi, hoặc làm lộ credential."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags:
+  - java
+  - ai
+  - fintech
+  - architecture
+draft: false
+featured: false
+---
+
+> Repository: <https://github.com/finpay-lab/notification-service>
+
+## Bài toán
+
+Thông báo thanh toán có hai yêu cầu khác nhau. Nội dung phải nêu đúng giao dịch, đồng thời phải dễ đọc trên SMS, email hoặc push. Template cố định đáng tin cậy nhưng thường tăng nhanh khi yêu cầu của sản phẩm và pháp lý tách ra. LLM có thể thay đổi cách diễn đạt, nhưng tạo ra rủi ro nghiêm trọng hơn: model có thể thay đổi dữ kiện trong lúc cố làm câu chữ tự nhiên.
+
+Bài viết này tách hai trách nhiệm đó. Domain sở hữu các dữ kiện thanh toán đã được kiểm tra và quyết định gửi. LLM chỉ được đề xuất câu chữ. Phần còn lại trình bày idempotency của sự kiện, structured output, timeout và retry, template fallback, khóa provider do tenant cung cấp, cùng audit record.
+
+> **[SOURCE FACT]** Ví dụ được cung cấp sử dụng `notification-service`, một Kafka consumer, Spring Boot, cấu trúc hexagonal, adapter cho LLM, adapter cho OpenSearch và repository ở URL trên. Sơ đồ và code bên dưới mô tả cấu trúc đó; các giá trị cấu hình là ví dụ từ bài gốc, không phải mặc định áp dụng cho mọi hệ thống.
+
+## Bắt đầu từ thiết kế không an toàn
+
+Đưa raw event payload cho model rồi trả về một chuỗi không định kiểu khiến mọi ranh giới quan trọng đều không rõ ràng:
+
+```java
+// PROPOSED DESIGN: ví dụ cố ý không an toàn; không đưa vào production
+@Service
+public class CopyService {
+    private final LlmClient llm;
+
+    public String copyFor(NotificationEvent event) {
+        String prompt = """
+            Write a friendly Vietnamese push notification about this event:
+            %s
+            """.formatted(event.rawPayload());
+        return llm.complete(prompt); // không timeout, retry policy hoặc schema
+    }
+}
+```
+
+Có năm lỗi độc lập:
+
+1. **Không bảo vệ dữ kiện.** Không có gì buộc output giữ nguyên số tiền. Ví dụ nguồn dùng `2,431,876 VND`; đổi thành `2.4M` sẽ làm mất tính chính xác và có thể tạo vấn đề tuân thủ.
+2. **Output không có contract.** Push sender có thể cần `{ title, body, tone }`, nhưng method này trả về một chuỗi tùy ý.
+3. **Dependency không có chính sách lỗi.** Không có timeout, provider chậm có thể giữ request. Không có retry có giới hạn và circuit breaker (cơ chế tạm dừng gọi dependency đang lỗi), sự suy giảm của provider có thể lan sang việc gửi thông báo.
+4. **Model được trao quá nhiều quyền.** Model có thể thêm số tiền phải trả, khoản hoàn tiền hoặc khoản thu không có trong event.
+5. **Operation không idempotent.** Xử lý lại một event có thể tạo câu chữ khác và gửi trùng nếu pipeline không có event key ổn định cùng chính sách khử trùng lặp.
+
+Đây là lỗi thiết kế, không phải chỉ là vấn đề viết prompt. Chúng cần được enforce tại các boundary của ứng dụng.
+
+## Kiến trúc đề xuất
+
+```text
+                     +-------------------------------------------+
+Kafka topic -------->|          notification-service              |
+ event.payment       |                                             |
+                     |  +-----------+       +------------------+   |
+                     |  | domain/   |<----->| infrastructure/  |   |
+                     |  | (ports)   |       | (adapters)       |   |
+                     |  +-----+-----+       +
+Rewrite both into problem-driven style, preserve real engineering content. Write:
+  /tmp/fp2_3_smart-notifications-llm/smart-notifications-llm.en.md
+  /tmp/fp2_3_smart-notifications-llm/smart-notifications-llm.vi.md

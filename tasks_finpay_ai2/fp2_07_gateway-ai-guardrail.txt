@@ -1,0 +1,110 @@
+You are a senior Staff Engineer. REWRITE the given FinPay AI blog (EN+VI) into a problem-driven engineering narrative.
+RULES:
+- Architecture = result of reasoning, not start. Structure: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure -> Lessons.
+- AI is an engineering component, not magic: false +/-, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. Emphasize AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: use "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End with 3-7 lessons + interview questions.
+- Bilingual EN+VI parity. Keep frontmatter, pubDatetime unchanged. Only modify the two files.
+
+ARTICLE ai/gateway-ai-guardrail
+CURRENT EN (rewrite to /tmp/fp2_7_gateway-ai-guardrail/gateway-ai-guardrail.en.md):
+---
+title: "Designing an AI Guardrail for an API Gateway"
+description: "A Spring Boot design for checking AI-assisted gateway decisions for prompt injection and anomalous output after JWT authentication and before routing."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/gateway>
+
+
+Putting an LLM in a payment request path is difficult for a simple reason: model output is probabilistic, while settlement effects must be controlled and auditable. A guardrail does not make the model authoritative. It limits where the model can be used, validates what it returns, and provides a safe path when the model is unavailable or untrusted.
+
+This article describes the `gateway-ai-guardrail` design around Spring Boot, Kafka, hexagonal ports, and OpenSearch. It covers the threat model, an intentionally unsafe implementation, and a safer implementation boundary. The architecture below is a proposed design based on the repository and article brief; it is not a claim about an independently verified production deployment.
+
+## Scope and responsibilities
+
+**[SOURCE FACT]** The supplied design places the guardrail after JWT authentication and before request routing. It uses Kafka for events, Spring Boot for the service, hexagonal ports for boundaries, and OpenSearch for decision audit records. It also describes caller-selected BYOK credentials (Bring Your Own Key) identified by `X-FinPay-Key-Id`.
+
+**[ANALYSIS]** The guardrail should inspect free-text input before it is included in a model request, then validate the model response before any downstream component uses it. It should produce a recommendation, not approve or reject a payment. Deterministic business rules and the settlement system remain authoritative.
+
+The practical requirements follow:
+
+- Treat model calls as an optional remote dependency with a bounded timeout, a limited retry policy, and a circuit breaker (a switch that temporarily stops calls after repeated failures).
+- Use `eventId` as an idempotency key. A redelivered event must not create a second settlement effect. This requires a durable deduplication record and an idempotency contract at the settlement boundary; Kafka consumer behavior alone is not enough.
+- Keep API keys out of source code, configuration, prompts, exception messages, and logs. Resolve a key through a secret manager using the caller-provided key ID.
+- Audit the inputs and outputs needed to replay the decision, together with the model identifier, latency, validation result, and any human or rule override. Apply the system's data-retention and redaction policy to sensitive payment data.
+- Make the fallback explicit. If the model times out, opens the circuit, or returns invalid output, route to deterministic rules or manual review rather than treating failure as approval.
+
+## Proposed architecture
+
+**[PROPOSED DESIGN]** A hexagonal Spring Boot service can keep decision logic independent from infrastructure adapters:
+
+```text
+gateway-ai-guardrail/
+├── application/           # use cases and orchestration
+├── domain/                # models, ports, deterministic policy
+│   ├── ports/             # LlmPort, DecisionAuditPort, KeyProviderPort
+│   └── model/             # AnalysisRequest, GuardrailVerdict, DecisionRecord
+├── infrastructure/        # LLM, Kafka, OpenSearch, secret-manager adapters
+└── bootstrap/             # configuration and dependency wiring
+```
+
+One possible ev
+=== VI CURRENT ===
+---
+title: "Thiết kế AI guardrail cho API gateway"
+description: "Thiết kế Spring Boot kiểm tra các quyết định có hỗ trợ bởi AI để phát hiện prompt injection và đầu ra bất thường, sau xác thực JWT và trước khi định tuyến."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/gateway>
+
+
+Đưa LLM vào luồng xử lý thanh toán khó ở một điểm cốt lõi: đầu ra của mô hình mang tính xác suất, còn các side effect của settlement phải được kiểm soát và có thể audit. Guardrail không trao quyền quyết định cho mô hình. Nó giới hạn phạm vi sử dụng mô hình, kiểm tra đầu ra và cung cấp đường fallback khi mô hình không khả dụng hoặc không đáng tin.
+
+Bài viết này trình bày thiết kế `gateway-ai-guardrail` dựa trên Spring Boot, Kafka, hexagonal ports và OpenSearch. Nội dung gồm mô hình mối đe dọa, một cách triển khai cố ý không an toàn, và ranh giới triển khai an toàn hơn. Kiến trúc dưới đây là thiết kế đề xuất dựa trên repository và brief của bài viết; đây không phải khẳng định về một hệ thống production đã được xác minh độc lập.
+
+## Phạm vi và trách nhiệm
+
+**[SOURCE FACT]** Thiết kế được cung cấp đặt guardrail sau bước xác thực JWT và trước khi định tuyến request. Thiết kế sử dụng Kafka cho event, Spring Boot cho service, hexagonal ports cho các ranh giới và OpenSearch cho bản ghi audit quyết định. Thiết kế cũng mô tả thông tin xác thực BYOK (Bring Your Own Key) do caller chọn, được nhận diện bằng `X-FinPay-Key-Id`.
+
+**[ANALYSIS]** Guardrail nên kiểm tra dữ liệu văn bản tự do trước khi đưa dữ liệu đó vào request gửi tới mô hình, sau đó kiểm tra phản hồi trước khi bất kỳ component downstream nào sử dụng. Guardrail chỉ tạo recommendation (khuyến nghị), không phê duyệt hay từ chối thanh toán. Business rule xác định và hệ thống settlement vẫn là nguồn có thẩm quyền.
+
+Các yêu cầu thực tế là:
+
+- Xem lời gọi mô hình như một remote dependency tùy chọn, có timeout giới hạn, retry giới hạn và circuit breaker (cơ chế tạm dừng lời gọi sau nhiều lỗi liên tiếp).
+- Dùng `eventId` làm idempotency key (khóa chống xử lý lặp). Event bị redelivery không được tạo ra side effect settlement lần hai. Việc này cần một bản ghi deduplication bền vững và contract idempotency tại settlement boundary; chỉ dựa vào behavior của Kafka consumer là chưa đủ.
+- Không để API key xuất hiện trong source code, configuration, prompt, exception message hoặc log. Resolve key qua secret manager bằng key ID do caller cung cấp.
+- Audit các input và output cần thiết để replay quyết định, cùng model identifier, latency, kết quả validation và mọi override từ người hoặc rule. Dữ liệu thanh toán nhạy cảm vẫn phải tuân theo chính sách redaction và lưu trữ của hệ thống.
+- Xác định rõ fallback. Nếu mô hình timeout, circuit mở hoặc trả về output không hợp lệ, chuyển sang rule xác định hoặc manual review thay vì xem lỗi là approval.
+
+## Kiến trúc đề xuất
+
+**[PROPOSED DESIGN]** Một service Spring Boot theo hexagonal architecture có thể giữ decision logic độc lập với các adapter hạ tầng:
+
+```text
+gateway-ai-guardrail/
+├── application/           # use case và orchestration
+├── domain/                # model, port, policy xác định
+│   ├── ports/             # LlmPort, DecisionAuditPort, KeyProviderPort
+│   └── model/             # AnalysisRequest, GuardrailVerdict, DecisionRecord
+├── infrastructure/        # adapter LLM, Kafka, OpenSearch, secret manager
+└── bootstrap/             # configuration và wiring dependency
+```
+
+M
+Rewrite both into problem-driven style, preserve real engineering content. Write:
+  /tmp/fp2_7_gateway-ai-guardrail/gateway-ai-guardrail.en.md
+  /tmp/fp2_7_gateway-ai-guardrail/gateway-ai-guardrail.vi.md

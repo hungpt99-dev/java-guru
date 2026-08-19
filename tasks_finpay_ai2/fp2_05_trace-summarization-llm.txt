@@ -1,0 +1,108 @@
+You are a senior Staff Engineer. REWRITE the given FinPay AI blog (EN+VI) into a problem-driven engineering narrative.
+RULES:
+- Architecture = result of reasoning, not start. Structure: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure -> Lessons.
+- AI is an engineering component, not magic: false +/-, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. Emphasize AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: use "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End with 3-7 lessons + interview questions.
+- Bilingual EN+VI parity. Keep frontmatter, pubDatetime unchanged. Only modify the two files.
+
+ARTICLE ai/trace-summarization-llm
+CURRENT EN (rewrite to /tmp/fp2_5_trace-summarization-llm/trace-summarization-llm.en.md):
+---
+title: "Designing an LLM Service for Distributed Trace Summaries"
+description: "A practical design for turning an OpenTelemetry traceId into a bounded, auditable incident summary without giving an LLM authority over financial actions."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+An LLM can make a distributed trace easier to read, but it does not make the trace more trustworthy. The engineering problem is to reduce a large set of spans to useful context while preserving evidence, controlling cost and latency, and keeping the model outside the financial decision path.
+
+This article presents an illustrative Spring Boot design for `trace-summarization-llm`. It covers the boundary between domain code and provider-specific code, span selection, prompt construction, resilience, secret handling, idempotency, and auditability. The code and component names are a proposed design, not a claim about a particular company's production system.
+
+## Scope and guarantees
+
+> **[SOURCE FACT]** The input is an OpenTelemetry `traceId`, and the desired output is a human-readable explanation of the trace: what happened, which operation was slow, where an error occurred, and which operations were retried.
+
+> **[ANALYSIS]** A trace summary is an observability aid. It is not a source of truth and must not authorize a refund, release, reversal, or any other financial action. Those decisions require deterministic business rules and an appropriate control path.
+
+> **[PROPOSED DESIGN]** Before implementing the model adapter, define these guarantees:
+
+1. **No financial authority.** The model may describe observed evidence and state uncertainty. It must not return an operational decision that the application treats as authoritative.
+2. **Idempotency by `eventId`.** Producers and consumers commonly operate with at-least-once delivery. The consumer therefore records the event before performing work that must not be repeated. Exactly-once business behavior is an application-level outcome, not a property to assume from the broker.
+3. **Timeout, retry, and circuit breaker.** A model provider is an external dependency. A timeout limits how long a call occupies resources; a retry handles selected transient failures; a circuit breaker stops sending traffic while the dependency is unhealthy.
+4. **Bring your own key (BYOK).** A customer supplies the provider credential. The service uses a secret-manager reference and never hardcodes or logs the credential.
+5. **Auditability.** Store the input identity, selected evidence, prompt and provider result according to the applicable retention and privacy policy. Redact sensitive data before it enters prompts or logs. Human review and correction should also be recorded.
+
+These guarantees distinguish a summarizer from an autonomous agent. They also make the design testable without a live model provider.
+
+## The tempting implementation
+
+The following example is intentionally wrong. It illustrates the failure modes that appear when provider integration, domain behavior, and logging are placed in one class.
+
+```java
+// WRONG: illustrative anti-pattern; do not ship
+@Service
+public class TraceSummarizer {
+    private static final String API_KEY = "redacted"; // secret in source
+    private final RestTemplate rest = new RestTemplate();
+    private final SpanRepo spans;
+
+    public String summarize(String traceId) {
+        List<Span> all = spans.findAllByTraceId(traceId); /
+=== VI CURRENT ===
+---
+title: "Thiết kế service dùng LLM để tóm tắt distributed trace"
+description: "Thiết kế thực tế để chuyển một traceId của OpenTelemetry thành bản tóm tắt sự cố có giới hạn và có thể audit, nhưng không trao quyền quyết định tài chính cho LLM."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+LLM có thể giúp đọc distributed trace dễ hơn, nhưng không làm cho trace đáng tin cậy hơn. Bài toán kỹ thuật là rút gọn một tập span lớn thành context hữu ích, đồng thời giữ lại bằng chứng, kiểm soát chi phí và độ trễ, và giữ model nằm ngoài luồng quyết định tài chính.
+
+Bài viết này trình bày một thiết kế minh họa dùng Spring Boot cho `trace-summarization-llm`. Nội dung bao phủ ranh giới giữa domain code và provider-specific code, chọn span, xây dựng prompt, resilience, quản lý secret, idempotency và auditability. Code và tên component là thiết kế đề xuất, không phải tuyên bố về hệ thống production của một công ty cụ thể.
+
+## Phạm vi và các đảm bảo
+
+> **[SOURCE FACT]** Input là `traceId` của OpenTelemetry; output mong muốn là phần giải thích trace bằng ngôn ngữ dễ đọc: chuyện gì đã xảy ra, thao tác nào chậm, lỗi ở đâu và thao tác nào đã được retry.
+
+> **[ANALYSIS]** Bản tóm tắt trace là công cụ hỗ trợ observability. Nó không phải nguồn sự thật và không được cấp phép cho refund, release, reversal hay bất kỳ hành động tài chính nào. Các quyết định đó cần business rule xác định và control path phù hợp.
+
+> **[PROPOSED DESIGN]** Trước khi viết adapter cho model, hãy xác định các đảm bảo sau:
+
+1. **Không có quyền quyết định tài chính.** Model có thể mô tả bằng chứng quan sát được và nêu mức độ không chắc chắn. Model không được trả về một operational decision mà ứng dụng coi là có thẩm quyền.
+2. **Idempotency theo `eventId`.** Producer và consumer thường hoạt động với delivery at-least-once. Vì vậy consumer phải ghi nhận event trước khi thực hiện công việc không được lặp. Exactly-once trong nghiệp vụ là kết quả ở tầng ứng dụng, không phải thuộc tính có thể mặc định từ broker.
+3. **Timeout, retry và circuit breaker.** Model provider là dependency bên ngoài. Timeout giới hạn thời gian một request chiếm tài nguyên; retry xử lý một số lỗi tạm thời; circuit breaker ngừng gửi request khi dependency không khỏe.
+4. **Bring your own key (BYOK).** Khách hàng cung cấp credential của provider. Service dùng reference tới secret manager và không hardcode hoặc ghi log credential.
+5. **Auditability.** Lưu identity của input, bằng chứng đã chọn, prompt và kết quả provider theo retention policy và privacy policy áp dụng. Redact dữ liệu nhạy cảm trước khi đưa vào prompt hoặc log. Việc human review và correction cũng nên được ghi nhận.
+
+Các đảm bảo này phân biệt summarizer với một autonomous agent. Chúng cũng giúp kiểm thử thiết kế mà không cần gọi model provider thật.
+
+## Bản triển khai dễ mắc phải
+
+Ví dụ sau cố ý sai. Nó minh họa các lỗi thường xuất hiện khi provider integration, domain behavior và logging được đặt trong cùng một class.
+
+```java
+// WRONG: anti-pattern minh họa; không được ship
+@Service
+public class TraceSummarizer {
+    private static final String API_KEY = "redacted"; // secret trong source
+    private final RestTemplate rest = new RestTemplate();
+    private final SpanRepo spans;
+
+    public String summarize(String traceId) {
+        List<Span> all = spans.findAllByTraceId(traceId); // input không giới hạn
+        String prompt = "Summarize this trace:\n" + all
+            + "\nDecide if the
+Rewrite both into problem-driven style, preserve real engineering content. Write:
+  /tmp/fp2_5_trace-summarization-llm/trace-summarization-llm.en.md
+  /tmp/fp2_5_trace-summarization-llm/trace-summarization-llm.vi.md

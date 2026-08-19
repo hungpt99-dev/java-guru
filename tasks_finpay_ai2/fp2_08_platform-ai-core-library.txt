@@ -1,0 +1,100 @@
+You are a senior Staff Engineer. REWRITE the given FinPay AI blog (EN+VI) into a problem-driven engineering narrative.
+RULES:
+- Architecture = result of reasoning, not start. Structure: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure -> Lessons.
+- AI is an engineering component, not magic: false +/-, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. Emphasize AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: use "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End with 3-7 lessons + interview questions.
+- Bilingual EN+VI parity. Keep frontmatter, pubDatetime unchanged. Only modify the two files.
+
+ARTICLE ai/platform-ai-core-library
+CURRENT EN (rewrite to /tmp/fp2_8_platform-ai-core-library/platform-ai-core-library.en.md):
+---
+title: "A Shared AI Core Library for Microservices"
+description: "A practical design for shared LLM integration with BYOK credentials, resilience controls, idempotency, and auditable outcomes."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo referenced by the source material: <https://github.com/finpay-lab/platform>
+
+## The problem
+
+Adding an LLM call to one service is straightforward. Operating that call consistently across a microservice fleet is not. The integration needs credential isolation, bounded failure handling, duplicate-event protection, and an audit record that is useful after the fact.
+
+**[SOURCE FACT]** The source article describes three services with three different integration patterns: direct provider calls from a controller, an API key in `application.yml`, and a retry strategy that sends a failed event back to a dead-letter queue without a timeout. It also describes inconsistent `JsonObject` parsing, no shared telemetry, and an audit trail reduced to a `logger.info("done")` message.
+
+**[ANALYSIS]** Those are not separate LLM problems. They are platform concerns. A shared Spring Boot module can provide one contract for provider calls, credential lookup, resilience, deduplication, and decision auditing while leaving business-specific policy in the calling service.
+
+This article covers that boundary. It does not treat an LLM as a money-movement authority, and it does not claim that the implementation below is a complete production library.
+
+## Guardrails
+
+These are the non-negotiable rules in the proposed design:
+
+1. **AI is not the money decision-maker.** An LLM may enrich a deterministic or human decision with a fraud score, a suggested limit, or a risk label. The rule engine or an authorized person decides whether money is moved or blocked. The library therefore returns a scored, labeled, auditable observation rather than an `approve`/`reject` command.
+2. **Use caller-supplied `eventId` for idempotency.** Redelivery, a retry, or a double-click must not create another outcome for the same event. The library should make this an explicit contract, backed by an atomic claim in the outcome store.
+3. **Bound every provider call.** A timeout, bounded retries with backoff, and a circuit breaker prevent a failing provider from consuming the caller's resources indefinitely. These controls are complementary: a timeout bounds one attempt, retry handles selected transient failures, and the circuit breaker stops calls when failure is persistent.
+4. **Use BYOK without exposing secrets.** Each tenant supplies its own key. The key is kept in Vault or another secret manager, resolved by reference, rotated there, and excluded from logs, traces, and audit records.
+5. **Audit the result, not the secret.** Persist the prompt hash, model, latency, cost, key ID, and verdict to OpenSearch so the result can be queried for forensic analysis without storing the prompt or API key itself.
+
+## Architecture
+
+**[PROPOSED DESIGN]** Keep the use case in `domain/` dependent on ports only. Put Kafka, model providers, Redis, OpenSearch, and Vault integrations in `infrastructure/` adapters.
+
+```text
+                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
+  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
+  tx.risk      │            │              ▲                   ▲                ▲
+               │            │
+=== VI CURRENT ===
+---
+title: "Thư viện AI core dùng chung cho hệ thống microservice"
+description: "Thiết kế thực tế cho tích hợp LLM dùng chung với credential BYOK, cơ chế chống lỗi, idempotency và kết quả có audit."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo được nhắc đến trong tài liệu nguồn: <https://github.com/finpay-lab/platform>
+
+## Bài toán
+
+Thêm một lời gọi LLM vào một service khá đơn giản. Vận hành lời gọi đó nhất quán trên cả một fleet microservice thì không. Tích hợp cần cô lập credential, xử lý lỗi có giới hạn, chống xử lý trùng event và tạo audit record hữu ích khi cần điều tra.
+
+**[THÔNG TIN NGUỒN]** Tài liệu nguồn mô tả ba service với ba cách tích hợp khác nhau: gọi trực tiếp provider từ controller, đặt API key trong `application.yml`, và xử lý lỗi bằng cách gửi event lỗi trở lại dead-letter queue mà không có timeout. Tài liệu cũng mô tả việc parse `JsonObject` không nhất quán, không có telemetry dùng chung, và audit trail chỉ còn một thông báo `logger.info("done")`.
+
+**[PHÂN TÍCH]** Đây không phải là ba vấn đề LLM độc lập. Đây là các mối quan tâm của platform. Một module Spring Boot dùng chung có thể cung cấp cùng một contract cho việc gọi provider, tra credential, xử lý lỗi, deduplication và audit quyết định, trong khi policy nghiệp vụ vẫn nằm ở service gọi nó.
+
+Bài viết này tập trung vào ranh giới đó. LLM không được xem là bên có quyền quyết định việc chuyển tiền, và phần code dưới đây không được trình bày như một thư viện production hoàn chỉnh.
+
+## Guardrails
+
+Đây là các quy tắc không thể bỏ qua trong thiết kế đề xuất:
+
+1. **AI không quyết định việc chuyển tiền.** LLM có thể bổ sung thông tin cho quyết định của rule xác định (deterministic) hoặc con người, chẳng hạn fraud score, hạn mức đề xuất hoặc risk label. Rule engine hoặc người có thẩm quyền mới quyết định chuyển hay chặn tiền. Vì vậy thư viện trả về một observation có score, label và audit, thay vì một lệnh `approve`/`reject`.
+2. **Dùng `eventId` do bên gọi cung cấp để bảo đảm idempotency.** Redelivery, retry hoặc double-click không được tạo thêm outcome cho cùng một event. Thư viện nên biến đây thành contract rõ ràng, được bảo vệ bằng thao tác claim atomic trong outcome store.
+3. **Giới hạn mọi lời gọi provider.** Timeout, retry có giới hạn kèm backoff và circuit breaker ngăn provider lỗi chiếm tài nguyên của bên gọi vô thời hạn. Ba cơ chế có vai trò khác nhau: timeout giới hạn một attempt, retry xử lý một số lỗi tạm thời, còn circuit breaker ngắt lời gọi khi lỗi kéo dài.
+4. **Dùng BYOK nhưng không để lộ secret.** Mỗi tenant cung cấp key riêng. Key được giữ trong Vault hoặc secret manager khác, được tra cứu bằng reference, xoay vòng tại đó, và không xuất hiện trong log, trace hay audit record.
+5. **Audit kết quả, không audit secret.** Lưu prompt hash, model, latency, cost, key ID và verdict vào OpenSearch để truy vấn phục vụ forensic analysis, nhưng không lưu prompt hoặc API key.
+
+## Kiến trúc
+
+**[THIẾT KẾ ĐỀ XUẤT]** Giữ use case trong `domain/` và chỉ cho nó phụ thuộc vào các port. Đặt tích hợp Kafka, model provider, Redis, OpenSearch và Vault vào các adapter trong `infrastructure/`.
+
+```text
+                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
+  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
+  tx.risk      │            │              ▲                   ▲                ▲
+               │            │              │ adapters    
+Rewrite both into problem-driven style, preserve real engineering content. Write:
+  /tmp/fp2_8_platform-ai-core-library/platform-ai-core-library.en.md
+  /tmp/fp2_8_platform-ai-core-library/platform-ai-core-library.vi.md

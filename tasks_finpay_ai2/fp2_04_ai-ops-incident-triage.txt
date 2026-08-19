@@ -1,0 +1,142 @@
+You are a senior Staff Engineer. REWRITE the given FinPay AI blog (EN+VI) into a problem-driven engineering narrative.
+RULES:
+- Architecture = result of reasoning, not start. Structure: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure -> Lessons.
+- AI is an engineering component, not magic: false +/-, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. Emphasize AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: use "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End with 3-7 lessons + interview questions.
+- Bilingual EN+VI parity. Keep frontmatter, pubDatetime unchanged. Only modify the two files.
+
+ARTICLE ai/ai-ops-incident-triage
+CURRENT EN (rewrite to /tmp/fp2_4_ai-ops-incident-triage/ai-ops-incident-triage.en.md):
+---
+title: "AI Ops Incident Triage with Alerts and Traces"
+description: "How FinPay's observability stack turns Prometheus alerts and OpenTelemetry traces into an auditable root-cause hypothesis and runbook recommendation."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: https://github.com/finpay-lab/observability
+
+## The problem
+
+When a settlement batch is delayed, several symptoms can appear at once: latency rises, the error rate changes, and dead-letter queues fill. An on-call engineer must decide which alerts describe the same incident, where the failure started, and whether a proposed response could affect money. The difficult part is not producing a summary. It is making the summary safe to use in an operational workflow.
+
+**[SOURCE FACT]** The `ai-ops-incident-triage` service is the fourth feature in the FinPay observability platform. It uses an LLM for reading, correlation, and first-pass classification. It does not make money-related decisions.
+
+**[ANALYSIS]** The useful boundary is therefore narrow: the model proposes a severity, a root-cause hypothesis, and a recommendation; deterministic code, a human approver, and the ledger remain responsible for actions.
+
+This article covers the Spring Boot, Kafka, and OpenSearch design, the trace-enrichment path, and the guardrails around the LLM. The code is intentionally small; the surrounding controls are the important part.
+
+## Service boundary
+
+**[SOURCE FACT]** The service:
+
+1. Consumes alert events and correlated distributed traces from Kafka.
+2. Enriches each alert with trace context queried from OpenSearch.
+3. Sends a redacted, schema-constrained prompt to a BYOK (bring your own key) LLM.
+4. Applies idempotency, timeout, retry, circuit breaker, human approval for money-related actions, and audit controls.
+5. Publishes the triage decision and audit entry to Kafka and then OpenSearch.
+
+## Architecture
+
+**[SOURCE FACT]** The service uses hexagonal architecture. The domain core depends on ports, not on Kafka, Spring AI, or OpenSearch. Adapters are under `infrastructure/`.
+
+```
+com.finpay.observability
+├── domain
+│   ├── model        IncidentContext, TriageOutcome, Severity, Recommendation
+│   ├── port         IncidentTriagePort, IdempotencyPort, AuditPort, ApprovalPort
+│   └── service      TriageOrchestrator (orchestration, no framework dependencies)
+├── infrastructure
+│   ├── kafka        IncidentConsumer, AuditProducer
+│   ├── ai           OpenAiIncidentTriageAdapter, LlmProperties
+│   ├── opensearch   OpenSearchIdempotencyStore, OpenSearchTraceEnricher
+│   └── config       Resilience4jConfig
+```
+
+```
+ alerts + traces ──▶ Kafka ──▶ IncidentConsumer ──▶ domain (TriageOrchestrator)
+                                                          │
+                                          IncidentTriagePort (LLM) ──▶ BYOK model
+                                                          │
+                                     fallback ──▶ rules engine (no LLM)
+                                                          │
+                             money recommendation? ──▶ human ApprovalTask
+                                                          │
+                                   audit ──▶ Kafka("finpay.observability.audit") ──▶ OpenSearch
+```
+
+The domain model uses immutable records. That is a practical choice when model output must cross an audit boundary: the value being recorded should not change underneath the 
+=== VI CURRENT ===
+---
+title: "Triage sự cố AI Ops bằng cảnh báo và trace"
+description: "Cách tầng observability của FinPay chuyển cảnh báo Prometheus và trace OpenTelemetry thành giả thuyết nguyên nhân gốc cùng khuyến nghị runbook có thể kiểm toán."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: https://github.com/finpay-lab/observability
+
+## Bài toán
+
+Khi một lô quyết toán bị chậm, nhiều triệu chứng có thể xuất hiện cùng lúc: độ trễ tăng, tỷ lệ lỗi thay đổi và các hàng đợi dead-letter đầy lên. Kỹ sư trực ca phải xác định cảnh báo nào thuộc cùng một sự cố, lỗi bắt đầu ở đâu và một phương án xử lý có thể ảnh hưởng đến tiền hay không. Điểm khó không phải là tạo một bản tóm tắt, mà là đưa bản tóm tắt đó vào quy trình vận hành mà không mở thêm đường rủi ro.
+
+**[SOURCE FACT]** Dịch vụ `ai-ops-incident-triage` là tính năng thứ tư trong nền tảng observability của FinPay. Dịch vụ dùng LLM để đọc dữ liệu, đối chiếu tương quan và phân loại bước đầu. Dịch vụ không đưa ra quyết định liên quan đến tiền.
+
+**[ANALYSIS]** Vì vậy, ranh giới phù hợp là ranh giới hẹp: mô hình đề xuất mức độ nghiêm trọng, giả thuyết nguyên nhân gốc và khuyến nghị; code xác định, người phê duyệt và sổ cái chịu trách nhiệm về hành động.
+
+Bài viết trình bày thiết kế Spring Boot, Kafka và OpenSearch, đường đi làm giàu trace và các guardrail quanh LLM. Code được giữ ngắn; phần kiểm soát bao quanh mô hình mới là trọng tâm.
+
+## Ranh giới dịch vụ
+
+**[SOURCE FACT]** Dịch vụ:
+
+1. Tiêu thụ sự kiện cảnh báo và distributed trace đã tương quan từ Kafka.
+2. Làm giàu mỗi cảnh báo bằng trace context truy vấn từ OpenSearch.
+3. Gửi prompt đã khử dữ liệu nhạy cảm và bị ràng buộc theo schema tới LLM BYOK (bring your own key).
+4. Áp dụng idempotency, timeout, retry, circuit breaker, phê duyệt của con người cho thao tác liên quan đến tiền và audit.
+5. Xuất bản quyết định triage cùng audit entry lên Kafka rồi OpenSearch.
+
+## Kiến trúc
+
+**[SOURCE FACT]** Dịch vụ dùng kiến trúc hexagonal. Lõi domain phụ thuộc vào port, không phụ thuộc Kafka, Spring AI hay OpenSearch. Các adapter nằm dưới `infrastructure/`.
+
+```
+com.finpay.observability
+├── domain
+│   ├── model        IncidentContext, TriageOutcome, Severity, Recommendation
+│   ├── port         IncidentTriagePort, IdempotencyPort, AuditPort, ApprovalPort
+│   └── service      TriageOrchestrator (điều phối, không phụ thuộc framework)
+├── infrastructure
+│   ├── kafka        IncidentConsumer, AuditProducer
+│   ├── ai           OpenAiIncidentTriageAdapter, LlmProperties
+│   ├── opensearch   OpenSearchIdempotencyStore, OpenSearchTraceEnricher
+│   └── config       Resilience4jConfig
+```
+
+```
+ alerts + traces ──▶ Kafka ──▶ IncidentConsumer ──▶ domain (TriageOrchestrator)
+                                                          │
+                                          IncidentTriagePort (LLM) ──▶ BYOK model
+                                                          │
+                                     fallback ──▶ rules engine (không LLM)
+                                                          │
+                             money recommendation? ──▶ human ApprovalTask
+                                                          │
+                                   audit ──▶ Kafka("finpay.observability.audit") ──▶ OpenSearch
+```
+
+Domain model dùng các record bất biến. Đây là lựa chọn thực tế khi output của model đi qua ranh giới audit: giá trị được ghi không nên thay đổi sau khi audit event được tạo.
+Rewrite both into problem-driven style, preserve real engineering content. Write:
+  /tmp/fp2_4_ai-ops-incident-triage/ai-ops-incident-triage.en.md
+  /tmp/fp2_4_ai-ops-incident-triage/ai-ops-incident-triage.vi.md

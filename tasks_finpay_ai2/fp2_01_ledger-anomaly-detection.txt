@@ -1,0 +1,148 @@
+You are a senior Staff Engineer. REWRITE the given FinPay AI blog (EN+VI) into a problem-driven engineering narrative.
+RULES:
+- Architecture = result of reasoning, not start. Structure: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure -> Lessons.
+- AI is an engineering component, not magic: false +/-, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. Emphasize AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: use "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End with 3-7 lessons + interview questions.
+- Bilingual EN+VI parity. Keep frontmatter, pubDatetime unchanged. Only modify the two files.
+
+ARTICLE ai/ledger-anomaly-detection
+CURRENT EN (rewrite to /tmp/fp2_1_ledger-anomaly-detection/ledger-anomaly-detection.en.md):
+---
+title: "Designing Ledger Anomaly Detection with Kafka and Prometheus"
+description: "A guarded design for scoring ledger events asynchronously without putting AI on the money path."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> **Repository:** https://github.com/finpay-lab/ledger-service
+
+
+Anomaly detection is useful only if it does not make ledger posting less reliable. The difficult part is not calling a model. It is keeping model latency, provider failures, duplicate messages, secrets, and audit requirements out of the transaction that moves money.
+
+This article describes the supplied `ledger-service` design and a safer integration boundary: post the ledger entry first, publish an event, score it asynchronously, and expose the scoring path through Prometheus. AI produces a signal. Deterministic policy and, where required, a human approval flow make the financial decision.
+
+## What is factual and what is design
+
+**[SOURCE FACT]** The supplied service description identifies `ledger-service` as a Spring Boot service. It records each payment as a double-entry `debit`/`credit` pair in one database transaction, publishes ledger events to Kafka on `ledger.events`, and makes them searchable in OpenSearch. The stated product goal is to flag suspicious ledger patterns before reconciliation and before the batch job at 2 AM.
+
+**[SOURCE FACT]** The repository is attributed to FinPay in the supplied material. The repository link is retained above; no additional company or platform claims are made here.
+
+**[ANALYSIS]** The model must be an observer of the money path, not a dependency of it. The rest of this article is a proposed boundary for that requirement. Code marked as proposed is illustrative and should be adapted to the actual service.
+
+## 1. Keep the money path small
+
+The core invariant is a single database transaction containing the two ledger entries:
+
+```java
+// application/PostingService.java
+@Transactional
+public void post(LedgerCommand cmd) {
+    ledger.entry(new Entry(cmd.eventId(), DEBIT, cmd.partyId(), cmd.amount()));
+    ledger.entry(new Entry(cmd.eventId(), CREDIT, cmd.counterparty(), cmd.amount()));
+}
+```
+
+**[ANALYSIS]** Any additional work in this method competes for the same database transaction, connection, and row locks. A remote model call is especially unsuitable here: its timeout and retry behavior are outside the ledger's control.
+
+## 2. What not to do
+
+The following example is intentionally unsafe. It shows the failure modes that the design must exclude.
+
+```java
+// WRONG: remote AI call on the money path, hardcoded secret, no safeguards.
+public class PaymentProcessor {
+    private static final String OPENAI_API_KEY = "sk-proj-...";
+
+    @Transactional
+    public void postLedger(PaymentEvent event) {
+        ledger.post(debit(event), credit(event));
+        String answer = openAiClient.ask(prompt(event), OPENAI_API_KEY);
+        if ("YES".equals(answer)) {
+            fundsService.hold(event.eventId());
+        }
+        auditRepo.save(new AuditRow(event.eventId(), answer));
+    }
+}
+```
+
+**[ANALYSIS]** This has several independent problems:
+
+- The database transaction remains open while the service waits for a third-party API. As an illustrative assumption, a model with a 2-second p95 would hold locks for that wait, consume a connection, and add latency to unrelated ledger posts.
+- There is no timeout, retry policy, circuit breaker, or fallback. A p
+=== VI CURRENT ===
+---
+title: "Thiết kế phát hiện bất thường trong ledger với Kafka và Prometheus"
+description: "Thiết kế có guardrail để chấm điểm sự kiện ledger bất đồng bộ mà không đưa AI vào luồng xử lý tiền."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> **Repository:** https://github.com/finpay-lab/ledger-service
+
+
+Phát hiện bất thường chỉ có ích khi nó không làm giảm độ tin cậy của việc ghi ledger. Khó khăn không nằm ở việc gọi một model, mà ở việc giữ latency của model, lỗi từ provider, message trùng lặp, secret và yêu cầu audit ra khỏi transaction đang di chuyển tiền.
+
+Bài viết này mô tả thiết kế `ledger-service` được cung cấp và một ranh giới tích hợp an toàn hơn: ghi ledger trước, publish event, chấm điểm bất đồng bộ, rồi xuất trạng thái của luồng chấm điểm qua Prometheus. AI tạo ra một tín hiệu. Chính sách xác định và, khi cần, quy trình phê duyệt của con người mới đưa ra quyết định tài chính.
+
+## Phân biệt dữ kiện và thiết kế
+
+**[SOURCE FACT]** Mô tả service được cung cấp xác định `ledger-service` là một Spring Boot service. Service ghi mỗi payment thành một cặp `debit`/`credit` theo mô hình double-entry trong một database transaction, publish ledger event lên Kafka với topic `ledger.events`, và cung cấp dữ liệu để tìm kiếm trong OpenSearch. Mục tiêu nghiệp vụ được nêu là gắn cờ các mẫu ledger đáng ngờ trước khi đối soát và trước batch job lúc 2 giờ sáng.
+
+**[SOURCE FACT]** Tài liệu được cung cấp gắn repository với FinPay. Link repository được giữ ở đầu bài; bài viết không thêm tuyên bố cụ thể nào khác về công ty hoặc nền tảng.
+
+**[ANALYSIS]** Model phải quan sát luồng tiền, không phải là dependency của luồng tiền. Các phần còn lại là ranh giới được đề xuất để đáp ứng yêu cầu đó. Những đoạn được đánh dấu là thiết kế đề xuất chỉ mang tính minh họa và cần được điều chỉnh theo service thực tế.
+
+## 1. Giữ luồng tiền nhỏ
+
+Bất biến cốt lõi là một database transaction chứa hai ledger entry:
+
+```java
+// application/PostingService.java
+@Transactional
+public void post(LedgerCommand cmd) {
+    ledger.entry(new Entry(cmd.eventId(), DEBIT, cmd.partyId(), cmd.amount()));
+    ledger.entry(new Entry(cmd.eventId(), CREDIT, cmd.counterparty(), cmd.amount()));
+}
+```
+
+**[ANALYSIS]** Mọi công việc thêm vào method này đều tranh chấp cùng database transaction, connection và row lock. Một remote model call đặc biệt không phù hợp ở đây vì timeout và retry của nó nằm ngoài quyền kiểm soát của ledger.
+
+## 2. Những điều không nên làm
+
+Ví dụ dưới đây cố ý không an toàn. Nó cho thấy các failure mode mà thiết kế phải loại trừ.
+
+```java
+// WRONG: gọi AI trên luồng tiền, hardcode secret, không có guardrail.
+public class PaymentProcessor {
+    private static final String OPENAI_API_KEY = "sk-proj-...";
+
+    @Transactional
+    public void postLedger(PaymentEvent event) {
+        ledger.post(debit(event), credit(event));
+        String answer = openAiClient.ask(prompt(event), OPENAI_API_KEY);
+        if ("YES".equals(answer)) {
+            fundsService.hold(event.eventId());
+        }
+        auditRepo.save(new AuditRow(event.eventId(), answer));
+    }
+}
+```
+
+**[ANALYSIS]** Đoạn code có nhiều vấn đề độc lập:
+
+- Database transaction vẫn mở trong khi service chờ third-party API. Theo giả định minh họa, một model có p95 là 2 giây sẽ giữ lock trong thời gian chờ đó, chiếm một connection và làm tăng latency của các lần ghi ledger không liên quan.
+- Không có timeout, retry policy, circuit breaker hay fallback. Vì vậ
+Rewrite both into problem-driven style, preserve real engineering content. Write:
+  /tmp/fp2_1_ledger-anomaly-detection/ledger-anomaly-detection.en.md
+  /tmp/fp2_1_ledger-anomaly-detection/ledger-anomaly-detection.vi.md

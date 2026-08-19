@@ -1,0 +1,112 @@
+You are a senior Staff Engineer. REWRITE the given FinPay AI blog (EN+VI) into a problem-driven engineering narrative.
+RULES:
+- Architecture = result of reasoning, not start. Structure: Problem -> Why Hard -> Naive Design -> Why It Breaks -> Hard Problems -> Trade-offs -> Better Design -> Failure -> Lessons.
+- AI is an engineering component, not magic: false +/-, nondeterminism, model/prompt versioning, latency/cost, rate limits, outages, timeouts, retries, fallback. Emphasize AI Signal -> Policy -> Business Decision.
+- Idempotency correct: show exists()-race, then real mechanisms (unique constraint, atomic insert, SETNX, outbox/inbox, idempotency keys). Distinguish idempotent storage vs side effects.
+- Capacity with equations (Concurrency = Throughput x Latency). Kafka=replay source, DB=system of record, OpenSearch=read model.
+- Audit trail: transaction_id, event_id, model_version, prompt_version, policy_version, decision, reason.
+- Observability: business + system metrics; NEVER use transaction_id/account_id as Prometheus labels.
+- Security: PII, data minimization, no casual full-transaction to external AI.
+- NO fabricated production claims. FinPay is reference/fictional: use "a production-oriented design would...". Never claim "we deployed".
+- Code only to prove a point (WRONG then RIGHT). Small diagrams answering one question.
+- End with 3-7 lessons + interview questions.
+- Bilingual EN+VI parity. Keep frontmatter, pubDatetime unchanged. Only modify the two files.
+
+ARTICLE ai/kyc-document-intake-llm
+CURRENT EN (rewrite to /tmp/fp2_6_kyc-document-intake-llm/kyc-document-intake-llm.en.md):
+---
+title: "Designing a KYC Document Intake Pipeline with Vision LLMs"
+description: "A practical design for extracting KYC fields from identity documents, validating them with deterministic rules, and routing uncertain cases to human review."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/identity-service>
+
+
+KYC (Know Your Customer) document intake looks simple until it has to handle bad images, different document formats, duplicate delivery, provider failures, and audit requirements. A vision language model (VLM) can help extract fields from an identity document, but it should not be the system of record or the final decision-maker.
+
+This article describes a boundary-first design for the `kyc-document-intake-llm` feature: normalize an upload into a domain command, extract structured fields, apply deterministic checks, use an LLM only for questions that need judgment, and route uncertain results to human review. It also contrasts that design with a common synchronous implementation and explains the failure modes that need explicit handling.
+
+The code and package tree below are illustrative. They show the intended boundaries; they are not evidence that a particular provider, model, or production incident exists.
+
+## Pipeline
+
+```text
+DocumentUploaded (Kafka) -> IntakeCommand -> VisionExtractionPort (VLM)
+     |                                              |
+     +-> DocumentSnapshot (domain model)            +-> StructuredFields + Confidence
+                         |                                      |
+                         v                                      v
+              FraudScreeningPort <- RiskAssessment (domain) -> LlmJudgePort
+                         |                                      |
+                         v                                      v
+                DecisionEvent -> outbox -> Kafka -> OpenSearch (decision index)
+```
+
+**[SOURCE FACT]** The supplied design uses `DocumentUploaded` on Kafka, an S3 key and `eventId`, a vision extraction port, structured fields with confidence, a rule-based fraud check, an LLM judge, an outbox, Kafka, and OpenSearch.
+
+**[PROPOSED DESIGN]** The processing sequence is:
+
+1. Kafka delivers `DocumentUploaded`. The event should carry an object reference, such as an S3 key, and an `eventId`; the consumer should not depend on a web multipart type.
+2. An adapter maps the event to an `IntakeCommand` and a `DocumentSnapshot`.
+3. A vision adapter sends the document to a multimodal model and returns a typed result. The result includes field values, confidence, provider metadata, and an explicit extraction status rather than free-form prose.
+4. A deterministic rule engine checks constraints such as allowed document type, checksum consistency, and expiry. These checks remain ordinary application code.
+5. An LLM judge may answer open-ended questions, such as whether the person in a selfie appears to match the identity document. Its result is evidence, not an approval. Store the result and rationale needed for review, subject to the application's privacy policy.
+6. A decision is persisted and an event is published through an outbox. OpenSearch can support retrieval and search; it should not be treated as the only durable source unless that is an explicit storage decision.
+
+## Hexagonal boundaries
+
+**[SOURCE FACT]** The supplied package layout places domain code under `domain/` and int
+=== VI CURRENT ===
+---
+title: "Thiết kế pipeline tiếp nhận tài liệu KYC bằng Vision LLM"
+description: "Thiết kế thực tế để trích xuất trường KYC từ giấy tờ định danh, kiểm tra bằng các rule xác định và chuyển các trường hợp không chắc chắn sang người duyệt."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/identity-service>
+
+
+Tiếp nhận giấy tờ KYC (Know Your Customer) chỉ có vẻ đơn giản cho đến khi hệ thống phải xử lý ảnh kém chất lượng, nhiều định dạng giấy tờ, sự kiện gửi trùng, lỗi từ nhà cung cấp và yêu cầu audit. Vision language model (VLM, mô hình ngôn ngữ có khả năng xử lý hình ảnh) có thể hỗ trợ trích xuất trường dữ liệu, nhưng không nên là hệ thống lưu trữ chuẩn hay bên tự quyết định cuối cùng.
+
+Bài viết trình bày một thiết kế ưu tiên ranh giới cho feature `kyc-document-intake-llm`: chuẩn hóa file tải lên thành domain command, trích xuất các trường có cấu trúc, áp dụng các kiểm tra xác định, chỉ dùng LLM cho những câu hỏi cần đánh giá và chuyển kết quả không chắc chắn sang người duyệt. Bài viết cũng đối chiếu thiết kế này với một cách triển khai synchronous phổ biến và giải thích các failure mode cần xử lý rõ ràng.
+
+Code và package tree dưới đây mang tính minh họa. Chúng mô tả các ranh giới dự kiến, không phải bằng chứng về một provider, model hay sự cố production cụ thể.
+
+## Pipeline
+
+```text
+DocumentUploaded (Kafka) -> IntakeCommand -> VisionExtractionPort (VLM)
+     |                                              |
+     +-> DocumentSnapshot (domain model)            +-> StructuredFields + Confidence
+                         |                                      |
+                         v                                      v
+              FraudScreeningPort <- RiskAssessment (domain) -> LlmJudgePort
+                         |                                      |
+                         v                                      v
+                DecisionEvent -> outbox -> Kafka -> OpenSearch (decision index)
+```
+
+**[SOURCE FACT]** Thiết kế được cung cấp sử dụng `DocumentUploaded` trên Kafka, một S3 key và `eventId`, một vision extraction port, các trường có cấu trúc kèm confidence, một fraud check dựa trên rule, một LLM judge, outbox, Kafka và OpenSearch.
+
+**[PROPOSED DESIGN]** Trình tự xử lý:
+
+1. Kafka chuyển `DocumentUploaded`. Event nên chứa một object reference, chẳng hạn S3 key, cùng `eventId`; consumer không nên phụ thuộc vào kiểu multipart của web.
+2. Adapter ánh xạ event thành `IntakeCommand` và `DocumentSnapshot`.
+3. Vision adapter gửi tài liệu tới multimodal model và trả về một kết quả có kiểu rõ ràng. Kết quả gồm giá trị các trường, confidence, metadata của provider và trạng thái extraction cụ thể, thay vì văn xuôi tự do.
+4. Rule engine xác định kiểm tra các ràng buộc như loại giấy tờ được phép, checksum có nhất quán hay không và giấy tờ đã hết hạn chưa. Các kiểm tra này vẫn là application code thông thường.
+5. LLM judge có thể trả lời câu hỏi mở, chẳng hạn người trong ảnh selfie có vẻ khớp với người trên giấy tờ hay không. Kết quả chỉ là bằng chứng, không phải quyết định phê duyệt. Lưu kết quả và rationale cần cho việc review, tuân theo chính sách bảo mật của ứng dụng.
+6. Decision được lưu và event được phát hành qua outbox. OpenSearch có thể phục vụ việc truy xuất và tìm kiếm; không nên coi nó là nguồn dữ liệu bền vững duy nhất nếu đó chưa phải quyết định rõ ràng về storage.
+
+## Ranh giới hexagonal
+
+**[SOURCE FACT]** Package layo
+Rewrite both into problem-driven style, preserve real engineering content. Write:
+  /tmp/fp2_6_kyc-document-intake-llm/kyc-document-intake-llm.en.md
+  /tmp/fp2_6_kyc-document-intake-llm/kyc-document-intake-llm.vi.md
