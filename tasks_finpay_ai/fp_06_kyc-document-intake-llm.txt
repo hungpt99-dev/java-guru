@@ -1,0 +1,334 @@
+You are a senior Staff/Principal Engineer and technical writer. REWRITE the given FinPay AI blog article pair (EN + VI) into a problem-driven engineering narrative.
+
+CORE PRINCIPLE: Architecture must be the RESULT of engineering reasoning, not the starting point. Do NOT start with a component diagram and explain each box. Instead: Real Problem -> Why It Matters -> Naive Solution -> Why It Breaks -> Hard Engineering Problems -> Trade-offs -> Better Design -> Failure Scenarios -> Final Architecture -> Lessons.
+
+WRITING STYLE: like a BigTech engineering blog + Staff design review + system-design interview + production postmortem. NOT generated docs, marketing, or a tech tutorial. Explain WHY before WHAT. Reasoning first, technology second.
+
+EVERY ARTICLE MUST:
+- Begin with a concrete situation/business problem, then the engineering question.
+- Show the NAIVE design first (small diagram), then ATTACK it: what happens at 10K TPS? when AI takes 2s/10s? when provider down? when payment succeeds but AI fails? on Kafka retry? on duplicate/replay? who has authority to block?
+- Treat AI as an engineering component, NOT magic: discuss false positives/negatives, nondeterminism, model/prompt versioning, inference latency/cost, rate limits, provider outages, timeouts, retries, hallucination, confidence, evaluation, monitoring, fallback. Emphasize: AI Signal -> Policy -> Business Decision (NOT AI -> Block Money).
+- For fraud/anomaly: discuss Rules vs Statistical vs ML vs LLM and WHY each fits.
+- Include non-obvious problems (the failure mode that looks harmless, what breaks first, replay cost, dependency down, under load, model change).
+- Failure scenarios explicit: dependency unavailable, timeout, partial failure, duplicate/out-of-order event, consumer crash/rebalance, retry storm, poison message, backpressure, queue saturation, DB failure, AI provider failure, model regression, rollback, replay.
+- Capacity reasoned with equations (Concurrency = Throughput x Latency). Numbers need a reason; never newFixedThreadPool(4) without why.
+- Idempotency technically correct: show the exists()-check race (two consumers both see false), then real mechanisms (unique constraint, atomic insert, Redis SETNX, transactional outbox/inbox, deterministic ids, idempotency keys). Distinguish idempotent STORAGE from idempotent SIDE EFFECTS.
+- Separate event source from query store: Kafka = replay source, DB/Ledger = system of record, OpenSearch = read/index model. If index lost -> replay -> rebuild.
+- Auditability beyond logging: preserve transaction_id, event_id, timestamp, features, risk_score, decision, model_version, prompt_version, provider, reason, policy_version. Discuss reproducibility.
+- Observability = business + system: transactions_processed, anomalies_detected, false_positive_rate, false_negative_rate, review_rate, AI_timeout_rate, AI_cost, model_error_rate, model_version, decision_distribution. Cardinality risk: NEVER use transaction_id/account_id as Prometheus labels.
+- Security/privacy: PII, data minimization, encryption, access control, audit access, AI provider data handling, prompt leakage, logging sensitive data, retention. Do NOT casually send entire transaction to external AI.
+- LANGUAGE: precise engineering English/Vietnamese. Avoid "money flow is sacred", "guardian of ledger", "AI watches every transaction", "non-negotiable", "fights chaos". Use: "The ledger path has strict consistency requirements while anomaly detection tolerates eventual processing; keeping them on separate paths lets each fail independently."
+- NO fabricated production claims. FinPay is a fictional/reference system. Use "A production-oriented design would…", "If FinPay reached X TPS…", "One approach is…". Do NOT claim "we deployed to production" or invent incidents/benchmarks/latency/cost.
+- Cite authoritative sources where useful (official engineering blogs/docs/papers). NEVER invent URLs or attribute architectures to Google/Netflix/Uber/Stripe/Amazon unless a real source supports it.
+- Code only when it proves a point (show WRONG then RIGHT, with the race condition). Small diagrams that answer ONE question each.
+
+RECOMMENDED STRUCTURE (adapt per article):
+# Title
+## The Problem
+## Why This Is Harder Than It Looks
+## The Naive Design
+## Where the Naive Design Breaks
+## The First Design Decision
+## The Hard Engineering Problems (Problem 1/2/3)
+## Design Options (A/B/C)
+## Trade-offs
+## The Architecture
+## Failure Scenarios
+## Capacity & Performance
+## Security & Privacy
+## Observability
+## AI-Specific Considerations
+## What We Would Do Differently
+## Key Lessons
+## Interview Questions
+
+END with 3-7 concrete lessons the reader can reuse elsewhere.
+
+BILINGUAL: produce EN and VI versions with SAME depth, SAME code/diagrams, faithful VI translation. Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — improve title if needed, keep pubDatetime unchanged. Only modify the two given files.
+
+ARTICLE #6: ai/kyc-document-intake-llm
+CURRENT EN (rewrite to /tmp/fp_6_kyc-document-intake-llm/kyc-document-intake-llm.en.md):
+=== EN CURRENT ===
+---
+title: "Designing a KYC Document Intake Pipeline with Vision LLMs"
+description: "A practical design for extracting KYC fields from identity documents, validating them with deterministic rules, and routing uncertain cases to human review."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/identity-service>
+
+
+KYC (Know Your Customer) document intake looks simple until it has to handle bad images, different document formats, duplicate delivery, provider failures, and audit requirements. A vision language model (VLM) can help extract fields from an identity document, but it should not be the system of record or the final decision-maker.
+
+This article describes a boundary-first design for the `kyc-document-intake-llm` feature: normalize an upload into a domain command, extract structured fields, apply deterministic checks, use an LLM only for questions that need judgment, and route uncertain results to human review. It also contrasts that design with a common synchronous implementation and explains the failure modes that need explicit handling.
+
+The code and package tree below are illustrative. They show the intended boundaries; they are not evidence that a particular provider, model, or production incident exists.
+
+## Pipeline
+
+```text
+DocumentUploaded (Kafka) -> IntakeCommand -> VisionExtractionPort (VLM)
+     |                                              |
+     +-> DocumentSnapshot (domain model)            +-> StructuredFields + Confidence
+                         |                                      |
+                         v                                      v
+              FraudScreeningPort <- RiskAssessment (domain) -> LlmJudgePort
+                         |                                      |
+                         v                                      v
+                DecisionEvent -> outbox -> Kafka -> OpenSearch (decision index)
+```
+
+**[SOURCE FACT]** The supplied design uses `DocumentUploaded` on Kafka, an S3 key and `eventId`, a vision extraction port, structured fields with confidence, a rule-based fraud check, an LLM judge, an outbox, Kafka, and OpenSearch.
+
+**[PROPOSED DESIGN]** The processing sequence is:
+
+1. Kafka delivers `DocumentUploaded`. The event should carry an object reference, such as an S3 key, and an `eventId`; the consumer should not depend on a web multipart type.
+2. An adapter maps the event to an `IntakeCommand` and a `DocumentSnapshot`.
+3. A vision adapter sends the document to a multimodal model and returns a typed result. The result includes field values, confidence, provider metadata, and an explicit extraction status rather than free-form prose.
+4. A deterministic rule engine checks constraints such as allowed document type, checksum consistency, and expiry. These checks remain ordinary application code.
+5. An LLM judge may answer open-ended questions, such as whether the person in a selfie appears to match the identity document. Its result is evidence, not an approval. Store the result and rationale needed for review, subject to the application's privacy policy.
+6. A decision is persisted and an event is published through an outbox. OpenSearch can support retrieval and search; it should not be treated as the only durable source unless that is an explicit storage decision.
+
+## Hexagonal boundaries
+
+**[SOURCE FACT]** The supplied package layout places domain code under `domain/` and integrations under `infrastructure/`:
+
+```text
+src/main/java/com/finpay/identity/kyc/
+├── domain/                      # pure Java, no Spring or SDK imports
+│   ├── model/
+│   │   ├── DocumentSnapshot.java
+│   │   ├── StructuredFields.java
+│   │   ├── Confidence.java
+│   │   ├── RiskAssessment.java
+│   │   ├── Decision.java
+│   │   └── KycEvent.java
+│   ├── ports/
+│   │   ├── in/IntakeUseCase.java
+│   │   ├── in/AuditUseCase.java
+│   │   └── out/
+│   │       ├── VisionExtractionPort.java
+│   │       ├── LlmJudgePort.java
+│   │       ├── DecisionStorePort.java
+│   │       ├── KycEventPublisherPort.java
+│   │       └── FraudCheckPort.java
+│   └── service/
+│       ├── DocumentIntakeService.java
+│       └── DecisionEngine.java
+└── infrastructure/              # Spring, Kafka, OpenSearch, and SDK adapters
+    ├── kafka/
+    │   ├── DocumentUploadedConsumer.java
+    │   └── DecisionEventProducer.java
+    ├── openai/
+    │   ├── OpenAiVisionAdapter.java
+    │   └── OpenAiJudgeAdapter.java
+    ├── opensearch/
+    │   ├── DecisionDocument.java
+    │   └── OpenSearchDecisionStore.java
+    └── audit/
+        └── AuditLogWriter.java
+```
+
+**[ANALYSIS]** Keeping provider SDKs out of the domain gives the application a stable contract for extraction and judgment. It also makes the decision engine testable without a network call. Provider selection, prompt construction, token limits, timeout, retry, and response parsing belong in adapters or application services, not in a controller.
+
+Do not claim that a provider can be replaced in a particular time or that a price change caused a particular migration unless those facts are documented. The architectural benefit is the smaller change surface, not a guaranteed migration schedule.
+
+## The naive synchronous version
+
+This abbreviated example is intentionally illustrative. It shows the coupling that the proposed design avoids.
+
+```java
+@RestController
+public class KycIntakeController {
+    private final ProviderClient providerClient;
+    private final JdbcTemplate jdbcTemplate;
+
+    @PostMapping("/kyc/documents")
+    public Map<String, Object> intake(@RequestParam("file") MultipartFile file)
+            throws IOException {
+        String base64 = Base64.getEncoder().encodeToString(file.getBytes());
+
+        ProviderResult result = providerClient.extract(
+                "Extract fullName, docNumber, dateOfBirth, expiryDate, "
+                        + "documentType, and country as JSON.",
+                "data:image/jpeg;base64," + base64);
+        String json = result.content();
+
+        String name = extract(json, "fullName");
+        String docNumber = extract(json, "docNumber");
+        jdbcTemplate.update("INSERT INTO kyc_documents (data) VALUES (?)", json);
+
+        return Map.of("approved", name != null && docNumber != null);
+    }
+}
+```
+
+**[ANALYSIS]** This version has several independent problems:
+
+1. The controller owns the provider SDK, request format, parsing, persistence, and decision logic. That makes the HTTP boundary the integration boundary and makes provider changes expensive.
+2. The request is synchronous. A slow provider holds an HTTP worker and potentially a database connection. Under load, this can exhaust the connection pool or thread pool before the provider recovers.
+3. There is no idempotency key or inbox record. A Kafka redelivery or client retry can invoke extraction and persistence again.
+4. A JSON blob does not provide a stable schema for querying, validation, or audit. Raw provider output may still be useful, but it should be stored alongside normalized fields and metadata, with access controls for sensitive data.
+5. Presence of two fields is not an approval policy. It ignores document validity, expiry, fraud signals, confidence thresholds, and human review.
+6. The example assumes a successful response and a predictable JSON shape. It has no timeout, retry policy, fallback, circuit breaker, size limit, content-type validation, or handling for malformed output.
+
+## A safer application flow
+
+**[PROPOSED DESIGN]** Keep the use case independent of HTTP and provider types:
+
+```java
+public Decision handle(IntakeCommand command) {
+    if (inbox.alreadyProcessed(command.eventId())) {
+        return inbox.previousDecision(command.eventId());
+    }
+
+    DocumentSnapshot snapshot = documents.load(command.objectKey());
+    ExtractionResult extraction = vision.extract(snapshot);
+    RiskAssessment rules = ruleEngine.check(extraction.fields(), snapshot);
+    JudgeResult judg
+=== VI CURRENT ===
+---
+title: "Thiết kế pipeline tiếp nhận tài liệu KYC bằng Vision LLM"
+description: "Thiết kế thực tế để trích xuất trường KYC từ giấy tờ định danh, kiểm tra bằng các rule xác định và chuyển các trường hợp không chắc chắn sang người duyệt."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo: <https://github.com/finpay-lab/identity-service>
+
+
+Tiếp nhận giấy tờ KYC (Know Your Customer) chỉ có vẻ đơn giản cho đến khi hệ thống phải xử lý ảnh kém chất lượng, nhiều định dạng giấy tờ, sự kiện gửi trùng, lỗi từ nhà cung cấp và yêu cầu audit. Vision language model (VLM, mô hình ngôn ngữ có khả năng xử lý hình ảnh) có thể hỗ trợ trích xuất trường dữ liệu, nhưng không nên là hệ thống lưu trữ chuẩn hay bên tự quyết định cuối cùng.
+
+Bài viết trình bày một thiết kế ưu tiên ranh giới cho feature `kyc-document-intake-llm`: chuẩn hóa file tải lên thành domain command, trích xuất các trường có cấu trúc, áp dụng các kiểm tra xác định, chỉ dùng LLM cho những câu hỏi cần đánh giá và chuyển kết quả không chắc chắn sang người duyệt. Bài viết cũng đối chiếu thiết kế này với một cách triển khai synchronous phổ biến và giải thích các failure mode cần xử lý rõ ràng.
+
+Code và package tree dưới đây mang tính minh họa. Chúng mô tả các ranh giới dự kiến, không phải bằng chứng về một provider, model hay sự cố production cụ thể.
+
+## Pipeline
+
+```text
+DocumentUploaded (Kafka) -> IntakeCommand -> VisionExtractionPort (VLM)
+     |                                              |
+     +-> DocumentSnapshot (domain model)            +-> StructuredFields + Confidence
+                         |                                      |
+                         v                                      v
+              FraudScreeningPort <- RiskAssessment (domain) -> LlmJudgePort
+                         |                                      |
+                         v                                      v
+                DecisionEvent -> outbox -> Kafka -> OpenSearch (decision index)
+```
+
+**[SOURCE FACT]** Thiết kế được cung cấp sử dụng `DocumentUploaded` trên Kafka, một S3 key và `eventId`, một vision extraction port, các trường có cấu trúc kèm confidence, một fraud check dựa trên rule, một LLM judge, outbox, Kafka và OpenSearch.
+
+**[PROPOSED DESIGN]** Trình tự xử lý:
+
+1. Kafka chuyển `DocumentUploaded`. Event nên chứa một object reference, chẳng hạn S3 key, cùng `eventId`; consumer không nên phụ thuộc vào kiểu multipart của web.
+2. Adapter ánh xạ event thành `IntakeCommand` và `DocumentSnapshot`.
+3. Vision adapter gửi tài liệu tới multimodal model và trả về một kết quả có kiểu rõ ràng. Kết quả gồm giá trị các trường, confidence, metadata của provider và trạng thái extraction cụ thể, thay vì văn xuôi tự do.
+4. Rule engine xác định kiểm tra các ràng buộc như loại giấy tờ được phép, checksum có nhất quán hay không và giấy tờ đã hết hạn chưa. Các kiểm tra này vẫn là application code thông thường.
+5. LLM judge có thể trả lời câu hỏi mở, chẳng hạn người trong ảnh selfie có vẻ khớp với người trên giấy tờ hay không. Kết quả chỉ là bằng chứng, không phải quyết định phê duyệt. Lưu kết quả và rationale cần cho việc review, tuân theo chính sách bảo mật của ứng dụng.
+6. Decision được lưu và event được phát hành qua outbox. OpenSearch có thể phục vụ việc truy xuất và tìm kiếm; không nên coi nó là nguồn dữ liệu bền vững duy nhất nếu đó chưa phải quyết định rõ ràng về storage.
+
+## Ranh giới hexagonal
+
+**[SOURCE FACT]** Package layout được cung cấp đặt domain code dưới `domain/` và các integration dưới `infrastructure/`:
+
+```text
+src/main/java/com/finpay/identity/kyc/
+├── domain/                      # Java thuần, không import Spring hoặc SDK
+│   ├── model/
+│   │   ├── DocumentSnapshot.java
+│   │   ├── StructuredFields.java
+│   │   ├── Confidence.java
+│   │   ├── RiskAssessment.java
+│   │   ├── Decision.java
+│   │   └── KycEvent.java
+│   ├── ports/
+│   │   ├── in/IntakeUseCase.java
+│   │   ├── in/AuditUseCase.java
+│   │   └── out/
+│   │       ├── VisionExtractionPort.java
+│   │       ├── LlmJudgePort.java
+│   │       ├── DecisionStorePort.java
+│   │       ├── KycEventPublisherPort.java
+│   │       └── FraudCheckPort.java
+│   └── service/
+│       ├── DocumentIntakeService.java
+│       └── DecisionEngine.java
+└── infrastructure/              # adapter cho Spring, Kafka, OpenSearch và SDK
+    ├── kafka/
+    │   ├── DocumentUploadedConsumer.java
+    │   └── DecisionEventProducer.java
+    ├── openai/
+    │   ├── OpenAiVisionAdapter.java
+    │   └── OpenAiJudgeAdapter.java
+    ├── opensearch/
+    │   ├── DecisionDocument.java
+    │   └── OpenSearchDecisionStore.java
+    └── audit/
+        └── AuditLogWriter.java
+```
+
+**[ANALYSIS]** Không đưa provider SDK vào domain giúp application có một contract ổn định cho extraction và judgment. Decision engine cũng có thể được test mà không cần gọi network. Provider, prompt, token limit, timeout, retry và response parsing nên nằm trong adapter hoặc application service, không nằm trong controller.
+
+Không nên khẳng định một provider có thể được thay thế trong một khoảng thời gian cụ thể, hoặc một thay đổi về giá đã dẫn đến một migration cụ thể, nếu không có tài liệu chứng minh. Lợi ích của kiến trúc là giảm phạm vi thay đổi, không phải bảo đảm một lịch migration nhất định.
+
+## Phiên bản synchronous đơn giản
+
+Ví dụ rút gọn này chỉ mang tính minh họa. Nó cho thấy sự kết dính mà thiết kế đề xuất cần tránh.
+
+```java
+@RestController
+public class KycIntakeController {
+    private final ProviderClient providerClient;
+    private final JdbcTemplate jdbcTemplate;
+
+    @PostMapping("/kyc/documents")
+    public Map<String, Object> intake(@RequestParam("file") MultipartFile file)
+            throws IOException {
+        String base64 = Base64.getEncoder().encodeToString(file.getBytes());
+
+        ProviderResult result = providerClient.extract(
+                "Extract fullName, docNumber, dateOfBirth, expiryDate, "
+                        + "documentType, and country as JSON.",
+                "data:image/jpeg;base64," + base64);
+        String json = result.content();
+
+        String name = extract(json, "fullName");
+        String docNumber = extract(json, "docNumber");
+        jdbcTemplate.update("INSERT INTO kyc_documents (data) VALUES (?)", json);
+
+        return Map.of("approved", name != null && docNumber != null);
+    }
+}
+```
+
+**[ANALYSIS]** Phiên bản này có nhiều vấn đề độc lập:
+
+1. Controller sở hữu provider SDK, request format, parsing, persistence và decision logic. Như vậy HTTP boundary cũng trở thành integration boundary, khiến việc thay provider tốn kém hơn.
+2. Request chạy synchronous. Provider chậm sẽ giữ HTTP worker và có thể giữ cả database connection. Khi tải tăng, connection pool hoặc thread pool có thể cạn trước khi provider phục hồi.
+3. Không có idempotency key hoặc inbox record. Kafka redelivery hay client retry có thể gọi extraction và persistence thêm lần nữa.
+4. JSON blob không cung cấp schema ổn định cho việc query, validation hay audit. Raw provider output vẫn có thể hữu ích, nhưng nên được lưu cùng normalized fields và metadata, với access control cho dữ liệu nhạy cảm.
+5. Chỉ kiểm tra hai trường có tồn tại không phải là approval policy. Cách này bỏ qua document validity, expiry, fraud signal, confidence threshold và human review.
+6. Ví dụ giả định response luôn thành công và JSON luôn đúng shape. Nó không có timeout, retry policy, fallback, circuit breaker, giới hạn kích thước, kiểm tra content type hay xử lý output malformed.
+
+## Application flow an toàn hơn
+
+**[PROPOSED DESIGN]** Giữ use case độc lập với HTTP và kiểu dữ liệu của provider:
+
+```java
+public Decision handle(IntakeCommand command) {
+    if (inbox.alreadyProcessed(command.eventId())) {
+        return inbox.previousDecision(command.eventId());
+    }
+
+    DocumentSnapshot snapshot = documents.load(command.objectKey());
+    ExtractionResult extraction = vision.extract(snapshot);
+    RiskAssessment rules = ruleEngine.check(extraction.fie
+Rewrite both into the new problem-driven style. Preserve the real engineering content (Kafka/Prometheus/OpenSearch boundaries, idempotency, RAG, KYC, guardrail, AI core library) but rebuild the NARRATIVE around reasoning. Write:
+  /tmp/fp_6_kyc-document-intake-llm/kyc-document-intake-llm.en.md
+  /tmp/fp_6_kyc-document-intake-llm/kyc-document-intake-llm.vi.md

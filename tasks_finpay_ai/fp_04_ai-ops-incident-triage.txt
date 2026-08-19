@@ -1,0 +1,398 @@
+You are a senior Staff/Principal Engineer and technical writer. REWRITE the given FinPay AI blog article pair (EN + VI) into a problem-driven engineering narrative.
+
+CORE PRINCIPLE: Architecture must be the RESULT of engineering reasoning, not the starting point. Do NOT start with a component diagram and explain each box. Instead: Real Problem -> Why It Matters -> Naive Solution -> Why It Breaks -> Hard Engineering Problems -> Trade-offs -> Better Design -> Failure Scenarios -> Final Architecture -> Lessons.
+
+WRITING STYLE: like a BigTech engineering blog + Staff design review + system-design interview + production postmortem. NOT generated docs, marketing, or a tech tutorial. Explain WHY before WHAT. Reasoning first, technology second.
+
+EVERY ARTICLE MUST:
+- Begin with a concrete situation/business problem, then the engineering question.
+- Show the NAIVE design first (small diagram), then ATTACK it: what happens at 10K TPS? when AI takes 2s/10s? when provider down? when payment succeeds but AI fails? on Kafka retry? on duplicate/replay? who has authority to block?
+- Treat AI as an engineering component, NOT magic: discuss false positives/negatives, nondeterminism, model/prompt versioning, inference latency/cost, rate limits, provider outages, timeouts, retries, hallucination, confidence, evaluation, monitoring, fallback. Emphasize: AI Signal -> Policy -> Business Decision (NOT AI -> Block Money).
+- For fraud/anomaly: discuss Rules vs Statistical vs ML vs LLM and WHY each fits.
+- Include non-obvious problems (the failure mode that looks harmless, what breaks first, replay cost, dependency down, under load, model change).
+- Failure scenarios explicit: dependency unavailable, timeout, partial failure, duplicate/out-of-order event, consumer crash/rebalance, retry storm, poison message, backpressure, queue saturation, DB failure, AI provider failure, model regression, rollback, replay.
+- Capacity reasoned with equations (Concurrency = Throughput x Latency). Numbers need a reason; never newFixedThreadPool(4) without why.
+- Idempotency technically correct: show the exists()-check race (two consumers both see false), then real mechanisms (unique constraint, atomic insert, Redis SETNX, transactional outbox/inbox, deterministic ids, idempotency keys). Distinguish idempotent STORAGE from idempotent SIDE EFFECTS.
+- Separate event source from query store: Kafka = replay source, DB/Ledger = system of record, OpenSearch = read/index model. If index lost -> replay -> rebuild.
+- Auditability beyond logging: preserve transaction_id, event_id, timestamp, features, risk_score, decision, model_version, prompt_version, provider, reason, policy_version. Discuss reproducibility.
+- Observability = business + system: transactions_processed, anomalies_detected, false_positive_rate, false_negative_rate, review_rate, AI_timeout_rate, AI_cost, model_error_rate, model_version, decision_distribution. Cardinality risk: NEVER use transaction_id/account_id as Prometheus labels.
+- Security/privacy: PII, data minimization, encryption, access control, audit access, AI provider data handling, prompt leakage, logging sensitive data, retention. Do NOT casually send entire transaction to external AI.
+- LANGUAGE: precise engineering English/Vietnamese. Avoid "money flow is sacred", "guardian of ledger", "AI watches every transaction", "non-negotiable", "fights chaos". Use: "The ledger path has strict consistency requirements while anomaly detection tolerates eventual processing; keeping them on separate paths lets each fail independently."
+- NO fabricated production claims. FinPay is a fictional/reference system. Use "A production-oriented design would…", "If FinPay reached X TPS…", "One approach is…". Do NOT claim "we deployed to production" or invent incidents/benchmarks/latency/cost.
+- Cite authoritative sources where useful (official engineering blogs/docs/papers). NEVER invent URLs or attribute architectures to Google/Netflix/Uber/Stripe/Amazon unless a real source supports it.
+- Code only when it proves a point (show WRONG then RIGHT, with the race condition). Small diagrams that answer ONE question each.
+
+RECOMMENDED STRUCTURE (adapt per article):
+# Title
+## The Problem
+## Why This Is Harder Than It Looks
+## The Naive Design
+## Where the Naive Design Breaks
+## The First Design Decision
+## The Hard Engineering Problems (Problem 1/2/3)
+## Design Options (A/B/C)
+## Trade-offs
+## The Architecture
+## Failure Scenarios
+## Capacity & Performance
+## Security & Privacy
+## Observability
+## AI-Specific Considerations
+## What We Would Do Differently
+## Key Lessons
+## Interview Questions
+
+END with 3-7 concrete lessons the reader can reuse elsewhere.
+
+BILINGUAL: produce EN and VI versions with SAME depth, SAME code/diagrams, faithful VI translation. Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — improve title if needed, keep pubDatetime unchanged. Only modify the two given files.
+
+ARTICLE #4: ai/ai-ops-incident-triage
+CURRENT EN (rewrite to /tmp/fp_4_ai-ops-incident-triage/ai-ops-incident-triage.en.md):
+=== EN CURRENT ===
+---
+title: "AI Ops Incident Triage with Alerts and Traces"
+description: "How FinPay's observability stack turns Prometheus alerts and OpenTelemetry traces into an auditable root-cause hypothesis and runbook recommendation."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: https://github.com/finpay-lab/observability
+
+## The problem
+
+When a settlement batch is delayed, several symptoms can appear at once: latency rises, the error rate changes, and dead-letter queues fill. An on-call engineer must decide which alerts describe the same incident, where the failure started, and whether a proposed response could affect money. The difficult part is not producing a summary. It is making the summary safe to use in an operational workflow.
+
+**[SOURCE FACT]** The `ai-ops-incident-triage` service is the fourth feature in the FinPay observability platform. It uses an LLM for reading, correlation, and first-pass classification. It does not make money-related decisions.
+
+**[ANALYSIS]** The useful boundary is therefore narrow: the model proposes a severity, a root-cause hypothesis, and a recommendation; deterministic code, a human approver, and the ledger remain responsible for actions.
+
+This article covers the Spring Boot, Kafka, and OpenSearch design, the trace-enrichment path, and the guardrails around the LLM. The code is intentionally small; the surrounding controls are the important part.
+
+## Service boundary
+
+**[SOURCE FACT]** The service:
+
+1. Consumes alert events and correlated distributed traces from Kafka.
+2. Enriches each alert with trace context queried from OpenSearch.
+3. Sends a redacted, schema-constrained prompt to a BYOK (bring your own key) LLM.
+4. Applies idempotency, timeout, retry, circuit breaker, human approval for money-related actions, and audit controls.
+5. Publishes the triage decision and audit entry to Kafka and then OpenSearch.
+
+## Architecture
+
+**[SOURCE FACT]** The service uses hexagonal architecture. The domain core depends on ports, not on Kafka, Spring AI, or OpenSearch. Adapters are under `infrastructure/`.
+
+```
+com.finpay.observability
+├── domain
+│   ├── model        IncidentContext, TriageOutcome, Severity, Recommendation
+│   ├── port         IncidentTriagePort, IdempotencyPort, AuditPort, ApprovalPort
+│   └── service      TriageOrchestrator (orchestration, no framework dependencies)
+├── infrastructure
+│   ├── kafka        IncidentConsumer, AuditProducer
+│   ├── ai           OpenAiIncidentTriageAdapter, LlmProperties
+│   ├── opensearch   OpenSearchIdempotencyStore, OpenSearchTraceEnricher
+│   └── config       Resilience4jConfig
+```
+
+```
+ alerts + traces ──▶ Kafka ──▶ IncidentConsumer ──▶ domain (TriageOrchestrator)
+                                                          │
+                                          IncidentTriagePort (LLM) ──▶ BYOK model
+                                                          │
+                                     fallback ──▶ rules engine (no LLM)
+                                                          │
+                             money recommendation? ──▶ human ApprovalTask
+                                                          │
+                                   audit ──▶ Kafka("finpay.observability.audit") ──▶ OpenSearch
+```
+
+The domain model uses immutable records. That is a practical choice when model output must cross an audit boundary: the value being recorded should not change underneath the audit event.
+
+## Guardrails
+
+**[PROPOSED DESIGN]** These controls define the safe operating boundary for the service:
+
+1. **The AI is not a money decider.** The model may suggest a refund or compensation. A human or a fully deterministic rule must authorize execution. The ledger, not the prompt, moves money.
+2. **Idempotency by `eventId`.** Kafka provides at-least-once delivery, so retries, redelivery, replay, rebalance, or an offset reset can repeat an event. The service atomically claims `eventId` in OpenSearch and skips a duplicate.
+3. **Timeout, retry, and circuit breaker.** The LLM call is time-boxed, retried with backoff, and protected by a circuit breaker. An open breaker routes triage to a deterministic rules engine instead of blocking the alert consumer.
+4. **BYOK key handling.** The key is injected at runtime through a Kubernetes Secret or Vault. It is never hardcoded or logged; logs may contain only a masked preview.
+5. **Auditability.** Triage, fallback, retry, and human approval produce append-only audit entries keyed by `eventId`, including the model, model version, trace ID, and outcome.
+
+## WRONG and RIGHT
+
+### Secrets and BYOK
+
+**WRONG.** A key in a constant leaks into source history, developer environments, or logs and cannot be rotated without a deployment.
+
+```java
+// WRONG: secret in source code, with no rotation or masking.
+public class OpenAiClient {
+    private static final String BYOK_KEY = "<redacted>";
+    private static final String MODEL = "gpt-4o";
+
+    public String triage(String prompt) {
+        // The key is read from the constant and sent in a request header.
+    }
+}
+```
+
+**[PROPOSED DESIGN] RIGHT.** Inject the key at runtime and expose only a masked form to diagnostics.
+
+```java
+@Configuration
+@ConfigurationProperties(prefix = "app.llm")
+public record LlmProperties(String endpoint, String model, String byokKey) {
+    public String maskedKey() {
+        if (byokKey == null || byokKey.isBlank()) return "<unset>";
+        return byokKey.substring(0, 3) + "..." + byokKey.substring(byokKey.length() - 4);
+    }
+}
+```
+
+```yaml
+# application.yml: the value is injected by the runtime environment.
+app:
+  llm:
+    endpoint: ${LLM_ENDPOINT:https://api.example-llm.com/v1}
+    model: ${LLM_MODEL:gpt-4o}
+    byok-key: ${LLM_BYOK_KEY}
+```
+
+```java
+@Configuration
+public class LlmConfig {
+    @Bean
+    public ChatModel chatModel(LlmProperties props) {
+        OpenAiApi api = new OpenAiApi(props.endpoint(), props.byokKey());
+        return OpenAiChatModel.builder()
+                .openAiApi(api)
+                .defaultOptions(OpenAiChatOptions.builder()
+                        .model(props.model())
+                        .temperature(0.0)
+                        .responseFormat(new ResponseFormat(ResponseFormat.Type.JSON_SCHEMA))
+                        .build())
+                .build();
+    }
+}
+```
+
+**[SOURCE FACT]** The source design also uses a CI check for `sk-`-shaped literals and a log filter that redacts key-shaped strings. These are defense-in-depth controls, not substitutes for secret injection.
+
+### Timeout, retry, and circuit breaker
+
+**WRONG.** A blocking call without a timeout can hold a consumer while a provider is slow. Without retry, a circuit breaker, or fallback, one provider failure becomes a pipeline failure.
+
+```java
+// WRONG: can block indefinitely and has no degradation path.
+HttpResponse<String> r = client.send(request, HttpResponse.BodyHandlers.ofString());
+```
+
+**[PROPOSED DESIGN] RIGHT.** Put a time limit inside the circuit breaker and retry around the breaker. Use a deterministic fallback when the LLM is unavailable.
+
+```java
+@Configuration
+public class Resilience4jConfig {
+    @Bean
+    public TimeLimiter llmTimeLimiter() {
+        return TimeLimiter.of("llm-triage", TimeLimiterConfig.custom()
+                .timeoutDuration(Duration.ofSeconds(15))
+                .cancelRunningFuture(true).build());
+    }
+
+    @Bean
+    public CircuitBreaker llmCircuitBreaker() {
+        return CircuitBreaker.of("llm-triage", CircuitBreakerConfig.custom()
+                .failureRateThreshold(50f)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .permittedNumberOfCallsInHalfOpenState(5)
+                .minimumNumberOfCalls(10)
+                .slidingWindowSize(20).build());
+    }
+
+    @Bean
+    public Retry llmRetry() {
+        return Retry.of("llm-triage", RetryConfig.custom()
+                .maxAttempts(3)
+                .waitDuration(Duration.o
+=== VI CURRENT ===
+---
+title: "Triage sự cố AI Ops bằng cảnh báo và trace"
+description: "Cách tầng observability của FinPay chuyển cảnh báo Prometheus và trace OpenTelemetry thành giả thuyết nguyên nhân gốc cùng khuyến nghị runbook có thể kiểm toán."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> Repo: https://github.com/finpay-lab/observability
+
+## Bài toán
+
+Khi một lô quyết toán bị chậm, nhiều triệu chứng có thể xuất hiện cùng lúc: độ trễ tăng, tỷ lệ lỗi thay đổi và các hàng đợi dead-letter đầy lên. Kỹ sư trực ca phải xác định cảnh báo nào thuộc cùng một sự cố, lỗi bắt đầu ở đâu và một phương án xử lý có thể ảnh hưởng đến tiền hay không. Điểm khó không phải là tạo một bản tóm tắt, mà là đưa bản tóm tắt đó vào quy trình vận hành mà không mở thêm đường rủi ro.
+
+**[SOURCE FACT]** Dịch vụ `ai-ops-incident-triage` là tính năng thứ tư trong nền tảng observability của FinPay. Dịch vụ dùng LLM để đọc dữ liệu, đối chiếu tương quan và phân loại bước đầu. Dịch vụ không đưa ra quyết định liên quan đến tiền.
+
+**[ANALYSIS]** Vì vậy, ranh giới phù hợp là ranh giới hẹp: mô hình đề xuất mức độ nghiêm trọng, giả thuyết nguyên nhân gốc và khuyến nghị; code xác định, người phê duyệt và sổ cái chịu trách nhiệm về hành động.
+
+Bài viết trình bày thiết kế Spring Boot, Kafka và OpenSearch, đường đi làm giàu trace và các guardrail quanh LLM. Code được giữ ngắn; phần kiểm soát bao quanh mô hình mới là trọng tâm.
+
+## Ranh giới dịch vụ
+
+**[SOURCE FACT]** Dịch vụ:
+
+1. Tiêu thụ sự kiện cảnh báo và distributed trace đã tương quan từ Kafka.
+2. Làm giàu mỗi cảnh báo bằng trace context truy vấn từ OpenSearch.
+3. Gửi prompt đã khử dữ liệu nhạy cảm và bị ràng buộc theo schema tới LLM BYOK (bring your own key).
+4. Áp dụng idempotency, timeout, retry, circuit breaker, phê duyệt của con người cho thao tác liên quan đến tiền và audit.
+5. Xuất bản quyết định triage cùng audit entry lên Kafka rồi OpenSearch.
+
+## Kiến trúc
+
+**[SOURCE FACT]** Dịch vụ dùng kiến trúc hexagonal. Lõi domain phụ thuộc vào port, không phụ thuộc Kafka, Spring AI hay OpenSearch. Các adapter nằm dưới `infrastructure/`.
+
+```
+com.finpay.observability
+├── domain
+│   ├── model        IncidentContext, TriageOutcome, Severity, Recommendation
+│   ├── port         IncidentTriagePort, IdempotencyPort, AuditPort, ApprovalPort
+│   └── service      TriageOrchestrator (điều phối, không phụ thuộc framework)
+├── infrastructure
+│   ├── kafka        IncidentConsumer, AuditProducer
+│   ├── ai           OpenAiIncidentTriageAdapter, LlmProperties
+│   ├── opensearch   OpenSearchIdempotencyStore, OpenSearchTraceEnricher
+│   └── config       Resilience4jConfig
+```
+
+```
+ alerts + traces ──▶ Kafka ──▶ IncidentConsumer ──▶ domain (TriageOrchestrator)
+                                                          │
+                                          IncidentTriagePort (LLM) ──▶ BYOK model
+                                                          │
+                                     fallback ──▶ rules engine (không LLM)
+                                                          │
+                             money recommendation? ──▶ human ApprovalTask
+                                                          │
+                                   audit ──▶ Kafka("finpay.observability.audit") ──▶ OpenSearch
+```
+
+Domain model dùng các record bất biến. Đây là lựa chọn thực tế khi output của model đi qua ranh giới audit: giá trị được ghi không nên thay đổi sau khi audit event được tạo.
+
+## Guardrail
+
+**[PROPOSED DESIGN]** Các kiểm soát sau xác định ranh giới vận hành an toàn:
+
+1. **AI không quyết định việc chuyển tiền.** Model có thể gợi ý hoàn tiền hoặc bồi thường. Con người hoặc rule hoàn toàn xác định phải phê duyệt việc thực thi. Sổ cái, không phải prompt, mới chuyển tiền.
+2. **Idempotency theo `eventId`.** Kafka dùng cơ chế giao nhận at-least-once, nên retry, redelivery, replay, rebalance hoặc reset offset có thể xử lý lại một event. Dịch vụ claim `eventId` nguyên tử trong OpenSearch và bỏ qua bản trùng.
+3. **Timeout, retry và circuit breaker.** Lời gọi LLM bị giới hạn thời gian, retry với backoff và được bảo vệ bởi circuit breaker. Khi breaker mở, triage chuyển sang rules engine xác định thay vì chặn consumer cảnh báo.
+4. **Xử lý khóa BYOK.** Khóa được tiêm lúc runtime qua Kubernetes Secret hoặc Vault. Khóa không hardcode và không ghi log; log chỉ được chứa bản xem trước đã che.
+5. **Khả năng kiểm toán.** Triage, fallback, retry và phê duyệt của con người tạo audit entry append-only theo `eventId`, gồm model, model version, trace ID và outcome.
+
+## WRONG và RIGHT
+
+### Secret và BYOK
+
+**WRONG.** Khóa trong constant có thể lọt vào lịch sử source, môi trường phát triển hoặc log; không thể rotate nếu không deployment lại.
+
+```java
+// WRONG: secret nằm trong source code, không rotate hoặc masking.
+public class OpenAiClient {
+    private static final String BYOK_KEY = "<redacted>";
+    private static final String MODEL = "gpt-4o";
+
+    public String triage(String prompt) {
+        // Đọc khóa từ constant và gửi trong request header.
+    }
+}
+```
+
+**[PROPOSED DESIGN] RIGHT.** Tiêm khóa lúc runtime và chỉ cho phép dạng đã che xuất hiện trong diagnostics.
+
+```java
+@Configuration
+@ConfigurationProperties(prefix = "app.llm")
+public record LlmProperties(String endpoint, String model, String byokKey) {
+    public String maskedKey() {
+        if (byokKey == null || byokKey.isBlank()) return "<unset>";
+        return byokKey.substring(0, 3) + "..." + byokKey.substring(byokKey.length() - 4);
+    }
+}
+```
+
+```yaml
+# application.yml: giá trị do runtime environment tiêm vào.
+app:
+  llm:
+    endpoint: ${LLM_ENDPOINT:https://api.example-llm.com/v1}
+    model: ${LLM_MODEL:gpt-4o}
+    byok-key: ${LLM_BYOK_KEY}
+```
+
+```java
+@Configuration
+public class LlmConfig {
+    @Bean
+    public ChatModel chatModel(LlmProperties props) {
+        OpenAiApi api = new OpenAiApi(props.endpoint(), props.byokKey());
+        return OpenAiChatModel.builder()
+                .openAiApi(api)
+                .defaultOptions(OpenAiChatOptions.builder()
+                        .model(props.model())
+                        .temperature(0.0)
+                        .responseFormat(new ResponseFormat(ResponseFormat.Type.JSON_SCHEMA))
+                        .build())
+                .build();
+    }
+}
+```
+
+**[SOURCE FACT]** Thiết kế nguồn cũng có CI check để quét literal dạng `sk-` và log filter che chuỗi trông giống khóa. Đây là phòng thủ nhiều lớp, không thay thế việc tiêm secret.
+
+### Timeout, retry và circuit breaker
+
+**WRONG.** Lời gọi blocking không có timeout có thể giữ consumer khi provider chậm. Không có retry, circuit breaker hoặc fallback, một lỗi của provider sẽ biến thành lỗi của pipeline.
+
+```java
+// WRONG: có thể block vô hạn và không có đường hạ cấp.
+HttpResponse<String> r = client.send(request, HttpResponse.BodyHandlers.ofString());
+```
+
+**[PROPOSED DESIGN] RIGHT.** Đặt giới hạn thời gian bên trong circuit breaker và retry bên ngoài breaker. Khi LLM không khả dụng, dùng fallback xác định.
+
+```java
+@Configuration
+public class Resilience4jConfig {
+    @Bean
+    public TimeLimiter llmTimeLimiter() {
+        return TimeLimiter.of("llm-triage", TimeLimiterConfig.custom()
+                .timeoutDuration(Duration.ofSeconds(15))
+                .cancelRunningFuture(true).build());
+    }
+
+    @Bean
+    public CircuitBreaker llmCircuitBreaker() {
+        return CircuitBreaker.of("llm-triage", CircuitBreakerConfig.custom()
+                .failureRateThreshold(50f)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .permittedNumberOfCallsInHalfOpenState(5)
+                .minimumNumberOfCalls(10)
+                .slidingWindowSize(20).build());
+    }
+
+    @Bean
+    public Retry llmRetry() {
+        return Retry.of("llm-triage", RetryConfig.custom()
+                .maxAttempts(3)
+                .waitDuration(Duration.ofMillis(500)).build());
+    }
+}
+```
+
+```java
+@Component
+public class OpenAiIncidentTriageA
+Rewrite both into the new problem-driven style. Preserve the real engineering content (Kafka/Prometheus/OpenSearch boundaries, idempotency, RAG, KYC, guardrail, AI core library) but rebuild the NARRATIVE around reasoning. Write:
+  /tmp/fp_4_ai-ops-incident-triage/ai-ops-incident-triage.en.md
+  /tmp/fp_4_ai-ops-incident-triage/ai-ops-incident-triage.vi.md

@@ -1,0 +1,310 @@
+You are a senior Staff/Principal Engineer and technical writer. REWRITE the given FinPay AI blog article pair (EN + VI) into a problem-driven engineering narrative.
+
+CORE PRINCIPLE: Architecture must be the RESULT of engineering reasoning, not the starting point. Do NOT start with a component diagram and explain each box. Instead: Real Problem -> Why It Matters -> Naive Solution -> Why It Breaks -> Hard Engineering Problems -> Trade-offs -> Better Design -> Failure Scenarios -> Final Architecture -> Lessons.
+
+WRITING STYLE: like a BigTech engineering blog + Staff design review + system-design interview + production postmortem. NOT generated docs, marketing, or a tech tutorial. Explain WHY before WHAT. Reasoning first, technology second.
+
+EVERY ARTICLE MUST:
+- Begin with a concrete situation/business problem, then the engineering question.
+- Show the NAIVE design first (small diagram), then ATTACK it: what happens at 10K TPS? when AI takes 2s/10s? when provider down? when payment succeeds but AI fails? on Kafka retry? on duplicate/replay? who has authority to block?
+- Treat AI as an engineering component, NOT magic: discuss false positives/negatives, nondeterminism, model/prompt versioning, inference latency/cost, rate limits, provider outages, timeouts, retries, hallucination, confidence, evaluation, monitoring, fallback. Emphasize: AI Signal -> Policy -> Business Decision (NOT AI -> Block Money).
+- For fraud/anomaly: discuss Rules vs Statistical vs ML vs LLM and WHY each fits.
+- Include non-obvious problems (the failure mode that looks harmless, what breaks first, replay cost, dependency down, under load, model change).
+- Failure scenarios explicit: dependency unavailable, timeout, partial failure, duplicate/out-of-order event, consumer crash/rebalance, retry storm, poison message, backpressure, queue saturation, DB failure, AI provider failure, model regression, rollback, replay.
+- Capacity reasoned with equations (Concurrency = Throughput x Latency). Numbers need a reason; never newFixedThreadPool(4) without why.
+- Idempotency technically correct: show the exists()-check race (two consumers both see false), then real mechanisms (unique constraint, atomic insert, Redis SETNX, transactional outbox/inbox, deterministic ids, idempotency keys). Distinguish idempotent STORAGE from idempotent SIDE EFFECTS.
+- Separate event source from query store: Kafka = replay source, DB/Ledger = system of record, OpenSearch = read/index model. If index lost -> replay -> rebuild.
+- Auditability beyond logging: preserve transaction_id, event_id, timestamp, features, risk_score, decision, model_version, prompt_version, provider, reason, policy_version. Discuss reproducibility.
+- Observability = business + system: transactions_processed, anomalies_detected, false_positive_rate, false_negative_rate, review_rate, AI_timeout_rate, AI_cost, model_error_rate, model_version, decision_distribution. Cardinality risk: NEVER use transaction_id/account_id as Prometheus labels.
+- Security/privacy: PII, data minimization, encryption, access control, audit access, AI provider data handling, prompt leakage, logging sensitive data, retention. Do NOT casually send entire transaction to external AI.
+- LANGUAGE: precise engineering English/Vietnamese. Avoid "money flow is sacred", "guardian of ledger", "AI watches every transaction", "non-negotiable", "fights chaos". Use: "The ledger path has strict consistency requirements while anomaly detection tolerates eventual processing; keeping them on separate paths lets each fail independently."
+- NO fabricated production claims. FinPay is a fictional/reference system. Use "A production-oriented design would…", "If FinPay reached X TPS…", "One approach is…". Do NOT claim "we deployed to production" or invent incidents/benchmarks/latency/cost.
+- Cite authoritative sources where useful (official engineering blogs/docs/papers). NEVER invent URLs or attribute architectures to Google/Netflix/Uber/Stripe/Amazon unless a real source supports it.
+- Code only when it proves a point (show WRONG then RIGHT, with the race condition). Small diagrams that answer ONE question each.
+
+RECOMMENDED STRUCTURE (adapt per article):
+# Title
+## The Problem
+## Why This Is Harder Than It Looks
+## The Naive Design
+## Where the Naive Design Breaks
+## The First Design Decision
+## The Hard Engineering Problems (Problem 1/2/3)
+## Design Options (A/B/C)
+## Trade-offs
+## The Architecture
+## Failure Scenarios
+## Capacity & Performance
+## Security & Privacy
+## Observability
+## AI-Specific Considerations
+## What We Would Do Differently
+## Key Lessons
+## Interview Questions
+
+END with 3-7 concrete lessons the reader can reuse elsewhere.
+
+BILINGUAL: produce EN and VI versions with SAME depth, SAME code/diagrams, faithful VI translation. Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — improve title if needed, keep pubDatetime unchanged. Only modify the two given files.
+
+ARTICLE #5: ai/trace-summarization-llm
+CURRENT EN (rewrite to /tmp/fp_5_trace-summarization-llm/trace-summarization-llm.en.md):
+=== EN CURRENT ===
+---
+title: "Designing an LLM Service for Distributed Trace Summaries"
+description: "A practical design for turning an OpenTelemetry traceId into a bounded, auditable incident summary without giving an LLM authority over financial actions."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+An LLM can make a distributed trace easier to read, but it does not make the trace more trustworthy. The engineering problem is to reduce a large set of spans to useful context while preserving evidence, controlling cost and latency, and keeping the model outside the financial decision path.
+
+This article presents an illustrative Spring Boot design for `trace-summarization-llm`. It covers the boundary between domain code and provider-specific code, span selection, prompt construction, resilience, secret handling, idempotency, and auditability. The code and component names are a proposed design, not a claim about a particular company's production system.
+
+## Scope and guarantees
+
+> **[SOURCE FACT]** The input is an OpenTelemetry `traceId`, and the desired output is a human-readable explanation of the trace: what happened, which operation was slow, where an error occurred, and which operations were retried.
+
+> **[ANALYSIS]** A trace summary is an observability aid. It is not a source of truth and must not authorize a refund, release, reversal, or any other financial action. Those decisions require deterministic business rules and an appropriate control path.
+
+> **[PROPOSED DESIGN]** Before implementing the model adapter, define these guarantees:
+
+1. **No financial authority.** The model may describe observed evidence and state uncertainty. It must not return an operational decision that the application treats as authoritative.
+2. **Idempotency by `eventId`.** Producers and consumers commonly operate with at-least-once delivery. The consumer therefore records the event before performing work that must not be repeated. Exactly-once business behavior is an application-level outcome, not a property to assume from the broker.
+3. **Timeout, retry, and circuit breaker.** A model provider is an external dependency. A timeout limits how long a call occupies resources; a retry handles selected transient failures; a circuit breaker stops sending traffic while the dependency is unhealthy.
+4. **Bring your own key (BYOK).** A customer supplies the provider credential. The service uses a secret-manager reference and never hardcodes or logs the credential.
+5. **Auditability.** Store the input identity, selected evidence, prompt and provider result according to the applicable retention and privacy policy. Redact sensitive data before it enters prompts or logs. Human review and correction should also be recorded.
+
+These guarantees distinguish a summarizer from an autonomous agent. They also make the design testable without a live model provider.
+
+## The tempting implementation
+
+The following example is intentionally wrong. It illustrates the failure modes that appear when provider integration, domain behavior, and logging are placed in one class.
+
+```java
+// WRONG: illustrative anti-pattern; do not ship
+@Service
+public class TraceSummarizer {
+    private static final String API_KEY = "redacted"; // secret in source
+    private final RestTemplate rest = new RestTemplate();
+    private final SpanRepo spans;
+
+    public String summarize(String traceId) {
+        List<Span> all = spans.findAllByTraceId(traceId); // unbounded input
+        String prompt = "Summarize this trace:\n" + all
+            + "\nDecide if the user should be refunded.";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(API_KEY);
+        return rest.postForObject("https://api.llm.example/v1/chat",
+            new HttpEntity<>(prompt, headers), String.class);
+    }
+}
+```
+
+The problems are concrete:
+
+- **Secret exposure:** a credential in source can reach Git history, build artifacts, dumps, or logs. BYOK is not meaningful if the credential is a compile-time constant.
+- **Unbounded context:** loading every span can exceed the model context window, increase token usage, and hide the relevant evidence. The repository query needs explicit limits and a selection strategy.
+- **Authority in the prompt:** asking the model whether to refund turns a probabilistic text generator into an accidental financial control.
+- **Prompt injection:** span attributes may be written by an attacker or by an untrusted upstream system. An attribute containing an instruction must remain data, not become a higher-priority instruction.
+- **Missing resilience:** without connect and response timeouts, the HTTP call can occupy a consumer indefinitely. Retrying every failure can amplify an outage, so retries need bounded attempts and failure classification.
+- **Sensitive logging:** the raw response may repeat prompt data or personally identifiable information (PII). It should not be written to ordinary application logs.
+- **Infrastructure leakage:** the domain logic is coupled to `RestTemplate`, HTTP headers, the endpoint, and the wire format. Tests need a network mock, and changing providers requires changing business code.
+
+## Proposed architecture
+
+> **[PROPOSED DESIGN]** Use a hexagonal architecture. The domain defines the use cases and ports; adapters implement Kafka, the span store, the LLM client, secret retrieval, resilience, and audit persistence.
+
+```text
+trace-summarization-llm/
+├── domain/
+│   ├── model/TraceId.java, EventId.java, Span.java, TraceSummary.java
+│   ├── port/in/SummarizeTraceUseCase.java
+│   ├── port/in/HandleTraceEventUseCase.java
+│   ├── port/out/SpanRepository.java, SummaryStore.java
+│   ├── port/out/LlmPort.java, AuditLog.java
+│   └── service/TraceSummarizerService.java, TraceEventProcessor.java
+├── infrastructure/
+│   ├── kafka/TraceEventConsumer.java
+│   ├── opensearch/SpanOpenSearchRepository.java, SummaryOpenSearchStore.java
+│   ├── llm/LlmAdapter.java, LlmRequest.java, LlmConfig.java
+│   ├── resilience/ResilienceConfig.java
+│   ├── secrets/SecretManager.java
+│   └── audit/AuditLogAdapter.java
+└── application/
+    ├── TraceSummarizationApplication.java
+    └── config/AppConfig.java
+```
+
+The domain port does not know which provider is used:
+
+```java
+public interface LlmPort {
+    LlmResult complete(LlmRequest request);
+}
+```
+
+The application service can now be tested with a fake `LlmPort`. The adapter owns request serialization, authentication, provider-specific error mapping, and the resilience policy.
+
+## Select evidence before calling the model
+
+> **[ANALYSIS]** The trace store should not be treated as a prompt builder. A useful summary starts with a bounded evidence set.
+
+> **[PROPOSED DESIGN]** The repository query should select spans using an explicit policy, for example:
+
+- retain the root span and its direct causal path;
+- retain spans with error status, exception events, or failed downstream calls;
+- retain slow spans according to a configured service policy rather than an arbitrary global claim;
+- retain retry attempts and their outcome;
+- retain timestamps, duration, service, operation, status, and carefully selected attributes;
+- drop or redact secrets, tokens, payment data, and unnecessary PII;
+- impose limits on span count, attribute size, and total serialized input.
+
+The selector should return structured evidence, not a preformatted paragraph. The prompt builder can then mark the evidence as untrusted data and request a fixed output shape such as:
+
+```text
+Summary:
+Evidence:
+Uncertainty:
+```
+
+The model must not be asked to infer facts that are absent from the selected spans. A summary should link statements to span identifiers where the user interface supports that, so an operator can inspect the source evidence.
+
+## Provider boundary and resilience
+
+The LLM adapter should receive a typed request containing the selected evidence, an instruction that the evidence is untrusted, and the requested output schema. It s
+=== VI CURRENT ===
+---
+title: "Thiết kế service dùng LLM để tóm tắt distributed trace"
+description: "Thiết kế thực tế để chuyển một traceId của OpenTelemetry thành bản tóm tắt sự cố có giới hạn và có thể audit, nhưng không trao quyền quyết định tài chính cho LLM."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+LLM có thể giúp đọc distributed trace dễ hơn, nhưng không làm cho trace đáng tin cậy hơn. Bài toán kỹ thuật là rút gọn một tập span lớn thành context hữu ích, đồng thời giữ lại bằng chứng, kiểm soát chi phí và độ trễ, và giữ model nằm ngoài luồng quyết định tài chính.
+
+Bài viết này trình bày một thiết kế minh họa dùng Spring Boot cho `trace-summarization-llm`. Nội dung bao phủ ranh giới giữa domain code và provider-specific code, chọn span, xây dựng prompt, resilience, quản lý secret, idempotency và auditability. Code và tên component là thiết kế đề xuất, không phải tuyên bố về hệ thống production của một công ty cụ thể.
+
+## Phạm vi và các đảm bảo
+
+> **[SOURCE FACT]** Input là `traceId` của OpenTelemetry; output mong muốn là phần giải thích trace bằng ngôn ngữ dễ đọc: chuyện gì đã xảy ra, thao tác nào chậm, lỗi ở đâu và thao tác nào đã được retry.
+
+> **[ANALYSIS]** Bản tóm tắt trace là công cụ hỗ trợ observability. Nó không phải nguồn sự thật và không được cấp phép cho refund, release, reversal hay bất kỳ hành động tài chính nào. Các quyết định đó cần business rule xác định và control path phù hợp.
+
+> **[PROPOSED DESIGN]** Trước khi viết adapter cho model, hãy xác định các đảm bảo sau:
+
+1. **Không có quyền quyết định tài chính.** Model có thể mô tả bằng chứng quan sát được và nêu mức độ không chắc chắn. Model không được trả về một operational decision mà ứng dụng coi là có thẩm quyền.
+2. **Idempotency theo `eventId`.** Producer và consumer thường hoạt động với delivery at-least-once. Vì vậy consumer phải ghi nhận event trước khi thực hiện công việc không được lặp. Exactly-once trong nghiệp vụ là kết quả ở tầng ứng dụng, không phải thuộc tính có thể mặc định từ broker.
+3. **Timeout, retry và circuit breaker.** Model provider là dependency bên ngoài. Timeout giới hạn thời gian một request chiếm tài nguyên; retry xử lý một số lỗi tạm thời; circuit breaker ngừng gửi request khi dependency không khỏe.
+4. **Bring your own key (BYOK).** Khách hàng cung cấp credential của provider. Service dùng reference tới secret manager và không hardcode hoặc ghi log credential.
+5. **Auditability.** Lưu identity của input, bằng chứng đã chọn, prompt và kết quả provider theo retention policy và privacy policy áp dụng. Redact dữ liệu nhạy cảm trước khi đưa vào prompt hoặc log. Việc human review và correction cũng nên được ghi nhận.
+
+Các đảm bảo này phân biệt summarizer với một autonomous agent. Chúng cũng giúp kiểm thử thiết kế mà không cần gọi model provider thật.
+
+## Bản triển khai dễ mắc phải
+
+Ví dụ sau cố ý sai. Nó minh họa các lỗi thường xuất hiện khi provider integration, domain behavior và logging được đặt trong cùng một class.
+
+```java
+// WRONG: anti-pattern minh họa; không được ship
+@Service
+public class TraceSummarizer {
+    private static final String API_KEY = "redacted"; // secret trong source
+    private final RestTemplate rest = new RestTemplate();
+    private final SpanRepo spans;
+
+    public String summarize(String traceId) {
+        List<Span> all = spans.findAllByTraceId(traceId); // input không giới hạn
+        String prompt = "Summarize this trace:\n" + all
+            + "\nDecide if the user should be refunded.";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(API_KEY);
+        return rest.postForObject("https://api.llm.example/v1/chat",
+            new HttpEntity<>(prompt, headers), String.class);
+    }
+}
+```
+
+Các vấn đề ở đây đều cụ thể:
+
+- **Lộ secret:** credential trong source có thể đi vào lịch sử Git, build artifact, dump hoặc log. BYOK không có ý nghĩa nếu credential là compile-time constant.
+- **Context không giới hạn:** tải mọi span có thể vượt model context window, làm tăng token usage và che khuất bằng chứng liên quan. Query của repository cần có limit rõ ràng và chiến lược chọn span.
+- **Trao quyền trong prompt:** hỏi model có nên refund hay không biến một trình sinh văn bản xác suất thành financial control ngoài ý muốn.
+- **Prompt injection:** span attribute có thể do attacker hoặc upstream không đáng tin cậy ghi vào. Attribute chứa instruction phải vẫn là data, không được trở thành instruction có độ ưu tiên cao hơn.
+- **Thiếu resilience:** không có connect timeout và response timeout thì HTTP call có thể giữ consumer vô thời hạn. Retry mọi lỗi có thể khuếch đại outage, nên retry cần số lần giới hạn và phân loại lỗi.
+- **Log dữ liệu nhạy cảm:** raw response có thể lặp lại dữ liệu trong prompt hoặc PII. Không nên ghi nó vào application log thông thường.
+- **Lộ infrastructure vào domain:** domain logic bị ghép với `RestTemplate`, HTTP header, endpoint và wire format. Test phải dùng network mock, và đổi provider sẽ buộc phải sửa business code.
+
+## Kiến trúc đề xuất
+
+> **[PROPOSED DESIGN]** Dùng hexagonal architecture. Domain định nghĩa use case và port; adapter triển khai Kafka, span store, LLM client, secret retrieval, resilience và audit persistence.
+
+```text
+trace-summarization-llm/
+├── domain/
+│   ├── model/TraceId.java, EventId.java, Span.java, TraceSummary.java
+│   ├── port/in/SummarizeTraceUseCase.java
+│   ├── port/in/HandleTraceEventUseCase.java
+│   ├── port/out/SpanRepository.java, SummaryStore.java
+│   ├── port/out/LlmPort.java, AuditLog.java
+│   └── service/TraceSummarizerService.java, TraceEventProcessor.java
+├── infrastructure/
+│   ├── kafka/TraceEventConsumer.java
+│   ├── opensearch/SpanOpenSearchRepository.java, SummaryOpenSearchStore.java
+│   ├── llm/LlmAdapter.java, LlmRequest.java, LlmConfig.java
+│   ├── resilience/ResilienceConfig.java
+│   ├── secrets/SecretManager.java
+│   └── audit/AuditLogAdapter.java
+└── application/
+    ├── TraceSummarizationApplication.java
+    └── config/AppConfig.java
+```
+
+Domain port không biết đang dùng provider nào:
+
+```java
+public interface LlmPort {
+    LlmResult complete(LlmRequest request);
+}
+```
+
+Application service giờ có thể được test với một `LlmPort` giả. Adapter chịu trách nhiệm serialize request, authentication, mapping lỗi riêng của provider và resilience policy.
+
+## Chọn bằng chứng trước khi gọi model
+
+> **[ANALYSIS]** Span store không nên bị xem như prompt builder. Một bản tóm tắt hữu ích bắt đầu từ một tập bằng chứng có giới hạn.
+
+> **[PROPOSED DESIGN]** Repository query nên chọn span theo policy rõ ràng, chẳng hạn:
+
+- giữ root span và causal path trực tiếp của nó;
+- giữ span có error status, exception event hoặc downstream call thất bại;
+- giữ span chậm theo policy của service, thay vì áp một ngưỡng toàn cục không có cơ sở;
+- giữ các retry attempt và kết quả của chúng;
+- giữ timestamp, duration, service, operation, status và các attribute đã được chọn cẩn thận;
+- loại bỏ hoặc redact secret, token, dữ liệu thanh toán và PII không cần thiết;
+- đặt giới hạn cho số span, kích thước attribute và tổng input sau serialize.
+
+Selector nên trả về structured evidence, không phải một đoạn văn đã format sẵn. Sau đó prompt builder có thể đánh dấu evidence là untrusted data và yêu cầu một output shape cố định, chẳng hạn:
+
+```text
+Summary:
+Evidence:
+Uncertainty:
+```
+
+Không được yêu cầu model suy ra những fact không có trong các span đã chọn. Khi UI hỗ trợ, summary nên liên kết các nhận định với span identifier để operator có thể kiểm tra bằng chứng nguồn.
+
+## Ranh giới provider và resilience
+
+LLM adapter nên nhận một typed request gồm evidence đã chọn, instruction rằng evidence là untrusted và output schema cần dùng. Adapter trả về typed result hoặc typed failure. Provider JSON, HTTP status code và authentication header phải nằm bên trong adapter.
+
+Áp dụng resilience tại ranh giới này:
+
+- đặt connect timeout, response timeout và total operation timeout;
+- chỉ retry các lỗi được phân loại là transient, với số lần
+Rewrite both into the new problem-driven style. Preserve the real engineering content (Kafka/Prometheus/OpenSearch boundaries, idempotency, RAG, KYC, guardrail, AI core library) but rebuild the NARRATIVE around reasoning. Write:
+  /tmp/fp_5_trace-summarization-llm/trace-summarization-llm.en.md
+  /tmp/fp_5_trace-summarization-llm/trace-summarization-llm.vi.md

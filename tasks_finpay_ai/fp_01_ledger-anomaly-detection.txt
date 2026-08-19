@@ -1,0 +1,345 @@
+You are a senior Staff/Principal Engineer and technical writer. REWRITE the given FinPay AI blog article pair (EN + VI) into a problem-driven engineering narrative.
+
+CORE PRINCIPLE: Architecture must be the RESULT of engineering reasoning, not the starting point. Do NOT start with a component diagram and explain each box. Instead: Real Problem -> Why It Matters -> Naive Solution -> Why It Breaks -> Hard Engineering Problems -> Trade-offs -> Better Design -> Failure Scenarios -> Final Architecture -> Lessons.
+
+WRITING STYLE: like a BigTech engineering blog + Staff design review + system-design interview + production postmortem. NOT generated docs, marketing, or a tech tutorial. Explain WHY before WHAT. Reasoning first, technology second.
+
+EVERY ARTICLE MUST:
+- Begin with a concrete situation/business problem, then the engineering question.
+- Show the NAIVE design first (small diagram), then ATTACK it: what happens at 10K TPS? when AI takes 2s/10s? when provider down? when payment succeeds but AI fails? on Kafka retry? on duplicate/replay? who has authority to block?
+- Treat AI as an engineering component, NOT magic: discuss false positives/negatives, nondeterminism, model/prompt versioning, inference latency/cost, rate limits, provider outages, timeouts, retries, hallucination, confidence, evaluation, monitoring, fallback. Emphasize: AI Signal -> Policy -> Business Decision (NOT AI -> Block Money).
+- For fraud/anomaly: discuss Rules vs Statistical vs ML vs LLM and WHY each fits.
+- Include non-obvious problems (the failure mode that looks harmless, what breaks first, replay cost, dependency down, under load, model change).
+- Failure scenarios explicit: dependency unavailable, timeout, partial failure, duplicate/out-of-order event, consumer crash/rebalance, retry storm, poison message, backpressure, queue saturation, DB failure, AI provider failure, model regression, rollback, replay.
+- Capacity reasoned with equations (Concurrency = Throughput x Latency). Numbers need a reason; never newFixedThreadPool(4) without why.
+- Idempotency technically correct: show the exists()-check race (two consumers both see false), then real mechanisms (unique constraint, atomic insert, Redis SETNX, transactional outbox/inbox, deterministic ids, idempotency keys). Distinguish idempotent STORAGE from idempotent SIDE EFFECTS.
+- Separate event source from query store: Kafka = replay source, DB/Ledger = system of record, OpenSearch = read/index model. If index lost -> replay -> rebuild.
+- Auditability beyond logging: preserve transaction_id, event_id, timestamp, features, risk_score, decision, model_version, prompt_version, provider, reason, policy_version. Discuss reproducibility.
+- Observability = business + system: transactions_processed, anomalies_detected, false_positive_rate, false_negative_rate, review_rate, AI_timeout_rate, AI_cost, model_error_rate, model_version, decision_distribution. Cardinality risk: NEVER use transaction_id/account_id as Prometheus labels.
+- Security/privacy: PII, data minimization, encryption, access control, audit access, AI provider data handling, prompt leakage, logging sensitive data, retention. Do NOT casually send entire transaction to external AI.
+- LANGUAGE: precise engineering English/Vietnamese. Avoid "money flow is sacred", "guardian of ledger", "AI watches every transaction", "non-negotiable", "fights chaos". Use: "The ledger path has strict consistency requirements while anomaly detection tolerates eventual processing; keeping them on separate paths lets each fail independently."
+- NO fabricated production claims. FinPay is a fictional/reference system. Use "A production-oriented design would…", "If FinPay reached X TPS…", "One approach is…". Do NOT claim "we deployed to production" or invent incidents/benchmarks/latency/cost.
+- Cite authoritative sources where useful (official engineering blogs/docs/papers). NEVER invent URLs or attribute architectures to Google/Netflix/Uber/Stripe/Amazon unless a real source supports it.
+- Code only when it proves a point (show WRONG then RIGHT, with the race condition). Small diagrams that answer ONE question each.
+
+RECOMMENDED STRUCTURE (adapt per article):
+# Title
+## The Problem
+## Why This Is Harder Than It Looks
+## The Naive Design
+## Where the Naive Design Breaks
+## The First Design Decision
+## The Hard Engineering Problems (Problem 1/2/3)
+## Design Options (A/B/C)
+## Trade-offs
+## The Architecture
+## Failure Scenarios
+## Capacity & Performance
+## Security & Privacy
+## Observability
+## AI-Specific Considerations
+## What We Would Do Differently
+## Key Lessons
+## Interview Questions
+
+END with 3-7 concrete lessons the reader can reuse elsewhere.
+
+BILINGUAL: produce EN and VI versions with SAME depth, SAME code/diagrams, faithful VI translation. Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — improve title if needed, keep pubDatetime unchanged. Only modify the two given files.
+
+ARTICLE #1: ai/ledger-anomaly-detection
+CURRENT EN (rewrite to /tmp/fp_1_ledger-anomaly-detection/ledger-anomaly-detection.en.md):
+=== EN CURRENT ===
+---
+title: "Designing Ledger Anomaly Detection with Kafka and Prometheus"
+description: "A guarded design for scoring ledger events asynchronously without putting AI on the money path."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> **Repository:** https://github.com/finpay-lab/ledger-service
+
+
+Anomaly detection is useful only if it does not make ledger posting less reliable. The difficult part is not calling a model. It is keeping model latency, provider failures, duplicate messages, secrets, and audit requirements out of the transaction that moves money.
+
+This article describes the supplied `ledger-service` design and a safer integration boundary: post the ledger entry first, publish an event, score it asynchronously, and expose the scoring path through Prometheus. AI produces a signal. Deterministic policy and, where required, a human approval flow make the financial decision.
+
+## What is factual and what is design
+
+**[SOURCE FACT]** The supplied service description identifies `ledger-service` as a Spring Boot service. It records each payment as a double-entry `debit`/`credit` pair in one database transaction, publishes ledger events to Kafka on `ledger.events`, and makes them searchable in OpenSearch. The stated product goal is to flag suspicious ledger patterns before reconciliation and before the batch job at 2 AM.
+
+**[SOURCE FACT]** The repository is attributed to FinPay in the supplied material. The repository link is retained above; no additional company or platform claims are made here.
+
+**[ANALYSIS]** The model must be an observer of the money path, not a dependency of it. The rest of this article is a proposed boundary for that requirement. Code marked as proposed is illustrative and should be adapted to the actual service.
+
+## 1. Keep the money path small
+
+The core invariant is a single database transaction containing the two ledger entries:
+
+```java
+// application/PostingService.java
+@Transactional
+public void post(LedgerCommand cmd) {
+    ledger.entry(new Entry(cmd.eventId(), DEBIT, cmd.partyId(), cmd.amount()));
+    ledger.entry(new Entry(cmd.eventId(), CREDIT, cmd.counterparty(), cmd.amount()));
+}
+```
+
+**[ANALYSIS]** Any additional work in this method competes for the same database transaction, connection, and row locks. A remote model call is especially unsuitable here: its timeout and retry behavior are outside the ledger's control.
+
+## 2. What not to do
+
+The following example is intentionally unsafe. It shows the failure modes that the design must exclude.
+
+```java
+// WRONG: remote AI call on the money path, hardcoded secret, no safeguards.
+public class PaymentProcessor {
+    private static final String OPENAI_API_KEY = "sk-proj-...";
+
+    @Transactional
+    public void postLedger(PaymentEvent event) {
+        ledger.post(debit(event), credit(event));
+        String answer = openAiClient.ask(prompt(event), OPENAI_API_KEY);
+        if ("YES".equals(answer)) {
+            fundsService.hold(event.eventId());
+        }
+        auditRepo.save(new AuditRow(event.eventId(), answer));
+    }
+}
+```
+
+**[ANALYSIS]** This has several independent problems:
+
+- The database transaction remains open while the service waits for a third-party API. As an illustrative assumption, a model with a 2-second p95 would hold locks for that wait, consume a connection, and add latency to unrelated ledger posts.
+- There is no timeout, retry policy, circuit breaker, or fallback. A provider outage can therefore become a ledger outage.
+- The credential is hardcoded and can be committed, scanned, rotated, or leaked. It also makes the deploy depend on one static credential instead of runtime secret injection.
+- `fundsService.hold(...)` turns an unverified model response into a money action. There is no deterministic policy or human approval boundary.
+- Kafka delivery is at-least-once. A redelivery can post the entries again and call `hold` again unless the consumer and side effects are idempotent.
+- The audit write shares the money transaction. If the remote call hangs or the transaction rolls back, the record of the decision can be missing when it is most needed.
+
+## 3. Guardrails
+
+**[PROPOSED DESIGN]** Treat these as product and reliability requirements, not implementation details:
+
+1. AI emits a signal; it never directly decides a money outcome.
+2. Use `eventId` as the idempotency key. Consumers, stores, and external side effects must tolerate replay.
+3. Apply `timeout -> retry -> circuit breaker` in that order. On failure, use a deterministic fallback that records the failure and does not block posting.
+4. Use BYOK (Bring Your Own Key) through runtime secret injection. Never hardcode or log the key; redact accidental secret output.
+5. Write a versioned, append-only audit record containing the input evidence, model identifier, verdict, and timestamp.
+6. Instrument the AI path. Latency, failures, fallback use, and anomaly rate should be available to Prometheus so the monitor can be monitored.
+
+## 4. Ports and adapters
+
+**[PROPOSED DESIGN]** Keep the domain independent of Kafka, HTTP, JSON, OpenSearch, and model SDKs. The domain owns models and ports (interfaces). Infrastructure owns adapters (implementations).
+
+```text
+com.finpay.ledger
+├── domain/
+│   ├── model/              # LedgerEvent, AnomalyScore, AnomalyRecord
+│   └── port/               # AnomalyScorer, AnomalyStore, AuditTrail
+├── application/            # PostingService, DetectAnomalyService
+└── infrastructure/
+    ├── kafka/              # LedgerEventListener
+    ├── ai/                 # OpenAiAnomalyScorer, RuleBasedScorer
+    ├── opensearch/         # OpenSearchAnomalyStore
+    ├── audit/              # AuditTrailImpl
+    └── metrics/            # Prometheus/Micrometer adapter
+```
+
+The ports can stay small:
+
+```java
+public interface AnomalyScorer {
+    AnomalyScore score(LedgerEvent event);
+}
+
+public interface AnomalyStore {
+    boolean exists(String eventId);
+    void save(AnomalyRecord record);
+}
+
+public interface AuditTrail {
+    void append(AnomalyRecord record);
+}
+```
+
+`OpenAiAnomalyScorer` and `RuleBasedScorer` are adapters behind `AnomalyScorer`. The application layer chooses the configured scorer and fallback; the domain does not import an AI client.
+
+## 5. Proposed asynchronous flow
+
+**[PROPOSED DESIGN]** Keep event publication and scoring separate from the posting transaction:
+
+```text
+PostingService
+    -> database transaction: debit + credit
+    -> publish LedgerEvent(eventId)
+
+LedgerEventListener
+    -> check idempotency by eventId
+    -> score with timeout, retry, and circuit breaker
+    -> fall back to deterministic rules on failure
+    -> save AnomalyRecord
+    -> append audit record
+    -> update Prometheus metrics
+```
+
+The listener must not call `fundsService.hold(...)` merely because a scorer returns an anomalous verdict. A separate deterministic policy evaluates the signal and the available evidence. If the business requires a hold, that action should have its own idempotency key and audit entry. The model remains advisory.
+
+The exact delivery mechanism between the database and Kafka is an implementation choice. If the service needs stronger coordination between the ledger commit and event publication, an outbox is a possible proposal; it is not asserted as an existing repository fact here.
+
+## 6. Idempotency and audit
+
+**[PROPOSED DESIGN]** Make the event identifier the boundary for replay handling. A consumer should check whether the event has already been processed before creating an anomaly record. The check and the durable write need a uniqueness guarantee, not only an in-memory check, because multiple deliveries can be processed concurrently.
+
+The scorer itself may be called again after a timeout or redelivery, so it should not be treated as a one-time operation. Persist the result with the event identifier, model/version metadata, evidence reference, verdict, and timestamp. Keep the record append-only; co
+=== VI CURRENT ===
+---
+title: "Thiết kế phát hiện bất thường trong ledger với Kafka và Prometheus"
+description: "Thiết kế có guardrail để chấm điểm sự kiện ledger bất đồng bộ mà không đưa AI vào luồng xử lý tiền."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+> **Repository:** https://github.com/finpay-lab/ledger-service
+
+
+Phát hiện bất thường chỉ có ích khi nó không làm giảm độ tin cậy của việc ghi ledger. Khó khăn không nằm ở việc gọi một model, mà ở việc giữ latency của model, lỗi từ provider, message trùng lặp, secret và yêu cầu audit ra khỏi transaction đang di chuyển tiền.
+
+Bài viết này mô tả thiết kế `ledger-service` được cung cấp và một ranh giới tích hợp an toàn hơn: ghi ledger trước, publish event, chấm điểm bất đồng bộ, rồi xuất trạng thái của luồng chấm điểm qua Prometheus. AI tạo ra một tín hiệu. Chính sách xác định và, khi cần, quy trình phê duyệt của con người mới đưa ra quyết định tài chính.
+
+## Phân biệt dữ kiện và thiết kế
+
+**[SOURCE FACT]** Mô tả service được cung cấp xác định `ledger-service` là một Spring Boot service. Service ghi mỗi payment thành một cặp `debit`/`credit` theo mô hình double-entry trong một database transaction, publish ledger event lên Kafka với topic `ledger.events`, và cung cấp dữ liệu để tìm kiếm trong OpenSearch. Mục tiêu nghiệp vụ được nêu là gắn cờ các mẫu ledger đáng ngờ trước khi đối soát và trước batch job lúc 2 giờ sáng.
+
+**[SOURCE FACT]** Tài liệu được cung cấp gắn repository với FinPay. Link repository được giữ ở đầu bài; bài viết không thêm tuyên bố cụ thể nào khác về công ty hoặc nền tảng.
+
+**[ANALYSIS]** Model phải quan sát luồng tiền, không phải là dependency của luồng tiền. Các phần còn lại là ranh giới được đề xuất để đáp ứng yêu cầu đó. Những đoạn được đánh dấu là thiết kế đề xuất chỉ mang tính minh họa và cần được điều chỉnh theo service thực tế.
+
+## 1. Giữ luồng tiền nhỏ
+
+Bất biến cốt lõi là một database transaction chứa hai ledger entry:
+
+```java
+// application/PostingService.java
+@Transactional
+public void post(LedgerCommand cmd) {
+    ledger.entry(new Entry(cmd.eventId(), DEBIT, cmd.partyId(), cmd.amount()));
+    ledger.entry(new Entry(cmd.eventId(), CREDIT, cmd.counterparty(), cmd.amount()));
+}
+```
+
+**[ANALYSIS]** Mọi công việc thêm vào method này đều tranh chấp cùng database transaction, connection và row lock. Một remote model call đặc biệt không phù hợp ở đây vì timeout và retry của nó nằm ngoài quyền kiểm soát của ledger.
+
+## 2. Những điều không nên làm
+
+Ví dụ dưới đây cố ý không an toàn. Nó cho thấy các failure mode mà thiết kế phải loại trừ.
+
+```java
+// WRONG: gọi AI trên luồng tiền, hardcode secret, không có guardrail.
+public class PaymentProcessor {
+    private static final String OPENAI_API_KEY = "sk-proj-...";
+
+    @Transactional
+    public void postLedger(PaymentEvent event) {
+        ledger.post(debit(event), credit(event));
+        String answer = openAiClient.ask(prompt(event), OPENAI_API_KEY);
+        if ("YES".equals(answer)) {
+            fundsService.hold(event.eventId());
+        }
+        auditRepo.save(new AuditRow(event.eventId(), answer));
+    }
+}
+```
+
+**[ANALYSIS]** Đoạn code có nhiều vấn đề độc lập:
+
+- Database transaction vẫn mở trong khi service chờ third-party API. Theo giả định minh họa, một model có p95 là 2 giây sẽ giữ lock trong thời gian chờ đó, chiếm một connection và làm tăng latency của các lần ghi ledger không liên quan.
+- Không có timeout, retry policy, circuit breaker hay fallback. Vì vậy, provider outage có thể biến thành ledger outage.
+- Credential bị hardcode và có thể bị commit, secret scanner phát hiện, rotate hoặc làm lộ. Cách này cũng khiến deploy phụ thuộc vào một credential tĩnh thay vì inject secret lúc runtime.
+- `fundsService.hold(...)` biến response chưa được kiểm chứng của model thành hành động về tiền. Không có ranh giới cho deterministic policy hay human approval.
+- Kafka có delivery semantics at-least-once. Khi message được gửi lại, service có thể ghi entry lần nữa và gọi `hold` lần nữa nếu consumer và các side effect không idempotent.
+- Ghi audit dùng chung transaction tiền. Nếu remote call bị treo hoặc transaction rollback, bản ghi quyết định có thể biến mất đúng lúc cần nó nhất.
+
+## 3. Guardrail
+
+**[PROPOSED DESIGN]** Hãy coi các điểm sau là yêu cầu ở cấp sản phẩm và reliability, không phải chi tiết triển khai:
+
+1. AI chỉ phát ra tín hiệu; không bao giờ trực tiếp quyết định kết quả về tiền.
+2. Dùng `eventId` làm idempotency key. Consumer, store và external side effect phải chịu được replay.
+3. Áp dụng `timeout -> retry -> circuit breaker` theo đúng thứ tự. Khi lỗi, dùng fallback xác định, ghi nhận lỗi và không block việc ghi ledger.
+4. Dùng BYOK (Bring Your Own Key) thông qua runtime secret injection. Không hardcode hoặc ghi log key; redaction các secret vô tình xuất hiện.
+5. Ghi audit thành record có version, append-only, gồm bằng chứng đầu vào, định danh model, verdict và timestamp.
+6. Instrument đầy đủ luồng AI. Latency, lỗi, việc dùng fallback và tỷ lệ bất thường cần được đưa lên Prometheus để có thể giám sát chính bộ giám sát.
+
+## 4. Port và adapter
+
+**[PROPOSED DESIGN]** Giữ domain độc lập với Kafka, HTTP, JSON, OpenSearch và model SDK. Domain sở hữu model và port (interface). Infrastructure sở hữu adapter (implementation).
+
+```text
+com.finpay.ledger
+├── domain/
+│   ├── model/              # LedgerEvent, AnomalyScore, AnomalyRecord
+│   └── port/               # AnomalyScorer, AnomalyStore, AuditTrail
+├── application/            # PostingService, DetectAnomalyService
+└── infrastructure/
+    ├── kafka/              # LedgerEventListener
+    ├── ai/                 # OpenAiAnomalyScorer, RuleBasedScorer
+    ├── opensearch/         # OpenSearchAnomalyStore
+    ├── audit/              # AuditTrailImpl
+    └── metrics/            # Prometheus/Micrometer adapter
+```
+
+Các port có thể giữ ở mức nhỏ:
+
+```java
+public interface AnomalyScorer {
+    AnomalyScore score(LedgerEvent event);
+}
+
+public interface AnomalyStore {
+    boolean exists(String eventId);
+    void save(AnomalyRecord record);
+}
+
+public interface AuditTrail {
+    void append(AnomalyRecord record);
+}
+```
+
+`OpenAiAnomalyScorer` và `RuleBasedScorer` là các adapter phía sau `AnomalyScorer`. Application layer chọn scorer được cấu hình và fallback; domain không import AI client.
+
+## 5. Luồng bất đồng bộ được đề xuất
+
+**[PROPOSED DESIGN]** Tách việc publish event và chấm điểm khỏi posting transaction:
+
+```text
+PostingService
+    -> database transaction: debit + credit
+    -> publish LedgerEvent(eventId)
+
+LedgerEventListener
+    -> kiểm tra idempotency theo eventId
+    -> chấm điểm với timeout, retry và circuit breaker
+    -> dùng deterministic rules khi có lỗi
+    -> lưu AnomalyRecord
+    -> append audit record
+    -> cập nhật Prometheus metrics
+```
+
+Listener không được gọi `fundsService.hold(...)` chỉ vì scorer trả về verdict bất thường. Một deterministic policy riêng phải đánh giá tín hiệu cùng bằng chứng hiện có. Nếu nghiệp vụ cần hold, hành động đó nên có idempotency key và audit entry riêng. Model vẫn chỉ mang tính tham khảo.
+
+Cơ chế delivery chính xác giữa database và Kafka là một lựa chọn triển khai. Nếu service cần phối hợp chặt hơn giữa ledger commit và event publication, outbox là một đề xuất khả thi; bài viết không khẳng định đó là fact của repository hiện tại.
+
+## 6. Idempotency và audit
+
+**[PROPOSED DESIGN]** Dùng event identifier làm ranh giới xử lý replay. Consumer nên kiểm tra event đã được xử lý hay chưa trước khi tạo anomaly record. Check và durable write cần một uniqueness guarantee, không chỉ một check trong memory, vì nhiều delivery có thể được xử lý đồng thời.
+
+Scorer có thể bị gọi lại sau timeout hoặc redelivery, nên không được coi là thao tác chỉ chạy một lần. Lưu kết quả với event identifier, metadata về model/version, reference tới evidence, verdict và timestamp. Giữ record ở dạng append-only; correction nên là record mới liên kết với event gốc thay vì update phá hủy dữ liệu cũ.
+
+Audit là concern riêng
+Rewrite both into the new problem-driven style. Preserve the real engineering content (Kafka/Prometheus/OpenSearch boundaries, idempotency, RAG, KYC, guardrail, AI core library) but rebuild the NARRATIVE around reasoning. Write:
+  /tmp/fp_1_ledger-anomaly-detection/ledger-anomaly-detection.en.md
+  /tmp/fp_1_ledger-anomaly-detection/ledger-anomaly-detection.vi.md

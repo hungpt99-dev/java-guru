@@ -1,0 +1,387 @@
+You are a senior Staff/Principal Engineer and technical writer. REWRITE the given FinPay AI blog article pair (EN + VI) into a problem-driven engineering narrative.
+
+CORE PRINCIPLE: Architecture must be the RESULT of engineering reasoning, not the starting point. Do NOT start with a component diagram and explain each box. Instead: Real Problem -> Why It Matters -> Naive Solution -> Why It Breaks -> Hard Engineering Problems -> Trade-offs -> Better Design -> Failure Scenarios -> Final Architecture -> Lessons.
+
+WRITING STYLE: like a BigTech engineering blog + Staff design review + system-design interview + production postmortem. NOT generated docs, marketing, or a tech tutorial. Explain WHY before WHAT. Reasoning first, technology second.
+
+EVERY ARTICLE MUST:
+- Begin with a concrete situation/business problem, then the engineering question.
+- Show the NAIVE design first (small diagram), then ATTACK it: what happens at 10K TPS? when AI takes 2s/10s? when provider down? when payment succeeds but AI fails? on Kafka retry? on duplicate/replay? who has authority to block?
+- Treat AI as an engineering component, NOT magic: discuss false positives/negatives, nondeterminism, model/prompt versioning, inference latency/cost, rate limits, provider outages, timeouts, retries, hallucination, confidence, evaluation, monitoring, fallback. Emphasize: AI Signal -> Policy -> Business Decision (NOT AI -> Block Money).
+- For fraud/anomaly: discuss Rules vs Statistical vs ML vs LLM and WHY each fits.
+- Include non-obvious problems (the failure mode that looks harmless, what breaks first, replay cost, dependency down, under load, model change).
+- Failure scenarios explicit: dependency unavailable, timeout, partial failure, duplicate/out-of-order event, consumer crash/rebalance, retry storm, poison message, backpressure, queue saturation, DB failure, AI provider failure, model regression, rollback, replay.
+- Capacity reasoned with equations (Concurrency = Throughput x Latency). Numbers need a reason; never newFixedThreadPool(4) without why.
+- Idempotency technically correct: show the exists()-check race (two consumers both see false), then real mechanisms (unique constraint, atomic insert, Redis SETNX, transactional outbox/inbox, deterministic ids, idempotency keys). Distinguish idempotent STORAGE from idempotent SIDE EFFECTS.
+- Separate event source from query store: Kafka = replay source, DB/Ledger = system of record, OpenSearch = read/index model. If index lost -> replay -> rebuild.
+- Auditability beyond logging: preserve transaction_id, event_id, timestamp, features, risk_score, decision, model_version, prompt_version, provider, reason, policy_version. Discuss reproducibility.
+- Observability = business + system: transactions_processed, anomalies_detected, false_positive_rate, false_negative_rate, review_rate, AI_timeout_rate, AI_cost, model_error_rate, model_version, decision_distribution. Cardinality risk: NEVER use transaction_id/account_id as Prometheus labels.
+- Security/privacy: PII, data minimization, encryption, access control, audit access, AI provider data handling, prompt leakage, logging sensitive data, retention. Do NOT casually send entire transaction to external AI.
+- LANGUAGE: precise engineering English/Vietnamese. Avoid "money flow is sacred", "guardian of ledger", "AI watches every transaction", "non-negotiable", "fights chaos". Use: "The ledger path has strict consistency requirements while anomaly detection tolerates eventual processing; keeping them on separate paths lets each fail independently."
+- NO fabricated production claims. FinPay is a fictional/reference system. Use "A production-oriented design would…", "If FinPay reached X TPS…", "One approach is…". Do NOT claim "we deployed to production" or invent incidents/benchmarks/latency/cost.
+- Cite authoritative sources where useful (official engineering blogs/docs/papers). NEVER invent URLs or attribute architectures to Google/Netflix/Uber/Stripe/Amazon unless a real source supports it.
+- Code only when it proves a point (show WRONG then RIGHT, with the race condition). Small diagrams that answer ONE question each.
+
+RECOMMENDED STRUCTURE (adapt per article):
+# Title
+## The Problem
+## Why This Is Harder Than It Looks
+## The Naive Design
+## Where the Naive Design Breaks
+## The First Design Decision
+## The Hard Engineering Problems (Problem 1/2/3)
+## Design Options (A/B/C)
+## Trade-offs
+## The Architecture
+## Failure Scenarios
+## Capacity & Performance
+## Security & Privacy
+## Observability
+## AI-Specific Considerations
+## What We Would Do Differently
+## Key Lessons
+## Interview Questions
+
+END with 3-7 concrete lessons the reader can reuse elsewhere.
+
+BILINGUAL: produce EN and VI versions with SAME depth, SAME code/diagrams, faithful VI translation. Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — improve title if needed, keep pubDatetime unchanged. Only modify the two given files.
+
+ARTICLE #8: ai/platform-ai-core-library
+CURRENT EN (rewrite to /tmp/fp_8_platform-ai-core-library/platform-ai-core-library.en.md):
+=== EN CURRENT ===
+---
+title: "A Shared AI Core Library for Microservices"
+description: "A practical design for shared LLM integration with BYOK credentials, resilience controls, idempotency, and auditable outcomes."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo referenced by the source material: <https://github.com/finpay-lab/platform>
+
+## The problem
+
+Adding an LLM call to one service is straightforward. Operating that call consistently across a microservice fleet is not. The integration needs credential isolation, bounded failure handling, duplicate-event protection, and an audit record that is useful after the fact.
+
+**[SOURCE FACT]** The source article describes three services with three different integration patterns: direct provider calls from a controller, an API key in `application.yml`, and a retry strategy that sends a failed event back to a dead-letter queue without a timeout. It also describes inconsistent `JsonObject` parsing, no shared telemetry, and an audit trail reduced to a `logger.info("done")` message.
+
+**[ANALYSIS]** Those are not separate LLM problems. They are platform concerns. A shared Spring Boot module can provide one contract for provider calls, credential lookup, resilience, deduplication, and decision auditing while leaving business-specific policy in the calling service.
+
+This article covers that boundary. It does not treat an LLM as a money-movement authority, and it does not claim that the implementation below is a complete production library.
+
+## Guardrails
+
+These are the non-negotiable rules in the proposed design:
+
+1. **AI is not the money decision-maker.** An LLM may enrich a deterministic or human decision with a fraud score, a suggested limit, or a risk label. The rule engine or an authorized person decides whether money is moved or blocked. The library therefore returns a scored, labeled, auditable observation rather than an `approve`/`reject` command.
+2. **Use caller-supplied `eventId` for idempotency.** Redelivery, a retry, or a double-click must not create another outcome for the same event. The library should make this an explicit contract, backed by an atomic claim in the outcome store.
+3. **Bound every provider call.** A timeout, bounded retries with backoff, and a circuit breaker prevent a failing provider from consuming the caller's resources indefinitely. These controls are complementary: a timeout bounds one attempt, retry handles selected transient failures, and the circuit breaker stops calls when failure is persistent.
+4. **Use BYOK without exposing secrets.** Each tenant supplies its own key. The key is kept in Vault or another secret manager, resolved by reference, rotated there, and excluded from logs, traces, and audit records.
+5. **Audit the result, not the secret.** Persist the prompt hash, model, latency, cost, key ID, and verdict to OpenSearch so the result can be queried for forensic analysis without storing the prompt or API key itself.
+
+## Architecture
+
+**[PROPOSED DESIGN]** Keep the use case in `domain/` dependent on ports only. Put Kafka, model providers, Redis, OpenSearch, and Vault integrations in `infrastructure/` adapters.
+
+```text
+                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
+  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
+  tx.risk      │            │              ▲                   ▲                ▲
+               │            │              │ adapters          │ adapters       │ adapter
+               ▼            ▼              │                   │                │
+          infrastructure/ ─┼───────────────┴───────────────────┴────────────────┘
+                 │
+                 ├── ModelProviderAdapter (OpenAI / Anthropic / Bedrock)
+                 ├── RedisOutcomeStore            (dedup + short TTL)
+                 ├── OpenSearchDecisionAudit      (long-term forensics)
+                 └── VaultCredentialResolver      (BYOK by reference)
+```
+
+The use case knows only the ports. Replacing one model provider with another should therefore be an adapter change, not a change to domain policy. That is a design goal, not a claim about a particular repository implementation.
+
+## Credentials: wrong and right
+
+### Wrong
+
+```java
+// Hardcoded key: it can be committed, copied into tickets, and logged.
+public class MoneyFairyService {
+    private static final String OPENAI_KEY = "«redacted:sk-…»...";
+
+    public String label(String text) {
+        OpenAIClient client = new OpenAIClient(OPENAI_KEY);
+        log.info("Calling provider with key={}", OPENAI_KEY);
+        return client.complete(systemPrompt + text);
+    }
+}
+```
+
+The key is now part of the repository and process configuration, cannot be rotated independently of deployment, and is exposed by the log statement. Secret scanners can also retain a finding after the key has been removed from the working tree. The practical response is rotation and removal from history, not merely deleting the line.
+
+### Right
+
+**[PROPOSED DESIGN]** Store a reference in configuration. Resolve the secret only at the provider boundary.
+
+```yaml
+# application.yml: a reference, never the secret itself
+ai:
+  provider: anthropic
+  key-ref: vault://finpay/ai/tenant-42/anthropic-key
+  model: claude-sonnet-4-5
+  timeout: 4s
+  max-retries: 3
+```
+
+```java
+@ConfigurationProperties(prefix = "ai")
+@Validated
+public record AiProperties(
+        @NotBlank String provider,
+        @NotBlank String keyRef,
+        @NotBlank String model,
+        @DurationMin(seconds = 1) Duration timeout,
+        @Min(0) int maxRetries) {
+}
+```
+
+```java
+// domain/: the use case never receives a key.
+public interface CredentialResolver {
+    KeyCredentials resolve(String keyRef);
+}
+
+public record KeyCredentials(String id, char[] secret) { }
+```
+
+```java
+// infrastructure/: the adapter talks to Vault.
+@Component
+public class VaultCredentialResolver implements CredentialResolver {
+    private final VaultTemplate vault;
+
+    public KeyCredentials resolve(String keyRef) {
+        VaultResponse response = vault.readSecret(keyRef);
+        return new KeyCredentials(response.getKeyId(),
+                response.getData().get("api_key").toCharArray());
+    }
+}
+```
+
+```java
+// infrastructure/: resolve in memory for one call and never expose the key.
+@Component
+public class AnthropicModelAdapter implements ModelProvider {
+    private final CredentialResolver credentials;
+    private final AiProperties props;
+
+    public ModelResult complete(AiRequest request) {
+        KeyCredentials creds = credentials.resolve(props.keyRef());
+        try (AnthropicClient client = new AnthropicClient(creds)) {
+            return client.complete(props.model(), request);
+        } finally {
+            Arrays.fill(creds.secret(), 'x');
+        }
+    }
+}
+```
+
+The example keeps the secret inside the adapter's scope as a `char[]` and scrubs that array after the call. This reduces accidental exposure; it is not a guarantee against every memory-disclosure mechanism. The key ID may be audited, but the key material must not be.
+
+## Resilience: wrong and right
+
+### Wrong
+
+```java
+public String callLlm(String prompt) throws IOException, InterruptedException {
+    HttpClient client = HttpClient.newHttpClient();
+    HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+            .timeout(Duration.ofMinutes(30))
+            .POST(...)
+            .build();
+    HttpResponse<String> res = client.send(req, BodyHandlers.ofString());
+    if (res.statusCode() == 500) {
+        return callLlm(prompt);
+    }
+    return res.body();
+}
+```
+
+This holds a thread for up to 30 minutes, retries recursively without a bound, and has no circuit state. If the provider remains unavailable, callers keep spending resources on the same failing endpoint.
+
+### Right
+
+**[PROPOSED DESIGN]** Apply resilience at the provider port. The exact library configuration is implementation-specific, but the behavior
+=== VI CURRENT ===
+---
+title: "Thư viện AI core dùng chung cho hệ thống microservice"
+description: "Thiết kế thực tế cho tích hợp LLM dùng chung với credential BYOK, cơ chế chống lỗi, idempotency và kết quả có audit."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags: [java, ai, fintech, architecture]
+draft: false
+featured: false
+---
+
+Repo được nhắc đến trong tài liệu nguồn: <https://github.com/finpay-lab/platform>
+
+## Bài toán
+
+Thêm một lời gọi LLM vào một service khá đơn giản. Vận hành lời gọi đó nhất quán trên cả một fleet microservice thì không. Tích hợp cần cô lập credential, xử lý lỗi có giới hạn, chống xử lý trùng event và tạo audit record hữu ích khi cần điều tra.
+
+**[THÔNG TIN NGUỒN]** Tài liệu nguồn mô tả ba service với ba cách tích hợp khác nhau: gọi trực tiếp provider từ controller, đặt API key trong `application.yml`, và xử lý lỗi bằng cách gửi event lỗi trở lại dead-letter queue mà không có timeout. Tài liệu cũng mô tả việc parse `JsonObject` không nhất quán, không có telemetry dùng chung, và audit trail chỉ còn một thông báo `logger.info("done")`.
+
+**[PHÂN TÍCH]** Đây không phải là ba vấn đề LLM độc lập. Đây là các mối quan tâm của platform. Một module Spring Boot dùng chung có thể cung cấp cùng một contract cho việc gọi provider, tra credential, xử lý lỗi, deduplication và audit quyết định, trong khi policy nghiệp vụ vẫn nằm ở service gọi nó.
+
+Bài viết này tập trung vào ranh giới đó. LLM không được xem là bên có quyền quyết định việc chuyển tiền, và phần code dưới đây không được trình bày như một thư viện production hoàn chỉnh.
+
+## Guardrails
+
+Đây là các quy tắc không thể bỏ qua trong thiết kế đề xuất:
+
+1. **AI không quyết định việc chuyển tiền.** LLM có thể bổ sung thông tin cho quyết định của rule xác định (deterministic) hoặc con người, chẳng hạn fraud score, hạn mức đề xuất hoặc risk label. Rule engine hoặc người có thẩm quyền mới quyết định chuyển hay chặn tiền. Vì vậy thư viện trả về một observation có score, label và audit, thay vì một lệnh `approve`/`reject`.
+2. **Dùng `eventId` do bên gọi cung cấp để bảo đảm idempotency.** Redelivery, retry hoặc double-click không được tạo thêm outcome cho cùng một event. Thư viện nên biến đây thành contract rõ ràng, được bảo vệ bằng thao tác claim atomic trong outcome store.
+3. **Giới hạn mọi lời gọi provider.** Timeout, retry có giới hạn kèm backoff và circuit breaker ngăn provider lỗi chiếm tài nguyên của bên gọi vô thời hạn. Ba cơ chế có vai trò khác nhau: timeout giới hạn một attempt, retry xử lý một số lỗi tạm thời, còn circuit breaker ngắt lời gọi khi lỗi kéo dài.
+4. **Dùng BYOK nhưng không để lộ secret.** Mỗi tenant cung cấp key riêng. Key được giữ trong Vault hoặc secret manager khác, được tra cứu bằng reference, xoay vòng tại đó, và không xuất hiện trong log, trace hay audit record.
+5. **Audit kết quả, không audit secret.** Lưu prompt hash, model, latency, cost, key ID và verdict vào OpenSearch để truy vấn phục vụ forensic analysis, nhưng không lưu prompt hoặc API key.
+
+## Kiến trúc
+
+**[THIẾT KẾ ĐỀ XUẤT]** Giữ use case trong `domain/` và chỉ cho nó phụ thuộc vào các port. Đặt tích hợp Kafka, model provider, Redis, OpenSearch và Vault vào các adapter trong `infrastructure/`.
+
+```text
+                 ┌────────────────────────── domain/ (ports) ──────────────────────────┐
+  Kafka ──► Consumer ──► AiUseCase ──► AiClassifier      OutcomeStore     DecisionAudit
+  tx.risk      │            │              ▲                   ▲                ▲
+               │            │              │ adapters          │ adapters       │ adapter
+               ▼            ▼              │                   │                │
+          infrastructure/ ─┼───────────────┴───────────────────┴────────────────┘
+                 │
+                 ├── ModelProviderAdapter (OpenAI / Anthropic / Bedrock)
+                 ├── RedisOutcomeStore            (dedup + TTL ngắn)
+                 ├── OpenSearchDecisionAudit      (forensics dài hạn)
+                 └── VaultCredentialResolver      (BYOK theo reference)
+```
+
+Use case chỉ biết các port. Vì vậy, thay một model provider bằng provider khác nên chỉ cần thay adapter, không phải thay policy trong domain. Đây là mục tiêu thiết kế, không phải khẳng định về một implementation cụ thể trong repository.
+
+## Credential: sai và đúng
+
+### Sai
+
+```java
+// Key hardcode: có thể bị commit, copy vào ticket và ghi vào log.
+public class MoneyFairyService {
+    private static final String OPENAI_KEY = "«redacted:sk-…»...";
+
+    public String label(String text) {
+        OpenAIClient client = new OpenAIClient(OPENAI_KEY);
+        log.info("Calling provider with key={}", OPENAI_KEY);
+        return client.complete(systemPrompt + text);
+    }
+}
+```
+
+Key lúc này nằm trong repository và cấu hình của process, không thể xoay vòng độc lập với việc deploy, đồng thời bị lộ qua câu lệnh log. Secret scanner cũng có thể giữ lại finding sau khi key đã bị xóa khỏi working tree. Cách xử lý thực tế là xoay vòng key và loại bỏ khỏi history, không chỉ xóa một dòng code.
+
+### Đúng
+
+**[THIẾT KẾ ĐỀ XUẤT]** Lưu reference trong configuration. Chỉ resolve secret ở ranh giới provider.
+
+```yaml
+# application.yml: reference, không phải secret
+ai:
+  provider: anthropic
+  key-ref: vault://finpay/ai/tenant-42/anthropic-key
+  model: claude-sonnet-4-5
+  timeout: 4s
+  max-retries: 3
+```
+
+```java
+@ConfigurationProperties(prefix = "ai")
+@Validated
+public record AiProperties(
+        @NotBlank String provider,
+        @NotBlank String keyRef,
+        @NotBlank String model,
+        @DurationMin(seconds = 1) Duration timeout,
+        @Min(0) int maxRetries) {
+}
+```
+
+```java
+// domain/: use case không bao giờ nhận key.
+public interface CredentialResolver {
+    KeyCredentials resolve(String keyRef);
+}
+
+public record KeyCredentials(String id, char[] secret) { }
+```
+
+```java
+// infrastructure/: adapter giao tiếp với Vault.
+@Component
+public class VaultCredentialResolver implements CredentialResolver {
+    private final VaultTemplate vault;
+
+    public KeyCredentials resolve(String keyRef) {
+        VaultResponse response = vault.readSecret(keyRef);
+        return new KeyCredentials(response.getKeyId(),
+                response.getData().get("api_key").toCharArray());
+    }
+}
+```
+
+```java
+// infrastructure/: resolve trong bộ nhớ cho một lần gọi và không để lộ key.
+@Component
+public class AnthropicModelAdapter implements ModelProvider {
+    private final CredentialResolver credentials;
+    private final AiProperties props;
+
+    public ModelResult complete(AiRequest request) {
+        KeyCredentials creds = credentials.resolve(props.keyRef());
+        try (AnthropicClient client = new AnthropicClient(creds)) {
+            return client.complete(props.model(), request);
+        } finally {
+            Arrays.fill(creds.secret(), 'x');
+        }
+    }
+}
+```
+
+Ví dụ giữ secret trong phạm vi adapter dưới dạng `char[]` và xóa nội dung mảng sau lời gọi. Cách này giảm nguy cơ lộ do vô tình, nhưng không bảo đảm chống mọi cơ chế làm lộ memory. Có thể audit key ID, nhưng không được audit key material.
+
+## Resilience: sai và đúng
+
+### Sai
+
+```java
+public String callLlm(String prompt) throws IOException, InterruptedException {
+    HttpClient client = HttpClient.newHttpClient();
+    HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+            .timeout(Duration.ofMinutes(30))
+            .POST(...)
+            .build();
+    HttpResponse<String> res = client.send(req, BodyHandlers.ofString());
+    if (res.statusCode() == 500) {
+        return callLlm(prompt);
+    }
+    return res.body();
+}
+```
+
+Đoạn code giữ một thread tối đa 30 phút, retry đệ quy không giới hạn và không có circuit state. Khi provider tiếp tục không khả dụng, caller vẫn tiêu tốn tài nguyên cho cùng một endpoint đang lỗi.
+
+### Đúng
+
+**[THIẾT KẾ ĐỀ XUẤT]** Đặt resilience tại provider port. Cấu hình cụ thể phụ thuộc thư viện được chọn, nhưng behavior phải rõ ràng:
+
+```java
+@Component
+public class ResilientModelPort {
+    private final Retry retry;
+    private final CircuitBreaker circui
+Rewrite both into the new problem-driven style. Preserve the real engineering content (Kafka/Prometheus/OpenSearch boundaries, idempotency, RAG, KYC, guardrail, AI core library) but rebuild the NARRATIVE around reasoning. Write:
+  /tmp/fp_8_platform-ai-core-library/platform-ai-core-library.en.md
+  /tmp/fp_8_platform-ai-core-library/platform-ai-core-library.vi.md

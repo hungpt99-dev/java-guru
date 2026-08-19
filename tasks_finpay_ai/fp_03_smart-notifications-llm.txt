@@ -1,0 +1,400 @@
+You are a senior Staff/Principal Engineer and technical writer. REWRITE the given FinPay AI blog article pair (EN + VI) into a problem-driven engineering narrative.
+
+CORE PRINCIPLE: Architecture must be the RESULT of engineering reasoning, not the starting point. Do NOT start with a component diagram and explain each box. Instead: Real Problem -> Why It Matters -> Naive Solution -> Why It Breaks -> Hard Engineering Problems -> Trade-offs -> Better Design -> Failure Scenarios -> Final Architecture -> Lessons.
+
+WRITING STYLE: like a BigTech engineering blog + Staff design review + system-design interview + production postmortem. NOT generated docs, marketing, or a tech tutorial. Explain WHY before WHAT. Reasoning first, technology second.
+
+EVERY ARTICLE MUST:
+- Begin with a concrete situation/business problem, then the engineering question.
+- Show the NAIVE design first (small diagram), then ATTACK it: what happens at 10K TPS? when AI takes 2s/10s? when provider down? when payment succeeds but AI fails? on Kafka retry? on duplicate/replay? who has authority to block?
+- Treat AI as an engineering component, NOT magic: discuss false positives/negatives, nondeterminism, model/prompt versioning, inference latency/cost, rate limits, provider outages, timeouts, retries, hallucination, confidence, evaluation, monitoring, fallback. Emphasize: AI Signal -> Policy -> Business Decision (NOT AI -> Block Money).
+- For fraud/anomaly: discuss Rules vs Statistical vs ML vs LLM and WHY each fits.
+- Include non-obvious problems (the failure mode that looks harmless, what breaks first, replay cost, dependency down, under load, model change).
+- Failure scenarios explicit: dependency unavailable, timeout, partial failure, duplicate/out-of-order event, consumer crash/rebalance, retry storm, poison message, backpressure, queue saturation, DB failure, AI provider failure, model regression, rollback, replay.
+- Capacity reasoned with equations (Concurrency = Throughput x Latency). Numbers need a reason; never newFixedThreadPool(4) without why.
+- Idempotency technically correct: show the exists()-check race (two consumers both see false), then real mechanisms (unique constraint, atomic insert, Redis SETNX, transactional outbox/inbox, deterministic ids, idempotency keys). Distinguish idempotent STORAGE from idempotent SIDE EFFECTS.
+- Separate event source from query store: Kafka = replay source, DB/Ledger = system of record, OpenSearch = read/index model. If index lost -> replay -> rebuild.
+- Auditability beyond logging: preserve transaction_id, event_id, timestamp, features, risk_score, decision, model_version, prompt_version, provider, reason, policy_version. Discuss reproducibility.
+- Observability = business + system: transactions_processed, anomalies_detected, false_positive_rate, false_negative_rate, review_rate, AI_timeout_rate, AI_cost, model_error_rate, model_version, decision_distribution. Cardinality risk: NEVER use transaction_id/account_id as Prometheus labels.
+- Security/privacy: PII, data minimization, encryption, access control, audit access, AI provider data handling, prompt leakage, logging sensitive data, retention. Do NOT casually send entire transaction to external AI.
+- LANGUAGE: precise engineering English/Vietnamese. Avoid "money flow is sacred", "guardian of ledger", "AI watches every transaction", "non-negotiable", "fights chaos". Use: "The ledger path has strict consistency requirements while anomaly detection tolerates eventual processing; keeping them on separate paths lets each fail independently."
+- NO fabricated production claims. FinPay is a fictional/reference system. Use "A production-oriented design would…", "If FinPay reached X TPS…", "One approach is…". Do NOT claim "we deployed to production" or invent incidents/benchmarks/latency/cost.
+- Cite authoritative sources where useful (official engineering blogs/docs/papers). NEVER invent URLs or attribute architectures to Google/Netflix/Uber/Stripe/Amazon unless a real source supports it.
+- Code only when it proves a point (show WRONG then RIGHT, with the race condition). Small diagrams that answer ONE question each.
+
+RECOMMENDED STRUCTURE (adapt per article):
+# Title
+## The Problem
+## Why This Is Harder Than It Looks
+## The Naive Design
+## Where the Naive Design Breaks
+## The First Design Decision
+## The Hard Engineering Problems (Problem 1/2/3)
+## Design Options (A/B/C)
+## Trade-offs
+## The Architecture
+## Failure Scenarios
+## Capacity & Performance
+## Security & Privacy
+## Observability
+## AI-Specific Considerations
+## What We Would Do Differently
+## Key Lessons
+## Interview Questions
+
+END with 3-7 concrete lessons the reader can reuse elsewhere.
+
+BILINGUAL: produce EN and VI versions with SAME depth, SAME code/diagrams, faithful VI translation. Keep frontmatter (title, description, pubDatetime, tags, draft, featured) — improve title if needed, keep pubDatetime unchanged. Only modify the two given files.
+
+ARTICLE #3: ai/smart-notifications-llm
+CURRENT EN (rewrite to /tmp/fp_3_smart-notifications-llm/smart-notifications-llm.en.md):
+=== EN CURRENT ===
+---
+title: "Designing Safe LLM-Generated Payment Notifications"
+description: "A practical design for using an LLM to write notification copy without letting it change payment facts, block delivery, or leak credentials."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags:
+  - java
+  - ai
+  - fintech
+  - architecture
+draft: false
+featured: false
+---
+
+> Repository: <https://github.com/finpay-lab/notification-service>
+
+## The problem
+
+Payment notifications have two different requirements. They must state the transaction accurately, and they must be readable in SMS, email, or push form. A fixed template is reliable but tends to multiply as product and legal requirements diverge. An LLM can vary the wording, but it introduces a more serious risk: the model may change a fact while trying to make the message sound natural.
+
+This article separates those responsibilities. The domain owns validated payment facts and delivery decisions. The LLM may propose wording only. The design also covers event idempotency, structured output, timeout and retry behavior, fallback templates, tenant-supplied provider keys, and audit records.
+
+> **[SOURCE FACT]** The supplied example uses `notification-service`, a Kafka consumer, Spring Boot, a hexagonal layout, an LLM adapter, an OpenSearch adapter, and a repository at the URL above. The diagrams and code below describe that shape; configuration values are examples from the source article, not universal defaults.
+
+## Start with the unsafe design
+
+Passing a raw event payload to a model and returning an untyped string leaves every important boundary implicit:
+
+```java
+// PROPOSED DESIGN: deliberately unsafe example; do not ship it
+@Service
+public class CopyService {
+    private final LlmClient llm;
+
+    public String copyFor(NotificationEvent event) {
+        String prompt = """
+            Write a friendly Vietnamese push notification about this event:
+            %s
+            """.formatted(event.rawPayload());
+        return llm.complete(prompt); // no timeout, retry policy, or schema
+    }
+}
+```
+
+There are five independent failures:
+
+1. **Facts are not protected.** Nothing requires the output to preserve the exact amount. The source example uses `2,431,876 VND`; changing that to `2.4M` would be a correctness and potentially a compliance problem.
+2. **The output has no contract.** A push sender may require `{ title, body, tone }`, but this method returns an arbitrary string.
+3. **The dependency has no failure policy.** Without a timeout, a slow provider can hold a request. Without bounded retry and a circuit breaker (a mechanism that temporarily stops calls to a failing dependency), provider degradation can spread to notification delivery.
+4. **The model is given too much authority.** It could introduce an amount due, refund, or charge that is absent from the event.
+5. **The operation is not idempotent.** Reprocessing one event can create different copy and duplicate delivery unless the pipeline has a stable event key and a deduplication policy.
+
+These are design failures, not prompt-quality problems. They need enforcement at the application boundaries.
+
+## Proposed architecture
+
+```text
+                     +-------------------------------------------+
+Kafka topic -------->|          notification-service              |
+ event.payment       |                                             |
+                     |  +-----------+       +------------------+   |
+                     |  | domain/   |<----->| infrastructure/  |   |
+                     |  | (ports)   |       | (adapters)       |   |
+                     |  +-----+-----+       +--------+---------+   |
+                     |        |                     |             |
+                     | idempotency store            | LLM provider |
+                     | (eventId dedupe)              | (BYOK client)|
+                     |                               | OpenSearch   |
+                     +-------------------------------------------+
+```
+
+Spring Boot consumes the Kafka topic. In the proposed hexagonal architecture, domain code exposes ports (interfaces), while Kafka, the LLM provider, OpenSearch, and persistence are infrastructure adapters. The domain does not import a provider SDK. That keeps payment rules testable without network access.
+
+```text
+src/main/java/dev/finpay/notifications/
+|- domain/
+|  |- port/
+|  |  |- CopyGenerator.java
+|  |  |- DedupStore.java
+|  |  `- AuditLog.java
+|  |- model/
+|  |  |- NotificationEvent.java
+|  |  |- GeneratedCopy.java
+|  |  `- Decision.java
+|  `- service/
+|     `- CopyPipeline.java
+`- infrastructure/
+   |- kafka/
+   |- llm/
+   |- opensearch/
+   `- store/
+```
+
+The pipeline should be deterministic about facts and delivery state. Only the wording is allowed to vary.
+
+## Step 1: canonicalize the event
+
+> **[PROPOSED DESIGN]** Convert the wire event into a typed, validated fact set before calling the model. This object is the contract that generated copy cannot override.
+
+```java
+public record PaymentSettled(
+    String eventId,
+    String userId,
+    BigDecimal amountPaid,
+    String currency,
+    LocalDateTime settledAt
+) {
+    public PaymentSettled {
+        Objects.requireNonNull(eventId, "eventId is required");
+        if (amountPaid == null || amountPaid.signum() <= 0)
+            throw new IllegalArgumentException("amountPaid must be positive");
+        if (currency == null || currency.isBlank())
+            throw new IllegalArgumentException("currency is required");
+    }
+}
+```
+
+The Kafka adapter maps wire JSON to `PaymentSettled` in `infrastructure/kafka/`. The domain pipeline sees only the domain record. If the topic schema changes, the adapter changes; the domain does not have to know about that wire format.
+
+## Step 2: claim the event once
+
+Kafka delivery is at least once, so a consumer must be prepared to see the same event again. The pipeline should claim `eventId` before making an external call and release the claim when processing fails.
+
+```java
+@Transactional
+public Decision decide(PaymentSettled event) {
+    if (dedupStore.alreadyProcessed(event.eventId()))
+        return Decision.replay(event.eventId());
+
+    dedupStore.claim(event.eventId(), leaseTtlMinutes);
+    try {
+        GeneratedCopy copy = copyGenerator.generate(event);
+        Decision decision = Decision.accepted(event.eventId(), copy, now());
+        auditLog.record(decision);
+        return decision;
+    } catch (Throwable t) {
+        dedupStore.release(event.eventId());
+        Decision decision = Decision.failed(event.eventId(), reason(t), now());
+        auditLog.record(decision);
+        return decision;
+    }
+}
+```
+
+The important properties are:
+
+- The claim is keyed by `eventId`, and replay detection happens before the external call.
+- A failed attempt releases the claim so the Kafka consumer can redeliver it. Retry count and backoff belong at the consumer boundary, not in a second loop inside this pipeline.
+- Accepted, failed, and replay decisions are all auditable.
+
+## Step 3: use an idempotency key for the provider request
+
+Event deduplication does not cover a network ambiguity. A request can time out locally after the provider has completed it. A stable provider request key lets a retry refer to the same operation, when the provider supports request idempotency.
+
+```java
+String idempotencyKey = "copy:" + event.eventId();
+
+var request = CopyRequest.builder()
+    .idempotencyKey(idempotencyKey)
+    .model(providerModel)
+    .messages(List.of(systemPrompt(), userMessage(event)))
+    .responseFormat(JSON_OBJECT)
+    .build();
+```
+
+The same event produces the same key. Together with the deduplication store, this makes the copy-generation path idempotent end to end. The provider's exact idempotency behavior remains an adapter concern and must be verified against its API contract.
+
+## Step 4: facts in, JSON out
+
+> **[PROPOSED DESIGN]** Treat the system prompt as part of the application contract, not as a request for good intentions. Supply the exact
+=== VI CURRENT ===
+---
+title: "Thiết kế thông báo thanh toán sinh bằng LLM an toàn"
+description: "Thiết kế thực tế để dùng LLM viết nội dung thông báo mà không cho phép model thay đổi dữ kiện thanh toán, chặn việc gửi, hoặc làm lộ credential."
+pubDatetime: 2026-08-15T10:00:00+07:00
+tags:
+  - java
+  - ai
+  - fintech
+  - architecture
+draft: false
+featured: false
+---
+
+> Repository: <https://github.com/finpay-lab/notification-service>
+
+## Bài toán
+
+Thông báo thanh toán có hai yêu cầu khác nhau. Nội dung phải nêu đúng giao dịch, đồng thời phải dễ đọc trên SMS, email hoặc push. Template cố định đáng tin cậy nhưng thường tăng nhanh khi yêu cầu của sản phẩm và pháp lý tách ra. LLM có thể thay đổi cách diễn đạt, nhưng tạo ra rủi ro nghiêm trọng hơn: model có thể thay đổi dữ kiện trong lúc cố làm câu chữ tự nhiên.
+
+Bài viết này tách hai trách nhiệm đó. Domain sở hữu các dữ kiện thanh toán đã được kiểm tra và quyết định gửi. LLM chỉ được đề xuất câu chữ. Phần còn lại trình bày idempotency của sự kiện, structured output, timeout và retry, template fallback, khóa provider do tenant cung cấp, cùng audit record.
+
+> **[SOURCE FACT]** Ví dụ được cung cấp sử dụng `notification-service`, một Kafka consumer, Spring Boot, cấu trúc hexagonal, adapter cho LLM, adapter cho OpenSearch và repository ở URL trên. Sơ đồ và code bên dưới mô tả cấu trúc đó; các giá trị cấu hình là ví dụ từ bài gốc, không phải mặc định áp dụng cho mọi hệ thống.
+
+## Bắt đầu từ thiết kế không an toàn
+
+Đưa raw event payload cho model rồi trả về một chuỗi không định kiểu khiến mọi ranh giới quan trọng đều không rõ ràng:
+
+```java
+// PROPOSED DESIGN: ví dụ cố ý không an toàn; không đưa vào production
+@Service
+public class CopyService {
+    private final LlmClient llm;
+
+    public String copyFor(NotificationEvent event) {
+        String prompt = """
+            Write a friendly Vietnamese push notification about this event:
+            %s
+            """.formatted(event.rawPayload());
+        return llm.complete(prompt); // không timeout, retry policy hoặc schema
+    }
+}
+```
+
+Có năm lỗi độc lập:
+
+1. **Không bảo vệ dữ kiện.** Không có gì buộc output giữ nguyên số tiền. Ví dụ nguồn dùng `2,431,876 VND`; đổi thành `2.4M` sẽ làm mất tính chính xác và có thể tạo vấn đề tuân thủ.
+2. **Output không có contract.** Push sender có thể cần `{ title, body, tone }`, nhưng method này trả về một chuỗi tùy ý.
+3. **Dependency không có chính sách lỗi.** Không có timeout, provider chậm có thể giữ request. Không có retry có giới hạn và circuit breaker (cơ chế tạm dừng gọi dependency đang lỗi), sự suy giảm của provider có thể lan sang việc gửi thông báo.
+4. **Model được trao quá nhiều quyền.** Model có thể thêm số tiền phải trả, khoản hoàn tiền hoặc khoản thu không có trong event.
+5. **Operation không idempotent.** Xử lý lại một event có thể tạo câu chữ khác và gửi trùng nếu pipeline không có event key ổn định cùng chính sách khử trùng lặp.
+
+Đây là lỗi thiết kế, không phải chỉ là vấn đề viết prompt. Chúng cần được enforce tại các boundary của ứng dụng.
+
+## Kiến trúc đề xuất
+
+```text
+                     +-------------------------------------------+
+Kafka topic -------->|          notification-service              |
+ event.payment       |                                             |
+                     |  +-----------+       +------------------+   |
+                     |  | domain/   |<----->| infrastructure/  |   |
+                     |  | (ports)   |       | (adapters)       |   |
+                     |  +-----+-----+       +--------+---------+   |
+                     |        |                     |             |
+                     | idempotency store            | LLM provider |
+                     | (eventId dedupe)              | (BYOK client)|
+                     |                               | OpenSearch   |
+                     +-------------------------------------------+
+```
+
+Spring Boot tiêu thụ Kafka topic. Trong kiến trúc hexagonal đề xuất, code domain công bố các port (interface), còn Kafka, LLM provider, OpenSearch và persistence là các infrastructure adapter. Domain không import SDK của provider. Nhờ vậy, các quy tắc thanh toán có thể được kiểm thử mà không cần truy cập mạng.
+
+```text
+src/main/java/dev/finpay/notifications/
+|- domain/
+|  |- port/
+|  |  |- CopyGenerator.java
+|  |  |- DedupStore.java
+|  |  `- AuditLog.java
+|  |- model/
+|  |  |- NotificationEvent.java
+|  |  |- GeneratedCopy.java
+|  |  `- Decision.java
+|  `- service/
+|     `- CopyPipeline.java
+`- infrastructure/
+   |- kafka/
+   |- llm/
+   |- opensearch/
+   `- store/
+```
+
+Pipeline phải tất định về dữ kiện và trạng thái gửi. Chỉ phần câu chữ được phép thay đổi.
+
+## Bước 1: chuẩn hóa event
+
+> **[PROPOSED DESIGN]** Chuyển wire event thành tập dữ kiện đã định kiểu và được validate trước khi gọi model. Object này là contract mà generated copy không được ghi đè.
+
+```java
+public record PaymentSettled(
+    String eventId,
+    String userId,
+    BigDecimal amountPaid,
+    String currency,
+    LocalDateTime settledAt
+) {
+    public PaymentSettled {
+        Objects.requireNonNull(eventId, "eventId is required");
+        if (amountPaid == null || amountPaid.signum() <= 0)
+            throw new IllegalArgumentException("amountPaid must be positive");
+        if (currency == null || currency.isBlank())
+            throw new IllegalArgumentException("currency is required");
+    }
+}
+```
+
+Kafka adapter ánh xạ wire JSON sang `PaymentSettled` trong `infrastructure/kafka/`. Domain pipeline chỉ thấy domain record. Nếu schema của topic thay đổi, adapter thay đổi; domain không cần biết wire format đó.
+
+## Bước 2: claim event một lần
+
+Kafka có thể giao một event ít nhất một lần, vì vậy consumer phải sẵn sàng nhận lại cùng event. Pipeline nên claim `eventId` trước external call và release claim khi xử lý thất bại.
+
+```java
+@Transactional
+public Decision decide(PaymentSettled event) {
+    if (dedupStore.alreadyProcessed(event.eventId()))
+        return Decision.replay(event.eventId());
+
+    dedupStore.claim(event.eventId(), leaseTtlMinutes);
+    try {
+        GeneratedCopy copy = copyGenerator.generate(event);
+        Decision decision = Decision.accepted(event.eventId(), copy, now());
+        auditLog.record(decision);
+        return decision;
+    } catch (Throwable t) {
+        dedupStore.release(event.eventId());
+        Decision decision = Decision.failed(event.eventId(), reason(t), now());
+        auditLog.record(decision);
+        return decision;
+    }
+}
+```
+
+Các thuộc tính quan trọng:
+
+- Claim được khóa theo `eventId`, và replay được phát hiện trước external call.
+- Attempt thất bại sẽ release claim để Kafka consumer redeliver. Số lần retry và backoff thuộc boundary của consumer, không nằm trong một vòng lặp thứ hai trong pipeline.
+- Cả quyết định accepted, failed và replay đều có thể audit.
+
+## Bước 3: dùng idempotency key cho provider request
+
+Khử trùng lặp ở event không xử lý được tình huống mạng không rõ kết quả. Request có thể timeout ở phía local sau khi provider đã xử lý xong. Một provider request key ổn định cho phép retry tham chiếu cùng operation, nếu provider hỗ trợ request idempotency.
+
+```java
+String idempotencyKey = "copy:" + event.eventId();
+
+var request = CopyRequest.builder()
+    .idempotencyKey(idempotencyKey)
+    .model(providerModel)
+    .messages(List.of(systemPrompt(), userMessage(event)))
+    .responseFormat(JSON_OBJECT)
+    .build();
+```
+
+Cùng event tạo ra cùng key. Kết hợp với dedup store, đường đi tạo copy là idempotent từ đầu đến cuối. Hành vi idempotency cụ thể của provider vẫn là trách nhiệm của adapter và phải được kiểm tra theo API contract của provider đó.
+
+## Bước 4: dữ kiện vào, JSON ra
+
+> **[PROPOSED DESIGN]** Xem system prompt là một phần của application contract, không phải lời đề nghị model làm đúng. Cung cấp dữ kiện chính xác, cấm bịa giá trị và nêu rõ model không được quyết định tiền.
+
+```java
+String systemPrompt = """
+    You write notification copy for a fintech app. The recipient is the customer.
+
+    HARD RULES:
+    1. Use only f
+Rewrite both into the new problem-driven style. Preserve the real engineering content (Kafka/Prometheus/OpenSearch boundaries, idempotency, RAG, KYC, guardrail, AI core library) but rebuild the NARRATIVE around reasoning. Write:
+  /tmp/fp_3_smart-notifications-llm/smart-notifications-llm.en.md
+  /tmp/fp_3_smart-notifications-llm/smart-notifications-llm.vi.md
