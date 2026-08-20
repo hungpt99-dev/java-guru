@@ -7,48 +7,51 @@ draft: false
 featured: false
 ---
 
-## The 3 AM Question
+## The incident that started the design
 
-An operator has a payment `traceId` and a screen full of spans. The trace crosses the
-gateway, risk, ledger, KYC, and notification services. Some calls are slow, one was
-retried, and the final payment status is not obvious from the timeline.
+An operator is investigating a payment failure at 3 AM. They have a `traceId`, but the
+timeline crosses the gateway, risk, ledger, KYC, and notification services. One call is
+slow, another was retried, and the final status is hard to infer from hundreds of spans.
 
-The useful question is not “can an LLM summarize JSON?” It is: **which dependency first
-changed the outcome, what evidence supports that hypothesis, and how can we provide the
-answer without touching money?** FinPay is a fictional reference system. The design
-below is proposed, not a report of deployed behavior or measured production performance.
+The first request is usually: “Can we send this trace to an LLM and ask what happened?”
+That is the wrong boundary. The useful question is narrower: **which dependency first
+changed the outcome, what evidence supports that hypothesis, and how do we answer without
+giving the model a path to money?**
 
-## Why The Obvious Design Fails
+FinPay is a fictional reference system. The design below is proposed, not a description
+of deployed behavior or measured production performance.
 
-The first sketch is attractive:
+## The attractive first sketch
+
+The obvious implementation looks small:
 
 ```text
-UI -- traceId --> TraceSummarizer -- all spans --> LLM provider
-                         |
-                         +---- save generated text
+Operator -- traceId --> Summarizer -- all spans --> LLM provider
+                            |
+                            +---- save generated text
 ```
 
-The request reads the trace synchronously, sends it to a provider, and returns prose.
-That couples an operator feature to provider latency, quota, availability, token cost,
-and the size of the trace. It also asks the model to do work that is deterministic:
-count retries, identify a 503, and calculate a critical path.
+The request loads a trace, builds a prompt, calls the provider, stores the prose, and
+returns it. It has a pleasant demo path. It also makes a non-critical dependency part of
+an operator request and asks the model to perform deterministic work such as counting
+retries, detecting a 503, or finding the critical path.
 
-Suppose, as an illustrative design assumption, the service receives 10,000 trace events
-per second and a provider call takes two seconds. The stage has roughly
-`10,000 x 2 = 20,000` in-flight calls. At ten seconds it has 100,000. This is a
-capacity warning, not a thread-pool recommendation. A provider quota of 500 calls per
-second would still leave 9,500 events per second waiting; more threads cannot remove
-that constraint.
+Assume, for capacity illustration only, that 10,000 trace events arrive per second and
+the provider takes two seconds per call. The inference stage then has roughly
+`10,000 x 2 = 20,000` calls in flight. At ten seconds, that is 100,000. This is a
+capacity warning, not a thread-pool recommendation. If the provider quota is 500 calls
+per second, adding threads cannot remove the 9,500 events per second waiting behind that
+quota.
 
-Now consider a provider incident at 14:03: latency rises from 300 ms to 4 seconds. A
-synchronous request holds worker capacity and outbound connections longer. Timeouts
-arrive at different layers, clients retry, and each retry creates more provider work.
-The queue grows, consumers fall behind, and recovery can produce a thundering herd. None
-of this should delay a ledger commit: a summary is observability, not payment
-authorization, settlement, balance, refund, reversal, release, or block logic.
+The failure propagates. At 14:03, provider latency rises from an illustrative 300 ms to
+4 seconds. Summarizer workers hold connections longer. The request layer times out,
+clients retry, and retries create more provider calls. The queue grows while recovery
+can produce a thundering herd. None of that should delay a ledger commit. A summary is
+observability; it is not payment authorization, settlement, a balance update, refund,
+reversal, release, or block logic.
 
-The design also has a correctness failure. A consumer can crash after the provider call
-but before saving the result. Kafka may deliver the event again. This check is unsafe:
+There is a correctness problem even when the provider is healthy. A consumer can crash
+after the external call and before saving the result:
 
 ```java
 if (!summaryStore.exists(event.eventId())) {
@@ -57,70 +60,77 @@ if (!summaryStore.exists(event.eventId())) {
 }
 ```
 
-Two consumers can observe “does not exist” and both call the provider. A storage
-deduplication key prevents duplicate stored summaries, but cannot undo a duplicated
-external call. That distinction matters if a future feature adds a webhook or email.
+Two consumers can both observe “does not exist” and both call the provider. A unique key
+can prevent duplicate rows, but it cannot undo a duplicate external call. Exactly-once
+storage is not exactly-once inference.
 
-## Constraints We Can Actually Design Against
+## Constraints before components
 
-The numbers above are illustrative assumptions. Before sizing a real service we would
-measure:
+The illustrative rates above are assumptions. A real capacity exercise would measure:
 
-- trace events per second, trace size distribution, and acceptable summary queue age;
-- provider quota, timeout behavior, token pricing, and the allowed data-retention terms;
-- an operator-facing availability and freshness target for summaries;
+- trace events per second, trace-size distribution, and acceptable summary queue age;
+- provider quota, timeout behavior, token pricing, and data-retention terms;
+- operator-facing availability and freshness targets;
 - tenant isolation, PII classification, retention, and deletion requirements.
 
-The hard constraints are more stable than the numbers:
+The more durable constraints are these:
 
-1. The ledger and payment state machine remain the financial source of truth.
-2. The service must be useful when the model is slow, wrong, or unavailable.
-3. Evidence must be bounded, redacted, and linked to concrete span IDs.
-4. Work may be duplicated, replayed, or incomplete; correctness cannot depend on one delivery.
-5. Generated text must never enter the set of business commands. This service has an empty
-   business-decision set.
+1. The payment state machine and ledger remain the financial source of truth.
+2. The feature must still provide useful facts when the model is slow, wrong, or down.
+3. Evidence sent for inference must be bounded, redacted, and linked to span IDs.
+4. Events may be duplicated, replayed, or incomplete; correctness cannot depend on one delivery.
+5. Generated text is never a business command. This service has no financial decision authority.
 
-## The Decision Emerges From Those Constraints
+These constraints make the architectural question clearer. We are not designing an AI
+that runs a payment. We are designing a read-only diagnostic projection beside the
+payment system.
 
-There are three realistic options.
+## Three designs, and what each gives up
 
-**Synchronous inference** is simplest and can feel immediate. It is reasonable for a
-strictly limited diagnostic tool, but it makes a non-critical provider part of the user
-request and has poor burst behavior.
+**Synchronous inference** is the smallest path and can feel immediate. It is reasonable
+for a tightly limited diagnostic request. Its price is coupling the user request to
+provider latency, quota, and availability. A burst becomes an outbound-call problem.
 
-**Asynchronous work** separates the operator request from processing, absorbs bursts,
-and gives us replay. The cost is lag, duplicate delivery, leases, retry state, and a
-less immediate UI.
+**Asynchronous processing** lets the request accept a trace and read a result later. A
+durable queue absorbs bursts and gives operators replay and queue-age visibility. The
+price is explicit lag, duplicate delivery, retry state, leases, and a less immediate UI.
 
-**Deterministic extraction first, LLM second** computes status, errors, retry count,
-critical path, and slow dependencies locally. The LLM is called only when a natural
-language hypothesis adds value. This costs engineering effort in the extractor, but
-still provides an honest structured answer during an outage.
+**Deterministic extraction followed by optional inference** computes status, errors,
+retry count, critical path, and slow dependencies locally. The LLM adds a bounded
+natural-language hypothesis only when that helps. This costs engineering effort in the
+extractor, but produces a structured answer during a provider outage.
 
-We choose asynchronous processing plus deterministic extraction. The LLM is an optional
-interpretation stage, not the only way to understand a trace. A provider failure produces
-`SUMMARY_UNAVAILABLE` or a structured evidence view; it never changes ledger behavior.
+We choose the second and third options together. Asynchronous processing protects the
+operator request and the payment core. Deterministic extraction ensures the feature is
+not useless when inference is unavailable. A provider failure becomes
+`SUMMARY_UNAVAILABLE` or a structured evidence view; it cannot change payment state.
 
-The new choice introduces duplicate delivery, so the next problem is ownership. A
-durable inbox uses an atomic claim, a unique event key, and a lease:
+## The decision creates a new problem
+
+Async work removes provider latency from the request, but it makes delivery and ownership
+our problem. A consumer can die, a message can be redelivered, and a lease can expire
+while the first worker is still finishing. The inbox needs an atomic claim and a unique
+event key:
 
 ```java
 public Claim claim(EventId eventId) {
-    // One database operation decides who owns new work.
+    // One database operation chooses the owner of new work.
     return inbox.insertIfAbsent(eventId, Instant.now(), leaseDuration);
 }
 ```
 
-The state can move through `RECEIVED`, `PROCESSING`, `COMPLETED`, `RETRYABLE_FAILURE`,
-`PERMANENT_FAILURE`, or `SUMMARY_UNAVAILABLE`. A crash leaves an expired lease that
-another consumer may claim. This makes persistence idempotent; it does not make an
-external provider exactly once.
+Work can move through `RECEIVED`, `PROCESSING`, `COMPLETED`, `RETRYABLE_FAILURE`,
+`PERMANENT_FAILURE`, or `SUMMARY_UNAVAILABLE`. A crashed worker leaves an expired lease
+that another worker may claim. This makes persistence idempotent. It does not make the
+provider call exactly once, so replay should prefer the stored redacted evidence snapshot
+and avoid re-inference when the old result is still valid.
 
-Retries create another failure mode. Retrying every timeout, invalid request, and context
-overflow creates a retry storm. The provider adapter therefore classifies errors, sets
-connect/response/total-operation timeouts, uses exponential backoff with jitter, caps
-attempts, and enforces a retry budget. A circuit breaker stops calls while the provider
-is unhealthy. A bounded concurrency semaphore supplies backpressure:
+Retries create another failure mode. Retrying invalid input, context overflow, and a
+temporary timeout as if they were the same error creates a retry storm. The provider
+adapter therefore classifies errors, sets connect/response/total-operation timeouts,
+uses exponential backoff with jitter, caps attempts, and spends from a retry budget. A
+circuit breaker stops calls while the provider is unhealthy. A concurrency limit applies
+backpressure:
 
 ```java
 if (!inferenceSlots.tryAcquire()) {
@@ -133,22 +143,25 @@ try {
 }
 ```
 
-When the queue is full, we defer or reject summary work according to an explicit SLO;
-we do not grow memory without limit. Poison traces, malformed records, and oversized
-prompts go to a dead-letter stream with a repair reason instead of looping forever.
+When the queue is full, the service defers or rejects summary work according to an
+explicit freshness SLO. It does not grow memory without limit. Poison records, malformed
+events, and oversized prompts go to a dead-letter stream with a repair reason instead of
+looping forever.
 
-## Evidence Before Prose
+## Evidence before prose
 
-Trace retrieval is a constrained form of RAG, not permission to send a transaction to a
-model. The selector keeps the root and likely causal path, error and exception events,
-slow spans, downstream failures, and retry attempts. It preserves timestamp, duration,
-service, operation, status, span ID, and selected attributes. It limits span count,
-attribute bytes, and serialized tokens. The selector version is audited.
+Sending an entire trace to a model is both expensive and unsafe. The selector is a
+bounded, versioned evidence step, not a license to send a payment to an LLM. It keeps the
+root and likely causal path, error and exception events, slow spans, downstream failures,
+and retry attempts. Each selected record retains timestamp, duration, service, operation,
+status, span ID, and explicitly allowed attributes. Span count, attribute bytes, and
+serialized tokens have limits.
 
-Authorization headers, tokens, full payment instruments, KYC documents, and unrelated
-PII are removed before prompt construction. Span attributes are untrusted data: an
-attacker can put instructions in an exception message. The prompt labels evidence as
-data, and the output schema requires hypotheses, uncertainty, and cited span IDs:
+Authorization headers, tokens, full payment instruments, KYC documents, and unrelated PII
+are removed before prompt construction. Span attributes are untrusted data: an attacker
+can put instructions inside an exception message. The prompt treats records as evidence,
+not instructions, and the output contract requires hypotheses, uncertainty, and cited
+span IDs:
 
 ```text
 System: You are a read-only observability assistant. Never authorize money actions.
@@ -157,12 +170,11 @@ Output: status, timeline, cited span IDs, root-cause hypothesis, uncertainty.
 Evidence: [structured, redacted spans]
 ```
 
-Validation rejects malformed output and citations that are not in the supplied evidence.
-It must fall back to deterministic fields rather than turning fluent prose into a
-command. Prompt-injection defenses reduce risk; the absolute read-only boundary is the
-stronger control.
+Validation rejects malformed output and citations absent from the supplied evidence. The
+fallback is deterministic fields, not a fluent paragraph promoted into a command.
+Prompt-injection defenses reduce risk; the hard read-only boundary is the stronger control.
 
-## Architecture After The Reasoning
+## Architecture after the reasoning
 
 ```text
 OpenTelemetry SDKs
@@ -188,58 +200,64 @@ Ledger / transaction DB remains the financial system of record.
 Prometheus receives aggregate metrics; it is not a trace store.
 ```
 
-Kafka exists here because replay and burst isolation are needed; it is not a query API.
-OpenSearch exists as a rebuildable span and summary read model, not as the ledger. If it
-is lost, replay can rebuild it. Replay should reuse a redacted evidence snapshot when
-possible, because re-inference can cost money and produce different prose after a model
-change.
+Kafka exists here for replay and burst isolation, not as a query API. OpenSearch is a
+rebuildable span and summary read model, not the ledger. If the index is lost, replay can
+rebuild it. The inbox exists to make ownership and recovery explicit. The audit store
+exists because an answer must be tied to the evidence and versions that produced it.
 
-The shared AI core supplies ports, redaction, provider adapters, timeout classification,
-and audit fields. The trace service still owns trace selection and the empty business
-policy. This is a bounded consumer of the existing AI core and read models, not a new
-AI platform.
+The shared AI core can provide ports, redaction, provider adapters, timeout
+classification, and audit fields. The trace service still owns trace selection and has
+an empty business policy. This is a bounded consumer of shared capabilities, not a reason
+to create a new AI platform.
 
-## Auditability And Operations
+## Operational reality
 
-A summary record stores the trace and event references, selected span IDs, a redacted
-evidence snapshot or hash, extractor/selector version, model and prompt versions,
-provider, decoding settings where relevant, timestamps, token/cost metadata, output
-status, and human corrections. A generated answer is an observation about the snapshot,
-not ground truth. Hosted models may not reproduce identical text even with the same
-inputs, so the record must describe what was actually supplied and generated.
+A summary record stores trace and event references, selected span IDs, a redacted evidence
+snapshot or hash, extractor and selector versions, model and prompt versions, provider,
+decoding settings where relevant, timestamps, token/cost metadata, output status, and
+human corrections. The generated answer is an observation about a snapshot, not ground
+truth. Replaying the same input after a model change may produce different prose, so the
+record must describe what was supplied and what was generated.
 
-At 3 AM, an on-call engineer needs to follow one request across boundaries. Traces link
-request ID, trace ID, event ID, inference ID, provider, model version, and policy version.
-Logs and audit records carry those identifiers with access control. Prometheus labels
-stay bounded: provider, outcome, service, region, and model version are reasonable;
-`traceId`, `accountId`, and `eventId` are not. Use structured logs or sampled trace
-exemplars for lookup.
+At 3 AM, one request must be traceable across boundaries. Correlate request ID, trace ID,
+event ID, inference ID, provider, model version, and policy version. Keep those IDs in
+structured logs and audit records with access control. Prometheus labels must stay bounded:
+provider, outcome, service, region, and model version are reasonable; `traceId`,
+`accountId`, and `eventId` are not. Use structured-log lookup or sampled trace exemplars.
 
-Useful alerts include gateway and summary latency, provider timeout/error rate, queue age,
+Useful alerts include request and summary latency, provider timeout/error rate, queue age,
 Kafka lag, consumer rebalances, inference-slot saturation, database connection use,
 OpenSearch latency, inbox conflicts, duplicate rate, dead-letter rate, and
-`SUMMARY_UNAVAILABLE` rate. Model changes require an evaluation set, unsupported-claim
-and missing-error checks, a canary, and rollback. Drift and human corrections are quality
-signals, not just model-team metrics.
+`SUMMARY_UNAVAILABLE` rate. A model change needs an evaluation set, unsupported-claim and
+missing-error checks, a canary, and rollback. Human corrections and drift are quality
+signals, not only model-team metrics.
 
-If OpenSearch is unavailable, summary reads fail or use the structured result; the ledger
-is unaffected. If the inbox is unavailable, the consumer does not acknowledge the event.
-If the provider is unavailable, bounded retries end in degraded evidence. If a payment
-has already succeeded, no summary retry can reverse it. No code path in this service can
-authorize, release, reverse, refund, or block a payment.
+Failure behavior should be boring and explicit:
 
-## What We Learned
+- If OpenSearch is unavailable, reads fail over to the structured result when possible; the ledger is unaffected.
+- If the inbox is unavailable, the consumer does not acknowledge the event.
+- If the provider is unavailable, bounded retries end in degraded evidence.
+- If a payment has succeeded, no summary retry can reverse it.
 
-The safest AI feature in FinPay is not the one with the most autonomy. It is the one with
-the smallest irreversible surface. Start with deterministic facts, preserve the evidence
+No code path in this service can authorize, release, reverse, refund, or block a payment.
+That is a permission boundary, not a prompt instruction.
+
+## What we learned
+
+The safest AI feature is not the one with the most autonomy. It is the one with the
+smallest irreversible surface. Start with deterministic facts, preserve the evidence
 that produced them, and ask the model only for a bounded hypothesis.
 
-Async processing protects the ledger from provider latency, but it requires idempotent
-claims, leases, backpressure, and replay policy. Redaction protects tenants, but it can
-remove useful context, so the selector must be explicit and versioned. A degraded
-structured result is less polished than prose, but it is more useful than an invented
-causal story.
+Async processing protects the ledger from provider latency, but requires idempotent
+claims, leases, backpressure, and a replay policy. Redaction protects tenants, but can
+remove useful context, so selection must be explicit and versioned. A degraded structured
+result is less polished than prose, but more useful than an invented causal story.
 
-The central contract is simple: **AI signal -> policy -> business decision -> financial
-side effect**. For trace summarization, the business-decision stage is intentionally
-empty. The provider can disappear at 14:03; the ledger must continue to tell the truth.
+The contract remains:
+
+```text
+AI signal -> deterministic policy -> business state machine -> financial transaction -> ledger / settlement
+```
+
+For trace summarization, the business-decision stage is intentionally empty. The provider
+can disappear at 14:03. The ledger must still tell the truth.
