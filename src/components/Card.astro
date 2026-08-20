@@ -4,6 +4,7 @@ import type { CollectionEntry } from "astro:content";
 import { getPath } from "@/utils/getPath";
 import Datetime from "./Datetime.astro";
 import { getRelativeLocalePath } from "@/i18n/utils";
+import { SITE } from "@/config";
 
 export interface Props extends CollectionEntry<"blog"> {
   variant?: "h2" | "h3";
@@ -11,7 +12,14 @@ export interface Props extends CollectionEntry<"blog"> {
 
 const { variant = "h2", data, id, filePath } = Astro.props;
 
-const { title, description, pubDatetime, modDatetime, timezone } = data;
+const {
+  title,
+  description,
+  pubDatetime,
+  modDatetime,
+  timezone,
+  ogImage: initOgImage,
+} = data;
 
 const headerProps = {
   style: { viewTransitionName: slugifyStr(title) },
@@ -19,9 +27,41 @@ const headerProps = {
 };
 
 const currentLocale = Astro.currentLocale;
+
+// Resolve the preview/thumbnail image for this post.
+// Priority: explicit ogImage (string = remote URL, object = local asset) →
+// auto-generated dynamic OG PNG (always available when SITE.dynamicOgImage).
+let previewImage: string | undefined;
+if (typeof initOgImage === "string") {
+  previewImage = initOgImage;
+} else if (initOgImage?.src) {
+  previewImage = initOgImage.src;
+} else if (SITE.dynamicOgImage) {
+  previewImage = getRelativeLocalePath(
+    currentLocale,
+    `${getPath(id, filePath)}/index.png`
+  );
+}
 ---
 
 <li class="my-6">
+  {
+    previewImage && (
+      <a
+        href={getRelativeLocalePath(currentLocale, getPath(id, filePath))}
+        class="group block overflow-hidden rounded-lg border border-black/10 dark:border-white/10"
+      >
+        <img
+          src={previewImage}
+          alt={title}
+          width={1200}
+          height={630}
+          loading="lazy"
+          class="aspect-[1.91/1] w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+        />
+      </a>
+    )
+  }
   <a
     href={getRelativeLocalePath(currentLocale, getPath(id, filePath))}
     class="inline-block text-lg font-medium text-accent decoration-dashed underline-offset-4 focus-visible:no-underline focus-visible:underline-offset-0"
