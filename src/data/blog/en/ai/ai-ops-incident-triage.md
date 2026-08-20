@@ -196,3 +196,9 @@ That boundary lets FinPay investigate a 03:00 incident without turning a plausib
 - OWASP Top 10 for Large Language Model Applications: https://owasp.org/www-project-top-10-for-large-language-model-applications/
 
 > Repo: https://github.com/finpay-lab/observability
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/observability](https://github.com/finpay-lab/observability) repository.

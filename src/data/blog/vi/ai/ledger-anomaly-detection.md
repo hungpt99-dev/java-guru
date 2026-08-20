@@ -177,3 +177,9 @@ Mỗi alert phải dẫn đến một hành động: pause hoặc shed detector 
 6. Fail-open, fail-closed, step-up, và manual review là quyết định của risk owner theo tier. Không có một chính sách AI outage dùng cho mọi trường hợp.
 
 Insight bền vững là AI chỉ nên thêm một nguồn evidence có giới hạn và có thể replay quanh một ledger deterministic. Nó không được làm phình money path. Các financial invariant phải vẫn đúng khi model chậm, sai, thay đổi, hoặc không khả dụng.
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/ledger-service](https://github.com/finpay-lab/ledger-service).

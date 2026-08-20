@@ -261,3 +261,9 @@ AI signal -> deterministic policy -> business state machine -> financial transac
 
 For trace summarization, the business-decision stage is intentionally empty. The provider
 can disappear at 14:03. The ledger must still tell the truth.
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/observability](https://github.com/finpay-lab/observability) repository.

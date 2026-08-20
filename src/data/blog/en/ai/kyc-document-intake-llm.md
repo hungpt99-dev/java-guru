@@ -182,3 +182,9 @@ Security follows the data flow: authenticate the uploader, authorize by tenant a
 The difficult choice was not the VLM. It was refusing to turn “the model extracted a field with confidence 0.86” into “FinPay should accept this customer.” Once uncertainty became a persisted workflow state, the architecture emerged from concrete failures: async processing bounded provider latency, atomic idempotency handled duplicate delivery, the outbox protected committed decisions, and manual review gave uncertainty a controlled destination.
 
 This is one bounded use case in FinPay’s shared AI layer. The payment core and ledger remain the source of truth for money movement. The document workflow contributes versioned signals and an auditable KYC decision through deterministic policy. AI can be slow, unavailable, nondeterministic, or wrong. The surrounding system must make each condition visible without allowing it to cross the financial side-effect boundary.
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/identity-service](https://github.com/finpay-lab/identity-service) repository.

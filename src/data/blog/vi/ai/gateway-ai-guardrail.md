@@ -211,3 +211,9 @@ Contract cho các layer FinPay sau này rất đơn giản: AI có thể tư v�
 - OWASP, “LLM01: Prompt Injection”: <https://owasp.org/www-project-top-10-for-large-language-model-applications/>
 - Tài liệu Prometheus, “Instrumentation labels”: <https://prometheus.io/docs/practices/instrumentation/#labels>
 - NIST, “AI Risk Management Framework”: <https://www.nist.gov/itl/ai-risk-management-framework>
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/gateway](https://github.com/finpay-lab/gateway).

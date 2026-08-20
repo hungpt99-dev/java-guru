@@ -196,3 +196,9 @@ Boundary này cho phép FinPay điều tra sự cố lúc 03:00 mà không biế
 - OWASP Top 10 cho ứng dụng Large Language Model: https://owasp.org/www-project-top-10-for-large-language-model-applications/
 
 > Repo: https://github.com/finpay-lab/observability
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/observability](https://github.com/finpay-lab/observability).

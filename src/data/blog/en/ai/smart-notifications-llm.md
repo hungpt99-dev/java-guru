@@ -203,3 +203,9 @@ The memorable boundary is not “AI versus templates.” It is authority. The LL
 4. Make degraded behavior a policy choice. Required alerts use deterministic templates; optional messages may defer or suppress.
 5. Version the model, prompt, policy, template, and provider outcome as operational contracts.
 6. Let the payment ledger remain authoritative while AI evolves around it as an advisory layer.
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/notification-service](https://github.com/finpay-lab/notification-service) repository.

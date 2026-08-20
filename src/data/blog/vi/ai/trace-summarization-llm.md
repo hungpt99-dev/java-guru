@@ -256,3 +256,9 @@ AI signal -> deterministic policy -> business state machine -> financial transac
 
 Với trace summarization, business-decision stage cố ý để trống. Provider có thể biến mất
 lúc 14:03. Ledger vẫn phải tiếp tục nói đúng sự thật.
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/observability](https://github.com/finpay-lab/observability).

@@ -201,3 +201,9 @@ AI signal -> deterministic policy -> business decision
 The ledger remains the financial truth. Kafka, when justified, provides replay for asynchronous work; the database records durable outcomes, inbox state, and outbox state; a search index is a rebuildable investigation view. Storage idempotency protects the event record, while effect idempotency protects systems called afterward.
 
 AI may improve, explain, or prioritize a decision. It cannot become the authority that moves FinPay's money.
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/platform](https://github.com/finpay-lab/platform) repository.

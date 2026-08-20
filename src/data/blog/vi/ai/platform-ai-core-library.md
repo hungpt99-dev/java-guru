@@ -201,3 +201,9 @@ AI signal -> deterministic policy -> business decision
 Ledger vẫn là financial truth. Khi có lý do chính đáng, Kafka cung cấp replay cho asynchronous work; database ghi durable outcome, inbox state và outbox state; search index là investigation view có thể rebuild. Idempotent storage bảo vệ event record, còn idempotent effect bảo vệ các system được gọi sau đó.
 
 AI có thể cải thiện, giải thích hoặc ưu tiên một decision. AI không thể trở thành authority di chuyển tiền của FinPay.
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/platform](https://github.com/finpay-lab/platform).

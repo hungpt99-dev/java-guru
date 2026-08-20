@@ -203,3 +203,9 @@ Ranh giới đáng nhớ không phải “AI so với template.” Đó là auth
 4. Degraded behavior phải là policy choice. Required alert dùng deterministic template; optional message có thể defer hoặc suppress.
 5. Version hóa model, prompt, policy, template và provider outcome thành operational contract.
 6. Để payment ledger tiếp tục có authority trong khi AI phát triển xung quanh nó như advisory layer.
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/notification-service](https://github.com/finpay-lab/notification-service).

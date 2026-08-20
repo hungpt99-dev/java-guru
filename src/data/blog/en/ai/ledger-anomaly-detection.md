@@ -177,3 +177,9 @@ Every alert needs an action: pause or shed detector intake, switch to configured
 6. Fail-open, fail-closed, step-up, and manual review are risk-owner decisions by tier. There is no universal AI outage policy.
 
 The durable insight is that AI should add a bounded, replayable source of evidence around a deterministic ledger. It should not enlarge the money path. The financial invariants must remain true when the model is slow, wrong, changed, or unavailable.
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/ledger-service](https://github.com/finpay-lab/ledger-service) repository.

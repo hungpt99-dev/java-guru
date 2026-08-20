@@ -180,3 +180,9 @@ Authentication và transaction-level authorization xảy ra trước retrieval. 
 Quy tắc đáng nhớ là: **ground model bằng evidence có giới hạn và đã redact; yêu cầu citation; trả `PENDING` hoặc `UNRESOLVED` khi evidence không đủ.**
 
 RAG không biến source data kém chất lượng thành authoritative. Nó thu hẹp những gì probabilistic model được nhìn thấy và được nói. Ledger và payment state machine deterministic vẫn chịu trách nhiệm về tiền. Kafka cung cấp replay, OpenSearch cung cấp read model tiện dụng, còn model cung cấp language signal. Mỗi component tồn tại vì một failure cụ thể buộc phải có nó. Không component nào được phép xóa ranh giới giữa explanation và financial authority.
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/transfer-service](https://github.com/finpay-lab/transfer-service).

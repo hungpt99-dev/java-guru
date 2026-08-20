@@ -182,3 +182,9 @@ Security đi theo data flow: authenticate uploader, authorize theo tenant và ca
 Lựa chọn khó không phải là VLM. Đó là từ chối biến “model trích xuất field với confidence 0.86” thành “FinPay nên accept khách hàng này.” Khi uncertainty trở thành workflow state được lưu, kiến trúc xuất hiện từ các failure cụ thể: async giới hạn provider latency, atomic idempotency xử lý duplicate delivery, outbox bảo vệ decision đã commit, và manual review cho uncertainty một nơi đến có kiểm soát.
 
 Đây là một use case có boundary rõ ràng trong AI layer dùng chung của FinPay. Payment core và ledger vẫn là nguồn sự thật cho money movement. Document workflow đóng góp signal có version và KYC decision có audit thông qua deterministic policy. AI có thể chậm, không khả dụng, không ổn định hoặc sai; hệ thống xung quanh phải làm từng trạng thái đó nhìn thấy được mà không cho nó vượt qua financial side-effect boundary.
+
+<!-- finpay-repo-link -->
+
+## Triển khai tham khảo FinPay
+
+Bài viết này thuộc series tham khảo FinPay. Mã nguồn dịch vụ liên quan nằm trong repo [finpay-lab/identity-service](https://github.com/finpay-lab/identity-service).

@@ -211,3 +211,9 @@ The contract for later FinPay layers is simple: AI may advise, explain, classify
 - OWASP, “LLM01: Prompt Injection”: <https://owasp.org/www-project-top-10-for-large-language-model-applications/>
 - Prometheus documentation, “Instrumentation labels”: <https://prometheus.io/docs/practices/instrumentation/#labels>
 - NIST, “AI Risk Management Framework”: <https://www.nist.gov/itl/ai-risk-management-framework>
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/gateway](https://github.com/finpay-lab/gateway) repository.

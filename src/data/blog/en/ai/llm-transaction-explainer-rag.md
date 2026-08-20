@@ -180,3 +180,9 @@ Authentication and transaction-level authorization happen before retrieval. Tena
 The memorable rule is: **ground the model in bounded, redacted evidence; require citations; return `PENDING` or `UNRESOLVED` when evidence is insufficient.**
 
 RAG does not make bad source data authoritative. It narrows what a probabilistic model may see and say. The ledger and deterministic payment state machine remain responsible for money. Kafka provides replay, OpenSearch provides a convenient read model, and the model provides a language signal. Each component exists because a specific failure required it. None is allowed to erase the boundary between explanation and financial authority.
+
+<!-- finpay-repo-link -->
+
+## FinPay Reference Implementation
+
+This article is part of the FinPay reference series. The related service implementation lives in the [finpay-lab/transfer-service](https://github.com/finpay-lab/transfer-service) repository.
