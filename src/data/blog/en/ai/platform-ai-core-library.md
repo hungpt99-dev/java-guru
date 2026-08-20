@@ -7,21 +7,25 @@ draft: false
 featured: false
 ---
 
-FinPay already has the part that must not be experimental: the ledger is the system of record, settlement is deterministic, and every money movement is auditable. The question in this article is narrower: how can several FinPay services use AI without allowing an unreliable external dependency to weaken those invariants?
+FinPay already has the parts that cannot be experimental: the ledger is the financial source of truth, settlement follows deterministic rules, and payment state transitions are controlled by the payment core. The new problem is narrower and more operational:
 
-The answer is not a larger AI service. It is a shared technical contract. The core standardizes how a service obtains credentials, bounds an inference call, validates its output, records evidence, and handles duplicates. It does not decide whether a payment is approved. That remains the responsibility of deterministic policy and the payment state machine.
+Several FinPay services want AI assistance. One needs a risk signal during payment review. Another wants KYC enrichment. A support workflow wants classification. How do we add an unreliable, rate-limited external dependency without allowing it to weaken the invariants that already protect money?
 
-## The First Failure Was Inconsistency
+The central design insight is simple: **AI must stop at a typed signal boundary.** The signal can be useful, late, wrong, duplicated, or unavailable. Deterministic policy decides what it means. The payment state machine decides which transition is legal. The ledger records the financial result.
 
-Imagine FinPay adding AI-assisted risk analysis to payment review, KYC enrichment, and support triage. The first implementation is usually local: each team calls a provider from its own service. One key sits in `application.yml`, another comes from an environment variable, and a third is copied into a test configuration. One client retries 5xx responses; another has no deadline. One parser accepts free-form text such as `approve`; another expects JSON. A successful request is recorded as `logger.info("done")`.
+```text
+AI signal
+    -> deterministic policy
+    -> business state machine
+    -> financial transaction
+    -> ledger / settlement
+```
 
-That is not three independent implementation choices. It is three versions of a security and failure policy. A provider slowdown can consume request threads in one service while another fails fast. A model response that is harmless in support triage can become dangerous when a payment service interprets the same label as authorization.
+This article is a reference design and reasoning exercise. It does not claim that FinPay has experienced the incidents or operates at the example volumes below.
 
-This is a reference-design scenario, not a claim about a deployed FinPay incident. The useful design question is: what would force us to centralize the technical behavior, and what must remain local?
+## A Reasonable First Attempt
 
-## Why the Obvious Design Fails
-
-A naive payment-risk endpoint looks attractive:
+Imagine the payment-review team adding an AI call directly to its endpoint:
 
 ```java
 // WRONG: secret, unbounded call, and business authority in one request
@@ -29,9 +33,17 @@ String answer = llm.chat(apiKey, request.toJson());
 return answer.contains("approve") ? APPROVE : REJECT;
 ```
 
-It has a short path from request to result. It also hides four decisions. There is no timeout budget, no defined behavior for a provider outage, no schema validation, and no separation between an AI observation and a financial decision. A spelling change or additional sentence in the response can change the branch.
+It looks efficient. The caller sends a request, receives an answer, and continues. Production exposes the hidden decisions:
 
-The next attempt often protects persistence with a pre-check:
+- What happens when the provider takes too long?
+- Which failures are safe to retry?
+- What does malformed or contradictory output mean?
+- Can a model label authorize a payment?
+- Which evidence lets an investigator reconstruct the result?
+
+The string parser is the most dangerous part. A model response is text, not a payment command. A spelling change, an extra sentence, or an unexpected label can change a branch. More importantly, it gives an external dependency authority over a financial side effect.
+
+The next attempt often adds a duplicate check:
 
 ```java
 // WRONG: two consumers can both observe false
@@ -40,9 +52,9 @@ if (!outcomeRepository.exists(eventId)) {
 }
 ```
 
-Under redelivery or two competing consumers, both reads can return false. A uniqueness check in application code is not an atomic claim. Even an atomic insert solves only durable storage. If the same outcome sends an email, creates a review case, or calls another service, that side effect needs its own idempotency key.
+That check is not an atomic claim. Two consumers processing a redelivered event can both read `false`, call the provider, and attempt the write. Even if a unique index protects the row, it does not make a later email, HTTP request, or review-case creation exactly once.
 
-Synchronous inference creates a second boundary problem. Suppose 200 requests per second each wait 750 ms for the complete path. The AI stage alone creates approximately:
+The final problem is latency. Assume, for illustration, 200 requests per second and 750 ms spent waiting for the complete AI path:
 
 ```text
 concurrency = throughput x latency
@@ -50,53 +62,77 @@ concurrency = throughput x latency
             = 150 in-flight requests
 ```
 
-That is an illustrative capacity calculation, not a FinPay measurement. Add provider retries, a connection pool, database writes, and a gateway timeout, and a temporary provider slowdown can occupy resources far beyond the AI client itself. If latency rises from 300 ms to 4 seconds, the same arrival rate creates roughly 800 in-flight calls. If clients retry while the first calls are still waiting, the provider sees more load precisely when it is least able to handle it.
+That is an assumption for capacity reasoning, not a FinPay measurement. If provider latency rises to 4 seconds, the same arrival rate creates about 800 in-flight calls. Add retries, database writes, connection-pool limits, and gateway timeouts. A provider slowdown can now consume the caller's resources and trigger client retries, increasing provider load during the outage.
 
-At that point, “just add a retry” is not resilience. It is an amplifier. A shared core must make the deadline, retry budget, concurrency limit, and fallback explicit.
+“Add a retry” is not a resilience strategy by itself. It can be an outage multiplier.
 
 ## Constraints Before Components
 
-For this reference design, we use these assumptions:
+Before choosing Kafka, a cache, a shared library, or a separate service, we write down the constraints:
 
-- FinPay’s ledger and payment state machine already own balances, authorization, settlement, and irreversible transitions.
-- AI may produce a bounded risk signal, classification, explanation, or enrichment. It may not mutate a balance, ledger entry, settlement state, payment authorization, or financial transaction state.
-- Different tenants may bring their own provider credentials (BYOK). A credential must be resolved from a secret manager, not source code, prompts, or logs.
-- Inference can be slow, unavailable, rate-limited, nondeterministic, or more expensive than expected.
-- Payment paths need an explicit degraded mode. “AI failed” cannot silently mean “approve” or “reject” for every operation.
-- Investigators need to reconstruct what happened, while raw sensitive payloads should be minimized and access-controlled.
+- The ledger and payment state machine already own balances, authorization, settlement, and irreversible transitions.
+- AI may return a bounded risk signal, classification, explanation, recommendation, or enrichment. It may not mutate a balance, ledger entry, settlement state, authorization, or financial state.
+- A tenant may bring its own provider credential (BYOK). The credential must come from a secret manager and must not enter source code, prompts, or logs.
+- Inference may be slow, unavailable, rate-limited, nondeterministic, or more expensive than expected.
+- Each workflow needs an explicit degraded mode. `AI_FAILED` must not silently mean either `APPROVE` or `REJECT` everywhere.
+- Investigators need enough evidence to reconstruct a result, while sensitive raw payloads must be minimized and access-controlled.
 
-These are design constraints and examples, not production measurements. They lead to a small set of boundaries: a typed AI port, a durable outcome record, an asynchronous option for work that does not belong on the payment critical path, and a versioned audit trail.
+These constraints tell us more than a component diagram would. We need a narrow technical contract, bounded calls, validated output, durable outcome state, and a clear distinction between an AI observation and a business decision.
 
-## The Contract: Signal, Policy, Decision
+## Alternatives and the Decision
 
-The core returns an `AISignal`, not an approval:
+### Local provider clients
+
+Each service can own its provider adapter. This is simple to start and allows local experimentation. It also guarantees policy drift: different timeouts, credential handling, retry behavior, schemas, and audit fields. The more callers FinPay adds, the harder it becomes to prove that every one handles provider failure safely.
+
+### One large AI service
+
+A central service can standardize behavior. But if it also owns payment thresholds or emits payment commands, it becomes a second business authority. A generic service cannot know every workflow's loss tolerance, regulatory requirement, or acceptable fallback.
+
+### A shared technical core
+
+A shared module or narrowly scoped internal service can own the repeated technical controls while leaving business meaning with the caller. It creates versioning and adoption work, and a library can still be bypassed. Those are real costs. They are preferable to hiding business policy inside a central AI authority.
+
+### Synchronous versus asynchronous execution
+
+Synchronous inference keeps a user flow simple and is reasonable when the signal is required immediately and the latency budget permits it. Its cost is coupled availability: a provider outage sits on the payment path.
+
+Asynchronous inference isolates payment latency and allows controlled consumer concurrency, replay, and later review. Its cost is eventual consistency. A payment may need a `PENDING_RISK` state, queue-age limits, and a product decision for a payment that remains pending.
+
+We choose a shared technical core with one signal contract and both execution modes. Payment-critical callers may use a tightly bounded synchronous call only when policy justifies the dependency. Enrichment, review, and later analysis use the asynchronous path. We do not force every AI use case into one latency model.
+
+## The Contract That Protects the Ledger
+
+The core exposes a narrow port such as `assess(SignalRequest) -> AISignal`. `AISignal` can contain a bounded score, an allowed enum label, confidence, reason codes, model version, prompt version, and an explicit status such as `VALID`, `TIMEOUT`, or `INVALID_OUTPUT`.
+
+The owning policy evaluates the signal for a particular payment, tenant, and risk tier. The payment state machine validates and performs the legal transition. Only the normal deterministic path can write the ledger or settlement state.
+
+This boundary also makes model changes explainable. A new model can produce a different score for the same input, but the stored model version and policy version show which values and rules produced the outcome. If AI is unavailable, policy can choose deterministic checks, step-up verification, manual review, or delayed processing. The correct response depends on the workflow; the core reports the failure and does not invent one.
 
 ```text
-AI inference -> AI signal -> deterministic policy -> business decision -> financial state transition
+payment / review service
+        |
+        | SignalRequest: minimized input + correlation context
+        v
+  shared AI core
+  - secret resolution
+  - provider adapter
+  - deadline / retry budget / circuit / concurrency limit
+  - structured-output validation
+        |
+        v
+  AISignal + durable outcome
+        |
+        +--> deterministic policy --> payment state machine --> ledger / settlement
+        |
+        +--> outbox --> notifications / cases / other effects
 ```
 
-An AI signal might contain a bounded score, a label from an allowed enum, confidence, reason codes, model version, prompt version, and an explicit status such as `VALID`, `TIMEOUT`, or `INVALID_OUTPUT`. The policy service decides what that signal means for a particular payment, tenant, and risk tier. The payment state machine then performs the authorized transition and writes the ledger through its normal deterministic path.
-
-This split matters when the model changes. A new model may produce a different score for the same input; a policy version can still make the rule used for the decision explicit. It also matters when AI is unavailable. A low-risk enrichment may be queued for later. A high-risk payment might enter step-up verification or manual review. Some low-value flows may continue under deterministic rules. The correct choice depends on the operation’s loss, regulatory requirements, and customer experience. The core must report the failure; the owning policy must choose the business response.
-
-## What the Shared Core Owns
-
-The module exposes a narrow typed port such as `assess(SignalRequest) -> AISignal`. A caller supplies an already-minimized request and a correlation context. The core resolves the tenant’s secret reference, constructs a provider-neutral request, applies a deadline and bounded retry policy, validates structured output, and records technical evidence.
-
-It owns:
-
-- BYOK credential resolution and redaction.
-- Provider adapters, request timeouts, retry classification, backoff with jitter, circuit state, and concurrency limits.
-- Structured-output validation and explicit invalid or unavailable statuses.
-- Idempotent storage of the signal and an outbox record for durable downstream effects.
-- Audit fields such as `transaction_id`, `event_id`, `model_version`, `prompt_version`, `policy_version`, `decision`, `reason`, timestamps, and correlation ID.
-- Metrics and traces that describe behavior without putting payment or account identifiers into metric labels.
-
-It does not own payment thresholds, fraud policy, account balances, settlement, or the authority to translate `approve` in an LLM response into a payment command. A library can standardize behavior; it cannot make business policy generic without making it less visible and harder to audit.
+Every box has a reason. The core isolates provider behavior. Validation prevents text from becoming control flow. The durable outcome makes redelivery safe. Policy and the state machine preserve financial authority. The outbox separates committed state from effects that can be retried.
 
 ## Idempotency Has Two Boundaries
 
-The first boundary is storage. A durable database unique constraint on `(tenant_id, event_id)` lets the database arbitrate concurrent delivery:
+The first boundary is durable storage. Let the database arbitrate concurrent delivery with a unique constraint on `(tenant_id, event_id)`:
 
 ```java
 try {
@@ -107,84 +143,61 @@ try {
 }
 ```
 
-The outcome and outbox row should be committed together. If the consumer crashes after the commit but before acknowledging the message, redelivery finds the existing outcome. The database is the system of record; a cache or search index cannot replace this arbitration.
+The outcome and outbox row should commit together. If a consumer crashes after commit but before acknowledging the event, redelivery finds the existing outcome. A cache or search index can accelerate reads; neither can replace this database arbitration.
 
-The second boundary is the side effect. An outbox worker may deliver the same notification or case request more than once. Each effect needs a stable key such as `(tenant_id, event_id, effect_type)`, and the receiver must either enforce it or the worker must maintain a durable effect state. Storage idempotency does not make an HTTP call, email, or case creation idempotent.
+The second boundary is the side effect. An outbox worker may deliver the same notification or case request more than once. Each effect needs a stable key such as `(tenant_id, event_id, effect_type)`, and the receiver must enforce it or the worker must maintain durable effect state. Idempotent storage does not make an email or HTTP call idempotent.
 
-This is also why the provider call itself is not assumed to be exactly once. If a timeout occurs after the provider accepted the request, a retry can repeat inference. The final stored signal remains authoritative for this event, and a provider request idempotency key can be used where the provider explicitly supports one. The core must not claim an exactly-once guarantee it cannot provide.
+The provider call is not assumed to be exactly once either. A timeout may occur after the provider accepted the request. A retry can repeat inference unless the provider explicitly supports a request idempotency key. The core must report what it knows, store one authoritative outcome for the event, and avoid promising guarantees it cannot provide.
 
-## Choosing the Execution Boundary
+## The New Failure Created by Async
 
-Synchronous scoring keeps the user flow simple and gives an immediate result. It is appropriate when the decision truly needs the signal and the latency budget can accommodate the provider. Its cost is coupled availability: a provider outage becomes a payment-path dependency unless the policy defines a fallback.
+The asynchronous choice removes provider latency from the request path. It introduces a queue and therefore new questions:
 
-Asynchronous scoring isolates the payment request from model latency. A payment can enter `PENDING_RISK`, an event can be replayed, and a consumer can process at controlled concurrency. The cost is eventual consistency and a more complicated state machine. Timeouts now become queue age, and the product must define what happens if a payment remains pending.
+- How old can a `PENDING_RISK` payment become before it needs escalation?
+- What happens when events arrive twice or out of order?
+- How much work may consumers admit while the provider is rate-limited?
+- Can an operator replay a dead-letter event without creating a second financial effect?
 
-For the shared foundation, we do not force one mode on every caller. The core provides the same signal contract for both. Payment-critical callers use a tightly bounded synchronous call only where justified; enrichment, review, and later analysis use the asynchronous path. This preserves the hard payment invariants without pretending all AI work has the same latency requirement.
+An inbox or unique outcome key handles duplicate delivery. A payment sequence or workflow version can enforce the ordering that one workflow needs; global ordering is more expensive and usually unnecessary. Concurrency is limited before provider calls, so queue growth does not become an uncontrolled provider burst. Replay preserves the original event identity and uses the same idempotency rules.
 
-The asynchronous decision introduces duplicate delivery, ordering, and backpressure problems. The inbox or unique outcome key handles duplicates. Partitioning and a payment sequence can preserve the ordering a particular workflow needs; global ordering would be more expensive and is not required. Consumer concurrency is limited before provider calls, so a growing queue does not become an unbounded provider burst.
+The trade-off is explicit: we accept eventual consistency to protect the payment request from model latency, then make queue age and pending-state handling part of the business design.
 
-## Resilience Is a Budget, Not a Boolean
+## Resilience Is a Budget
 
-Each request gets a total deadline. Individual provider attempts, retries, and downstream persistence must fit inside it. Retry only selected transient failures such as a provider rate limit or temporary server error. Do not retry an invalid schema, a rejected payload, or a policy decision. Exponential backoff with jitter prevents a fleet from retrying in lockstep, and a retry budget prevents recovery traffic from becoming a second outage.
+Each request receives a total deadline. Provider attempts, backoff, retries, response validation, and persistence must fit inside it. Retry only selected transient failures such as rate limits or temporary server errors. Do not retry invalid schema, rejected payloads, or policy decisions. Exponential backoff with jitter avoids synchronized retries; a retry budget prevents recovery traffic from becoming a second outage.
 
-At 14:03 in an illustrative scenario, provider latency rises from 300 ms to 4 seconds. The gateway should stop accepting unlimited synchronous work, the AI client should time out within its allocated budget, and the circuit should open after the configured failure threshold. Consumers should respect a concurrency limit rather than create thousands of waiting calls. The service records `AI_TIMEOUT`, routes according to the owning policy, and leaves enough capacity for recovery. A circuit breaker without admission control only changes when the queue fills.
+For an illustrative incident at 14:03, provider latency rises from 300 ms to 4 seconds. Admission control stops unlimited synchronous work. The client times out within its allocated budget. The circuit breaker opens after the configured failure threshold. Consumers stop increasing concurrency. The signal is recorded as `AI_TIMEOUT`, and the owning policy routes the workflow to its declared fallback.
 
-Fallback is a business decision with technical support from the core. The core can return an unavailable signal and its evidence. Policy may choose deterministic checks, step-up verification, manual review, or a delayed decision. It must label the path as fallback; it must not fabricate confidence or silently convert an outage into approval.
+A circuit breaker without admission control only changes when the queue fills. A fallback is not a technical default. The core can return an unavailable signal and evidence; policy chooses deterministic checks, step-up verification, manual review, or delay. The path is labeled as fallback. The system never fabricates confidence or silently converts an outage into approval.
 
-## The Architecture That Emerges
+## Safety, Credentials, and Evidence
 
-Once these problems are explicit, the components have clear reasons to exist:
+Provider output must match a versioned schema. Missing fields, unknown labels, contradictory values, malformed JSON, or confidence outside the accepted range become `INVALID_OUTPUT`. The system does not infer intent from free-form text.
 
-```text
-payment / review service
-        |
-        | typed SignalRequest
-        v
-  shared AI core
-  - secret resolution
-  - provider adapter
-  - timeout / retry / circuit / limit
-  - schema validation
-        |
-        v
-  AISignal + durable audit outcome
-        |
-        +--> deterministic policy --> business state machine --> ledger / settlement
-        |
-        +--> outbox --> notifications / cases / other effects
+Payment descriptions and support notes are untrusted input. Delimit them, send only an allowlisted subset, and validate the response as data. Minimize names, account numbers, addresses, and regulated identifiers through derived features, redaction, or tokenization. BYOK supports tenant-specific credentials and cost attribution, but adds secret-manager traffic and rotation races. A short-lived credential cache can reduce that traffic, at the cost of stale credentials; it therefore needs a TTL and refresh behavior.
 
-Kafka = replay source for asynchronous work
-DB = system of record for outcomes, inbox, and outbox
-OpenSearch = rebuildable read model for investigation and dashboards
-Vault = secret source; keys never enter prompts or logs
-```
+Raw prompts and provider payloads are not automatically suitable audit records. Retain the minimum evidence needed for investigation, protect access, and store hashes or references when the payload itself should not be retained. A hash is not anonymization if the input space is small enough to recover the original.
 
-Kafka is useful here only when replayable asynchronous work and controlled consumer processing justify it. It is not the ledger. The database owns durable outcome and idempotency state. OpenSearch can make investigations fast, but if it is unavailable the durable path continues and indexing catches up later. These boundaries prevent a convenient operational component from becoming an accidental financial authority.
+## Operating the Design
 
-## AI Safety and Evidence
+An on-call engineer should be able to answer which provider and model are failing, whether calls are waiting or executing, whether retries consume the budget, and which workflows are in fallback or pending states.
 
-The provider response must match a versioned schema. Missing fields, an unknown label, contradictory values, malformed JSON, or a confidence outside the accepted range become `INVALID_OUTPUT`. The system never guesses from free-form text. Store model and prompt versions with the signal; a prompt change is a change to the decision input.
+Useful aggregate metrics include gateway and AI latency, timeout and invalid-output rates, provider errors and rate limits, circuit state, consumer lag, queue age, outbox age, duplicate conflicts, database connection utilization, and dead-letter rate. Business metrics include fallback rate, manual-review rate, policy outcomes, and reviewed false-positive or false-negative samples by model and policy version.
 
-Prompt construction also needs an input boundary. Payment descriptions and support notes can contain instructions aimed at the model. Treat them as untrusted data, delimit them, send only an allowlisted subset, and validate the result as data. Minimize names, account numbers, addresses, and regulated identifiers through derived features, redaction, or tokenization. BYOK improves tenant isolation and cost attribution, but adds secret-manager traffic and rotation races. A short, explicit cache can reduce that traffic; it introduces stale credentials and must have a TTL and clear refresh behavior.
+Do not put `transaction_id`, `account_id`, `event_id`, or trace ID in Prometheus labels. Put correlation data in controlled structured logs and trace context. A trace should connect the request, payment, event, inference, model version, and policy version without exposing the prompt or credential. The audit record should distinguish the AI signal from the deterministic action that followed it.
 
-Prompt text and raw provider payloads are not automatically appropriate audit data. Retain the minimum needed for investigation, protect access to sensitive evidence, and record hashes or references when the payload itself should not be stored. A hash is not anonymization if a small input space makes the original easy to recover.
+Dead-letter records need an owner and replay procedure, not merely a topic name. Capacity reviews should include peak event rate, consumer concurrency, provider quotas, database unique-index contention, connection pools, secret-manager QPS, search indexing rate, token budgets, and the extra attempts caused by retries. Cost is part of reliability: an unbounded prompt or retry loop can exhaust a tenant budget before an infrastructure limit fires.
 
-## Operating the Failure Modes
+## What We Learned
 
-An on-call engineer should be able to answer: which provider and model are failing, whether calls are waiting or actively executing, whether retries are consuming the budget, and which payment workflows are in fallback or pending states. Useful aggregate metrics include gateway latency, AI latency, timeout and invalid-output rates, provider error and rate-limit rates, circuit state, consumer lag, outbox age, duplicate conflicts, database connection utilization, and dead-letter rate. Business metrics include fallback rate, manual-review rate, policy outcomes, and reviewed false-positive or false-negative samples by model and policy version.
+The shared AI core is not valuable because it hides AI behind a larger abstraction. It is valuable because it makes failure behavior consistent and visible across FinPay's payment, KYC, review, and operations workflows.
 
-Do not put `transaction_id`, `account_id`, `event_id`, or trace ID in Prometheus labels. Put correlation data in controlled structured logs and trace context instead. A trace should connect the request, payment, event, AI inference, model version, and policy version without exposing the prompt or credential. The audit record should preserve the decision, reason, timestamps, and versions so an investigator can distinguish an AI signal from the deterministic action that followed it.
-
-Dead-letter records need an owner and replay procedure, not just a topic name. Replay must preserve the original event identity and use the same idempotency rules. Capacity reviews should include peak event rate, consumer concurrency, provider quotas, database unique-index contention, connection pools, secret-manager QPS, search indexing rate, token budgets, and the extra attempts created by retries. Cost is part of reliability: an unbounded prompt or retry loop can exhaust a tenant’s budget before any infrastructure limit fires.
-
-## What This Foundation Establishes
-
-The shared AI core is valuable because it makes fallibility visible and repeatable. It standardizes secrets, deadlines, retries, validation, idempotency, and evidence across the evolving FinPay system. It does not hide the decisions that belong to payment, KYC, review, or operations teams.
-
-The contract for the later articles is therefore simple:
+The durable rule is:
 
 ```text
 AI signal -> deterministic policy -> business decision
 ```
 
-The ledger remains the financial truth. Kafka, when needed, provides replay; the database records durable outcomes; OpenSearch serves a rebuildable view. Idempotent storage protects the event record, while idempotent side effects protect the systems reached afterward. AI can improve a decision, explain it, or prioritize it. It cannot become the authority that moves FinPay’s money.
+The ledger remains the financial truth. Kafka, when justified, provides replay for asynchronous work; the database records durable outcomes, inbox state, and outbox state; a search index is a rebuildable investigation view. Storage idempotency protects the event record, while effect idempotency protects systems called afterward.
+
+AI may improve, explain, or prioritize a decision. It cannot become the authority that moves FinPay's money.

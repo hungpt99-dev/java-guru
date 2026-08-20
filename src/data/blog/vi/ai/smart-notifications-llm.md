@@ -11,26 +11,28 @@ draft: false
 featured: false
 ---
 
-## Tính năng AI nhỏ nhất nhưng hữu ích
+## Incident Làm Thay Đổi Thiết Kế
 
-FinPay đã có payment core. Core này xác thực payment, ghi state có thẩm quyền vào ledger và quyết định notification nào bắt buộc phải gửi. Tính năng AI được đề xuất cố ý nhỏ hơn một “AI notification platform”: LLM chỉ được soạn lời cho notification mà domain đã quyết định gửi.
+Payment core của FinPay đã có phần khó nhất của một payment system: xác thực payment, chuyển payment state machine và ghi kết quả có thẩm quyền vào ledger. Notification eligibility cũng là quyết định của domain. Nếu payment completed, receipt có thể là notification bắt buộc; nếu payment bị reject, khách hàng có thể cần message lỗi chính xác.
 
-Điều đó quan trọng khi payment event ghi `2,431,876 VND`, nhưng model viết “khoảng 2.4M VND.” Người đọc có thể xem đây là cách diễn đạt thân thiện. Hệ thống tài chính phải xem đó là một phép biến đổi dữ kiện không được hỗ trợ. Model cũng không được quyết định bỏ qua fraud alert, đổi recipient, hoặc biến một payment thất bại thành thành công.
+Tính năng AI được đề xuất nghe có vẻ vô hại: để LLM làm cho các message rõ ràng và tự nhiên hơn.
 
-Quy tắc trung tâm là:
+Nhưng hãy xét payment completed có canonical event chứa `2,431,876 VND`. Model viết: “Payment của bạn khoảng 2.4M VND đã completed.” Đây không chỉ là vấn đề style. Hệ thống đã thay đổi một financial fact. Một draft khác có thể bỏ qua fraud alert bắt buộc, copy recipient từ text do attacker kiểm soát, hoặc mô tả payment failed thành successful.
+
+Vì vậy câu hỏi thiết kế trung tâm là: **một language service không đáng tin cậy được phép tham gia ở đâu, và ở đâu code tất định của FinPay phải giữ authority?**
+
+Câu trả lời phải hẹp một cách có chủ đích:
 
 ```text
 canonical payment facts -> AI draft -> claim validator -> domain policy -> delivery
                                           (untrusted)       (authority)
 ```
 
-LLM chỉ đề xuất nội dung. Dữ kiện và quyết định gửi thuộc về code FinPay tất định.
+LLM được đề xuất ngôn ngữ. Nó không được authorize notification, thay đổi payment state, mutate ledger hoặc quyết định SEND không thể đảo ngược. Đây là production-oriented design được đề xuất, không phải khẳng định về một hệ thống FinPay đã triển khai. Các con số capacity bên dưới là giả định minh họa.
 
-Đây là thiết kế tham chiếu, không phải khẳng định về một hệ thống FinPay đã triển khai. Các con số bên dưới là giả định minh họa để phân tích capacity.
+## Bắt Đầu Từ Thay Đổi Nhỏ Nhất
 
-## Thiết kế đầu tiên đã thất bại như thế nào
-
-Cách triển khai hiển nhiên hấp dẫn vì rất nhỏ:
+Implementation đầu tiên thường trông như sau:
 
 ```java
 // WRONG: deliberately unsafe; do not ship
@@ -39,32 +41,44 @@ public String copyFor(NotificationEvent event) {
 }
 ```
 
-Nó gửi raw event cho model và coi một string là kết quả. Ba contract bị che khuất trong một lời gọi:
+Nó có vẻ chỉ thêm một dependency. Thực tế, một string call đang che giấu ba quyết định:
 
-- Model được thấy những field không cần thiết, gồm PII hoặc nội dung độc hại trong description.
-- Caller không thể phân biệt payment fact với câu do model bịa ra.
-- Không có timeout, giới hạn output, fallback, audit record hay bảo vệ trước việc gửi lặp.
+- Model thấy raw event, gồm field không cần thiết, PII và cả instruction do merchant kiểm soát.
+- Caller không biết từ nào là payment fact, từ nào là nội dung được bịa.
+- Call không có timeout bounded, output contract, fallback, audit record hoặc cơ chế chống delivery lặp.
 
-Lỗi không chỉ là hallucination. Response tự do có thể bỏ title bắt buộc, vượt giới hạn SMS, chứa link chưa được phê duyệt hoặc lặp lại chỉ dẫn nằm trong text do merchant kiểm soát. Provider của model cũng có thể rate-limit hoặc timeout. Nếu consumer chờ vô hạn, lượng việc đang xử lý tăng theo `concurrency = throughput x latency`. Với giả định minh họa 200 notification/giây, response provider 4 giây tạo ra 800 model call đang xử lý trước khi tính retry. Consumer, connection pool và quota của provider sau đó có thể cùng chịu lỗi.
+Giả sử minh họa traffic đạt 200 notification/giây và provider mất 4 giây để response. Little's Law cho khoảng `200 x 4 = 800` model call đang in-flight trước khi tính retry. Thêm thread chỉ làm tăng áp lực lên connection pool mà không tăng capacity của provider. Nếu consumer chờ synchronous, model latency trực tiếp làm notification processing trễ; nếu đặt call trên payment request, provider bên ngoài bị gắn với money movement.
 
-Cuối cùng, timeout không chứng minh provider chưa hoàn tất request. Retry một thao tác vừa generate vừa send vì thế có thể tạo hai lần gửi bên ngoài. Kiểm tra database kiểu `exists()` cũng không đóng được race này.
+Race nguy hiểm hơn xuất hiện sau generation. Worker có thể generate copy, gọi delivery provider, timeout khi provider đang accept request rồi retry. Kiểm tra database bằng `exists()` không chứng minh được external send đầu tiên đã xảy ra hay chưa. Kết quả có thể là hai message cho khách dù payment event chỉ được xử lý một lần.
 
-## Xác định constraint trước khi chọn component
+Vì vậy bài toán không phải “prompt thế nào cho tốt hơn?”. Bài toán là giữ component advisory cách xa fact và irreversible side effect, đồng thời chấp nhận duplicate event và provider outcome không chắc chắn.
 
-Với tính năng này, constraint hữu ích hơn danh sách công nghệ:
+## Constraint Trước Infrastructure
 
-1. Ledger và payment state machine vẫn là source of truth. Model không được mutate balance, authorization, settlement hay ledger state.
-2. Notification bắt buộc vẫn phải được gửi khi AI không hoạt động. Với fraud alert cần nội dung chính xác, policy chọn template tất định thay vì chặn việc gửi. Với marketing message, policy có thể suppress hoặc defer.
-3. Generated text chỉ được dùng minimal canonical fact object. Model không được suy diễn amount, currency, status, recipient hay payment identifier.
-4. Processing phải chịu được event delivery at-least-once, trong khi side effect SEND bên ngoài cần chiến lược deduplication riêng.
-5. Reviewer phải reconstruct được decision sau khi prompt, model, policy hoặc template thay đổi.
-6. Provider call cần latency có giới hạn, retry có giới hạn, tenant isolation và cost budget rõ ràng.
+Constraint quyết định thiết kế đáng tin cậy hơn một technology stack có sẵn:
 
-Các constraint này vẫn để lại nhiều lựa chọn thiết kế. Chúng không biện minh cho việc trao thêm authority cho LLM.
+1. Ledger và payment state machine là source of truth. AI không được mutate balance, authorization, settlement hoặc ledger state.
+2. AI downtime không được chặn required notification. Required alert có thể dùng deterministic template; optional message có thể defer hoặc suppress theo policy.
+3. Prompt chỉ nhận minimal canonical fact object. Model không được suy diễn amount, currency, status, recipient hoặc payment ID từ prose.
+4. Event processing phải chịu được at-least-once delivery. External SEND side effect cần chiến lược idempotency riêng.
+5. Reviewer phải reconstruct được fact nào, version nào, policy decision nào và provider outcome nào đã tạo notification.
+6. Provider work cần deadline, retry bounded, isolation theo tenant, concurrency limit và cost budget.
 
-## Ranh giới authority
+Các constraint này không bắt buộc phải có Kafka, search cluster hay LLM. Chúng bắt buộc phải có durable state, authority boundary và behavior rõ ràng khi dependency failure.
 
-Quyết định đầu tiên là tách fact khỏi ngôn ngữ. Payment event được map thành object canonical do domain sở hữu:
+## Các Lựa Chọn: Generation Nằm Ở Đâu?
+
+**Synchronous generation trên payment request** cho copy ngay lập tức và control flow đơn giản. Nhưng nó tiêu payment latency budget cho một provider không có authority. Model timeout có thể làm payment request thành công bị fail, hoặc buộc payment service gánh work không ảnh hưởng đến ledger. Điều đó không phù hợp với required notification path.
+
+**Synchronous generation trong notification consumer** loại dependency khỏi payment authorization nhưng vẫn giữ worker trong lúc chờ provider. Cách này có thể đủ ở volume thấp với deadline chặt, nhưng provider chậm sẽ chuyển thẳng thành consumer backlog và connection pressure.
+
+**Asynchronous generation sau khi persist durable notification intent** thêm eventual delivery và nhiều state hơn, nhưng tách payment latency và làm pending, fallback, uncertain delivery trở nên rõ ràng. Nó cũng cho phép ưu tiên required work trước optional copy.
+
+Chúng ta chọn async boundary vì wording của notification hữu ích nhưng không có authority. Payment transition phải hoàn tất độc lập. Đây là trade-off, không phải quy tắc tuyệt đối: preview hiển thị cho user có thể synchronous nếu caller chấp nhận copy unavailable hoặc stale.
+
+## Ranh Giới Authority
+
+Event trước hết được map thành object do domain sở hữu, thay vì truyền nguyên event vào model:
 
 ```text
 PaymentFacts {
@@ -72,7 +86,7 @@ PaymentFacts {
 }
 ```
 
-Model nhận minimal view và trả về structured output, chẳng hạn:
+LLM chỉ nhận minimal view và phải trả structured output:
 
 ```json
 {
@@ -83,9 +97,9 @@ Model nhận minimal view và trả về structured output, chẳng hạn:
 }
 ```
 
-Schema validator kiểm tra type và field bắt buộc; claim validator đối chiếu mọi claim với `PaymentFacts`; channel policy kiểm tra length, encoding, link và locale. Hệ thống không bao giờ parse fact ngược từ generated body. Nếu body nói amount khác, validation thất bại dù JSON hợp lệ.
+Structured output không đồng nghĩa trusted output. Schema validator kiểm tra type và field bắt buộc. Claim validator đối chiếu từng claim với `PaymentFacts`. Channel policy kiểm tra length, encoding, locale và link. Hệ thống không extract payment fact ngược từ prose. Nếu body nói amount khác, draft bị reject dù JSON hợp lệ.
 
-Bước validation tạo ra một vấn đề mới: validator chặt hơn có thể reject draft chỉ vì cách viết vụng, làm fallback tăng. Đây là trade-off chấp nhận được để bảo vệ độ chính xác tài chính. Fallback rate được đo như tín hiệu sản phẩm và vận hành; chất lượng copy có thể cải thiện mà không làm yếu ranh giới fact.
+Boundary chặt hơn tạo ra failure mới: draft chỉ hơi vụng cũng bị reject, khiến template fallback tăng. Chúng ta chấp nhận chi phí này vì financial statement sai nguy hiểm hơn wording kém cá nhân hóa. Đo rejection theo reason để cải thiện prompt và template mà không làm yếu validation.
 
 ```java
 // RIGHT: facts and delivery authority stay outside the model
@@ -98,13 +112,11 @@ NotificationDecision decide(PaymentFacts facts, Policy policy) {
 }
 ```
 
-`authorize` không phải LLM call. Nó áp dụng rule tất định cho payment status, notification purpose, recipient consent, yêu cầu pháp lý và channel khả dụng. Draft có confidence cao không thể bật một message bị cấm. Ngược lại, AI failure không thể ngăn required alert dùng safe template.
+`authorize` là deterministic. Nó áp dụng payment status, notification purpose, recipient consent, yêu cầu pháp lý và channel availability. Draft thuyết phục đến đâu cũng không thể bật một message bị cấm. AI failure cũng không thể ngăn required alert dùng safe template.
 
-## Xử lý bất đồng bộ và failure mới
+## Failure Mới: Async Vẫn Có Thể Gửi Trùng
 
-Generation không nên nằm trên payment authorization request. Nếu model path minh họa mất 400 ms, thêm nó vào payment request 200 ms sẽ tiêu hết latency budget và gắn money movement với service bên ngoài. Synchronous generation chỉ hợp lý cho preview không critical, khi user chấp nhận dependency đó.
-
-Với required notification, FinPay có thể persist notification intent sau payment state transition rồi xử lý generation bất đồng bộ:
+Thiết kế async cần durable notification intent sau payment state transition:
 
 ```text
 Kafka event -> consumer -> inbox/unique insert -> fact mapper
@@ -118,56 +130,76 @@ Kafka event -> consumer -> inbox/unique insert -> fact mapper
                          audit + OpenSearch read model
 ```
 
-Cách này tách payment latency và làm các state pending, fallback, uncertain delivery trở nên rõ ràng. Cái giá là durable state và notification delivery có eventual consistency. User có thể thấy payment completed trước khi message được gửi.
+Mỗi box tồn tại vì một lý do. Event mang work qua process boundary; inbox làm event handling idempotent; fact mapper tạo authority boundary; adapter tùy chọn cô lập provider không đáng tin; validation và fallback bảo vệ content; outbox làm delivery work durable; audit giải thích decision; OpenSearch phục vụ điều tra nhưng không làm source of truth.
 
-Chọn at-least-once consumption vì mất required notification tệ hơn reprocess event. Nó tạo duplicate work, nên inbox record dùng atomic unique insert trên `(tenant_id, payment_id, purpose, channel)`. Consumer chỉ acknowledge event sau khi durable record commit. Outbox sau đó publish delivery work từ record này; Kafka hữu ích cho replay, database là record của notification state, còn OpenSearch chỉ là read model để search.
+Chọn at-least-once consumption vì mất required notification âm thầm tệ hơn reprocess. Inbox dùng atomic unique insert trên `(tenant_id, payment_id, purpose, channel)`, consumer chỉ acknowledge sau khi durable record commit. Database là record của notification state; Kafka hữu ích cho transport và replay; search index chỉ là read model.
 
-Unique insert bảo vệ storage, không bảo vệ SEND call. Hai worker vẫn có thể cùng đến provider sau crash xảy ra giữa lúc provider accept và local acknowledgement. Vì vậy delivery adapter dùng stable key như `notification/{tenant}/{payment}/{purpose}/{channel}` khi provider hỗ trợ idempotency. Nếu provider không hỗ trợ, ghi nhận uncertain result và reconcile; retry mù có thể gửi hai lần. Đây là trade-off khó tránh: không có provider deduplication, hệ thống không phải lúc nào cũng chứng minh được timed-out send đã xảy ra hay chưa.
+Nhưng cách này chỉ giải quyết duplicate processing, không giải quyết duplicate external send. Worker có thể crash sau khi provider accept nhưng trước local acknowledgement. Vì vậy delivery adapter gửi stable key như `notification/{tenant}/{payment}/{purpose}/{channel}` khi provider hỗ trợ idempotency. Nếu provider không có deduplication, outcome sau timeout thực sự là uncertain. Hãy ghi state đó và reconcile; đừng retry mù rồi gọi kết quả là “exactly once.”
 
-## Provider failure cũng là bài toán capacity
+Outbox cũng thêm operational work: một row có thể được publish hai lần, bị kẹt, hoặc được delivery khi notification record đã đổi. Publish và claim cần version check cùng idempotent consumer. Mỗi guarantee bảo vệ một boundary khác nhau; không có một inbox hay một transaction nào bảo vệ toàn bộ chain.
 
-Xét một incident minh họa lúc 14:03: model latency tăng từ 300 ms lên 4 giây. Deadline của consumer hết hạn, bounded retry với jitter bắt đầu, và retry budget nhanh chóng cạn. Nếu vẫn consume ở 200 notification/giây, pending queue tăng khoảng 200 item mỗi giây mà completed work không theo kịp. Thêm thread không sửa được provider; nó chỉ tiêu tốn connection và tăng pressure.
+## Provider Failure Là Bài Toán Capacity
 
-Adapter cần concurrency limit theo tenant và toàn cục, rate limiter, timeout ngắn và circuit breaker. Chỉ retry transient error như một số timeout hoặc response 5xx; không retry malformed output, authentication failure hay policy rejection. Backoff có jitter ngăn mọi worker retry cùng lúc. Khi budget hết, required message dùng template còn optional message chuyển sang deferred state.
+Xét incident minh họa khác. Lúc 14:03, model latency tăng từ 300 ms lên 4 giây. Deadline hết hạn, bounded retry với jitter bắt đầu và retry budget cạn. Ở 200 notification/giây, backlog tăng khoảng 200 item mỗi giây nếu completed work không theo kịp. Thêm worker thread chỉ tiêu tốn thêm connection và provider quota.
 
-Trade-off phải được nói rõ: fail-closed cho AI quality sẽ bảo vệ wording nhưng làm mất required alert. FinPay thay vào đó fail-closed với generated copy và fail-open sang deterministic template cho required delivery. Với operation rủi ro cao, policy có thể chọn step-up hoặc manual review, nhưng đó là domain decision, không phải generic exception handler.
+Vì vậy LLM adapter cần timeout ngắn, concurrency limit toàn cục và theo tenant, rate limiting và circuit breaker. Chỉ retry một số timeout transient và response 5xx. Không retry malformed output, authentication failure hoặc policy rejection. Backoff có jitter tránh retry đồng bộ. Khi retry budget hết, required message dùng template còn optional message chuyển sang deferred.
 
-AI outage không được biến thành database outage. Notification worker không nên giữ database transaction mở trong lúc chờ model. Hãy claim work atomically, gọi provider ngoài transaction, rồi commit kết quả với version check. Connection pool nên được sizing cho database work, không phải số model call tối đa.
+Đây là lựa chọn degraded mode quan trọng: fail-closed với generated copy, nhưng fallback sang deterministic content cho required delivery. Với notification rủi ro cao, policy có thể chọn step-up hoặc manual review. Đó là domain decision, không phải exception handler giấu trong LLM client.
 
-## Security và auditability
+Worker không được giữ database transaction mở trong lúc chờ model. Hãy claim work atomically, gọi provider ngoài transaction rồi commit result bằng version check. Sizing database connection pool theo database work, không theo số model call tối đa.
 
-Canonical fact mapper cũng là privacy boundary. Nó loại account identifier không cần thiết, free-form description và internal metadata trước external call. Event field vẫn là untrusted data: prompt injection trong merchant description không được override system instruction hoặc policy. Output được escape theo channel, còn link phải qua allowlist thay vì copy từ model text.
+## Security Và Auditability Là Một Phần Của Boundary
 
-Kiểm tra tenant authorization trước khi tạo notification work. Credential của tenant được scoped adapter lấy từ secret manager; chúng không bao giờ đi vào prompt, generated content, trace hay log thông thường. Quyền đọc audit và search được kiểm soát riêng, cùng retention và deletion rule cho generated content và PII.
+Canonical mapper là privacy boundary. Nó loại account identifier, free-form description và internal metadata không cần thiết trước external call. Merchant text vẫn là untrusted input: prompt injection không được override system instruction hoặc policy. Escape output theo channel và allowlist link thay vì copy URL từ model text.
 
-Audit record nên cho phép tái dựng decision mà không giả vờ model output là deterministic. Lưu `payment_id`, `event_id`, purpose, channel, `model_version`, `prompt_version`, `policy_version`, decision, reason, timestamp, output hash và provider outcome. Chỉ lưu generated content thật khi retention và access policy cho phép. Version giải thích vì sao replay về sau có thể tạo draft khác.
+Kiểm tra tenant authorization trước khi tạo notification work. Scoped adapter lấy credential của tenant từ secret manager; credential không bao giờ đi vào prompt, generated content, trace hoặc log thông thường. Audit và search có authorization, retention và deletion rule riêng cho generated content và PII.
 
-Trước khi đổi model hoặc prompt, hãy đánh giá trên một tập canonical fact đã được redacted và version hóa. Kiểm tra claim accuracy, độ bao phủ field bắt buộc, channel length, việc reject unsafe link, fallback rate và cost. Điểm offline đạt yêu cầu không phải quyền bỏ qua runtime validation. Monitoring production cần phát hiện drift trong rejection và fallback reason, vì provider model có thể đổi style hoặc behavior mà không cần FinPay code thay đổi. Rollout thay đổi theo tenant hoặc channel, đồng thời phải có cách tắt AI nhanh và giữ lại deterministic template.
+Audit record phải reconstruct decision mà không giả vờ model output deterministic. Lưu `payment_id`, `event_id`, purpose, channel, `model_version`, `prompt_version`, `policy_version`, decision, reason, timestamp, output hash và provider outcome. Chỉ lưu generated content khi retention và access policy cho phép. Versioning giải thích vì sao replay về sau có thể tạo copy khác.
 
-## Thực tế vận hành
+Trước khi đổi model hoặc prompt, đánh giá trên tập canonical fact đã redacted và version hóa. Kiểm tra claim accuracy, required-field coverage, channel length, unsafe-link rejection, fallback rate và cost. Offline quality không thay thế runtime validation. Rollout theo tenant hoặc channel, đồng thời giữ kill switch để tắt AI nhanh mà deterministic template vẫn hoạt động.
 
-Lúc 3 AM, on-call cần biết notification trễ vì Kafka, database, model hay delivery provider. Các metric hữu ích gồm:
+## Thực Tế Vận Hành
 
-- Consumer lag, notification processing latency, inbox conflict rate và outbox age.
-- Model latency, timeout và rate-limit count, retry attempt, circuit state, token usage và fallback rate.
-- Validation failure theo reason, provider latency, provider error, uncertain delivery và duplicate-send attempt đã ngăn chặn.
-- Business count cho required notification đã gửi, template fallback, optional notification deferred và policy suppression.
+Lúc 3 AM, on-call phải phân biệt Kafka lag, database contention, model failure và delivery-provider failure. Metric hữu ích gồm:
 
-Không dùng `payment_id`, `account_id`, `event_id` hay `trace_id` làm Prometheus label. Đưa identifier vào structured log được bảo vệ hoặc trace context. Trace nên nối request hoặc payment ID, notification work, AI inference ID, model và prompt version, policy evaluation, outbox record và provider call. Alert nên dựa trên dimension có giới hạn như tenant, channel, provider và status.
+- Consumer lag, processing latency, inbox conflict rate và outbox age.
+- Model latency, timeout, rate limit, retry attempt, circuit state, token usage và fallback rate.
+- Validation failure theo reason, provider latency và error, uncertain delivery và duplicate send đã được ngăn.
+- Required notification đã gửi, template fallback, optional notification deferred và policy suppression.
 
-Khi provider timeout làm delivery uncertain, runbook phải nói reconciliation diễn ra thế nào và khi nào cần manual review. Khi validation failure tăng sau prompt change, operator cần prompt version và sample đã redacted. Khi lag tăng, pause optional work trước required alert và bảo vệ database connection pool. Dead-letter queue dành cho poison event cần kiểm tra, không phải nơi required notification biến mất im lặng.
+Không dùng `payment_id`, `account_id`, `event_id` hoặc `trace_id` làm Prometheus label. Đưa identifier vào protected structured log hoặc trace context. Trace nên nối payment work, notification work, AI inference ID, model và prompt version, policy evaluation, outbox record và provider call.
 
-## Kết quả
+Runbook phải giải thích reconciliation cho uncertain delivery và ngưỡng cần manual review. Khi validation failure tăng sau prompt change, operator cần prompt version. Khi backlog tăng, pause optional work trước required alert và bảo vệ database connection pool. Dead-letter queue dành cho poison event cần điều tra, không phải nơi required notification biến mất im lặng.
 
-Final architecture cố ý vừa đủ. Payment state và notification eligibility ở lại trong deterministic domain của FinPay. Async worker consume durable notification intent, tùy chọn hỏi LLM để tạo constrained copy, validate claim với canonical fact và chọn template khi draft không có hoặc không an toàn. Outbox chuyển work tới delivery adapter với stable idempotency key. Audit storage ghi lại reasoning, còn OpenSearch phục vụ điều tra mà không trở thành source of truth.
+## Kiến Trúc Cuối Cùng
 
-Ranh giới quan trọng không phải “AI so với template.” Đó là authority. LLM có thể làm required message rõ hơn, nhưng không thể làm payment trở thành sự thật, authorize một send, hoặc biến provider response không chắc chắn thành outcome chắc chắn.
+Thiết kế cuối cùng vừa đủ vì bài toán không cần AI có authority:
 
-## Bài học cho thiết kế FinPay lớn hơn
+```text
+Payment state machine + ledger
+             |
+     durable notification intent
+             |
+     async worker and policy
+        /             \
+ constrained LLM       deterministic template
+        \             /
+      claim/channel validation
+             |
+       outbox + delivery adapter
+             |
+        external provider
+```
 
-1. Bắt đầu từ side effect không thể đảo ngược. SEND cần guarantee mạnh hơn việc lưu một draft.
-2. Giữ AI contract hẹp: structured output cộng claim validation, không extract fact từ prose.
-3. Tách inbox idempotency khỏi provider-side send idempotency; cái này không tự kéo theo cái kia.
-4. Để degraded behavior là một policy choice. Required alert dùng deterministic template; message tùy chọn có thể defer hoặc suppress.
-5. Coi model, prompt, policy, template và provider behavior là các operational contract có version.
-6. Để payment ledger tiếp tục có authority trong khi AI phát triển thành advisory layer xung quanh nó.
+Payment state và notification eligibility vẫn deterministic. Worker tùy chọn hỏi LLM để tạo constrained copy, validate với canonical facts và fallback khi không chứng minh được safety. Outbox chuyển delivery work bằng stable idempotency key. Audit ghi reasoning; search hỗ trợ điều tra nhưng không bao giờ là source of truth.
+
+Ranh giới đáng nhớ không phải “AI so với template.” Đó là authority. LLM có thể làm required message rõ hơn, nhưng không thể làm payment thành sự thật, authorize một send hoặc biến provider response không chắc chắn thành outcome chắc chắn.
+
+## Bài Học Cho FinPay Lớn Hơn
+
+1. Bắt đầu từ irreversible side effect. Gửi message cần reasoning mạnh hơn lưu draft.
+2. Giữ AI contract hẹp: structured output và claim validation, không extract fact từ prose.
+3. Inbox idempotency và provider-side send idempotency giải quyết hai failure khác nhau.
+4. Degraded behavior phải là policy choice. Required alert dùng deterministic template; optional message có thể defer hoặc suppress.
+5. Version hóa model, prompt, policy, template và provider outcome thành operational contract.
+6. Để payment ledger tiếp tục có authority trong khi AI phát triển xung quanh nó như advisory layer.
