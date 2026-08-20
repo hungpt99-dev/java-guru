@@ -7,70 +7,78 @@ draft: false
 featured: false
 ---
 
-## The incident that is not yet a diagnosis
+## The 03:00 question
 
-Suppose a settlement batch is late at 03:00. Prometheus reports higher API latency, KYC timeouts appear, Kafka consumer lag rises, and several dead-letter queues begin filling. The on-call engineer has four dashboards and no reliable causal story. Some alerts may be symptoms of one dependency failure; others may be unrelated.
+At 03:00, a FinPay settlement batch is late. Prometheus shows higher API latency. KYC requests are timing out. Kafka consumer lag is rising, and several dead-letter queues are filling.
 
-The first request is usually, “What should I restart?” That is the wrong starting point for a financial system. A bad operational action can delay settlement further, bypass a KYC control, or duplicate a payment-side effect. FinPay needs a useful hypothesis quickly, but it must preserve the same invariant used everywhere else in the series: the ledger is the source of truth, settlement is deterministic, and an AI result is never permission to mutate financial state.
+The on-call engineer has four dashboards and one urgent question: “What should I restart?” That question is dangerous. A restart can hide the symptom, increase duplicate work, or delay settlement. Changing KYC state, payment state, a balance, or the ledger is more dangerous still.
 
-This article is the capstone of that reliability story. It reuses FinPay’s AI core ports, audit fields, idempotency split, and `Kafka = replay / database = record / OpenSearch = read model` boundary. The new problem is how to assemble evidence from alerts and traces without confusing correlation with cause. The central insight is simple: **correlation assembles evidence; it does not establish causal truth. A recommendation is a typed proposal, not an execution command.**
+The useful first outcome is not a diagnosis. It is a bounded hypothesis with evidence and an explicit uncertainty level. FinPay’s existing invariants come first: the ledger is the financial source of truth, settlement follows a deterministic state machine, and AI never authorizes an irreversible action.
 
-## Why the obvious design fails
+This article owns one engineering insight: **correlation assembles evidence; it does not prove causality. An AI recommendation is a typed proposal, not an execution command.**
 
-The first design is tempting:
+## Start with the obvious design
+
+The first design is easy to draw:
 
 ```text
 Prometheus alert ──▶ Kafka ──▶ consumer ──▶ LLM ──▶ execute runbook action
 ```
 
-The consumer sends alert text, a few trace fields, and “What should we do?” to the model. It stores the answer and acknowledges Kafka. This can look fine in a small test. It couples four different failure domains on one path, though: alert ingestion, evidence search, provider inference, and operational authority.
+The consumer sends alert text and a few trace fields to an LLM, stores the answer, acknowledges Kafka, and executes the recommended runbook. It is simple because ingestion, investigation, inference, and authority are all one request.
 
-The numbers below are design assumptions for capacity reasoning, not FinPay measurements. If 10,000 alert events per second each hold an LLM call for two seconds, the stage creates:
+That simplicity does not survive traffic or failure. The following numbers are **illustrative assumptions**, not FinPay measurements. At 10,000 alert events per second and two seconds of model latency:
 
 ```text
-concurrency = throughput × latency = 10,000 × 2 = 20,000 in-flight calls
+in-flight calls = throughput × latency = 10,000 × 2 = 20,000
 ```
 
-At ten seconds, it creates 100,000. That does not mean we should create that many threads. It means provider quotas, connection pools, memory, and the Kafka consumer path cannot be allowed to grow with provider latency. A synchronous listener also makes a provider outage look like a partition outage.
+At ten seconds, the same path has 100,000 calls in flight. This is not a request to create 100,000 threads. It is a warning that provider quota, connection pools, memory, and the Kafka listener cannot be allowed to expand with provider latency.
 
-At 14:03, imagine provider latency rising from 300 ms to 4 seconds. Listener workers remain occupied, polls slow down, and consumer lag grows. A three-attempt retry policy sends roughly three times the failed traffic while the provider is already unhealthy. Client timeouts do not prove the provider did nothing; a request may have completed after the client gave up. Retrying can therefore create duplicate model calls and conflicting recommendations. An unbounded queue only moves the failure from Kafka lag to heap exhaustion.
+Suppose provider latency rises from an assumed 300 ms to four seconds. Listener workers stay occupied, polls slow down, and Kafka lag looks like the primary incident. A three-attempt retry policy can send roughly three times the failed traffic into an already unhealthy provider. A client timeout also does not prove the provider did nothing: the request may complete after the client gives up. Retrying can produce duplicate and contradictory hypotheses.
 
-There are data problems too. A trace may arrive after its alert, be sampled out, or fail to index while Kafka remains healthy. “No span found” is not “no failure.” Kafka redelivery and consumer rebalancing are normal at-least-once concerns. `exists()` followed by `insert()` is not a lock: two consumers can both observe absence and create two review tasks.
+An unbounded internal queue only moves the failure from Kafka lag to heap exhaustion. `exists()` followed by `insert()` is not an atomic claim either; two consumers can create two review tasks. A trace may arrive after the alert, be sampled, or fail to index. “No span found” is evidence of missing evidence, not evidence that no failure occurred.
 
-Most dangerous is the final arrow. An LLM must not restart a settlement consumer, change KYC state, authorize a payment, update an account balance, mutate the ledger, or settle funds. Logs and runbooks are untrusted input and can contain prompt injection. A plausible explanation is still only a hypothesis.
+Finally, the last arrow is unacceptable. An LLM must not restart a settlement consumer, change KYC state, authorize a payment, update a balance, mutate the ledger, or settle funds. Logs and runbooks are untrusted input and may contain prompt injection. A plausible paragraph remains a hypothesis.
 
 ## Constraints before components
 
-For this reference design, we assume:
+For this reference design, we use these **assumptions and requirements**:
 
-- Alert ingestion should continue when the AI provider is slow or unavailable.
-- Triage may be delayed, but the source alert must be retained and replayable.
-- Missing or stale traces must be visible as uncertainty, not silently treated as evidence.
-- Known failure patterns should have a deterministic, inexpensive path.
-- Recommendations that affect production controls require an explicit approval workflow.
-- Payment, ledger, settlement, and KYC state remain authoritative in their own deterministic stores.
-- Every decision must be explainable from evidence, policy, and version metadata.
-- Example rates and latency values are illustrative; real limits come from load tests, provider contracts, and the alert SLO.
+- Alert ingestion continues when the AI provider is slow or unavailable.
+- Triage may be delayed, but the source alert remains durable and replayable.
+- Missing or stale traces are recorded as uncertainty.
+- Known patterns have a deterministic, inexpensive path.
+- A recommendation affecting production controls requires explicit approval.
+- Payment, KYC, settlement, and ledger state remain authoritative in deterministic stores.
+- Every result is explainable from evidence, policy, and version metadata.
+- Example rates and latencies are illustrative; real limits require load tests, provider contracts, and an agreed alert SLO.
 
-These constraints rule out “the model decides” before we choose a database or a queue.
+These constraints already reject “the model decides.” We can now compare the boundaries rather than choosing infrastructure by habit.
 
-## The boundary that makes the system safe
+## Choosing the boundary
 
-The design separates a **signal path** from an **authority path**:
+Synchronous processing has one advantage: the caller receives an answer immediately. It also puts provider latency and availability inside the alert-ingestion timeout. It is reasonable for a low-volume operator query where losing the query is acceptable. It is a poor default for durable alert processing.
+
+Direct HTTP with a database inbox is simpler than a broker at small volume. It makes the producer depend on the consumer’s availability and requires another replay mechanism. A durable work topic gives FinPay a clear handoff: accept the source event first, investigate later.
+
+At-most-once processing avoids duplicate work but can lose an incident when a process crashes after acting and before acknowledging. At-least-once processing preserves replay and recovery, so FinPay accepts duplicate delivery and pays for atomic claims and idempotent side effects.
+
+We therefore choose an asynchronous signal path with bounded workers. Rules run before the model. The model is used only when combining evidence is worth its cost. This adds queue lag and operational machinery, but it prevents a provider outage from becoming an alert-ingestion outage.
+
+The authority boundary is separate:
 
 ```text
 AI signal ──▶ deterministic policy ──▶ triage state / approval task ──▶ controlled action
 ```
 
-The AI produces a typed signal: severity suggestion, hypothesis, confidence, evidence references, and a recommendation kind. Policy checks schema, evidence freshness, confidence thresholds, approved runbooks, and whether the proposal touches money or KYC. The result may be read-only guidance, a task awaiting a human approval, or an explicit abstention.
+The model returns a typed severity suggestion, hypothesis, confidence, evidence references, and recommendation kind. Policy validates the schema, evidence freshness, confidence threshold, allow-listed runbook, and whether money or KYC is affected. The result can be read-only guidance, an approval task, or explicit abstention. An approval task is not an action; an authorized operator or deterministic service must perform the next state transition.
 
-This is the same `AI signal → policy → business decision` contract used by FinPay’s other AI surfaces. The authority path is separate because an approval task is not an action. A controlled operator or deterministic service must authorize the next state transition, and the ledger or KYC system must apply it according to its own invariants. If AI is unavailable, rules can classify known incidents; for an ambiguous high-risk case, the correct degraded mode is “awaiting review,” not an automatic block or automatic release.
+## Evidence is assembled, not invented
 
-## Evidence assembly without causal overclaiming
+Prometheus describes threshold violations. OpenTelemetry traces provide timing and request context, but may be sampled, late, or incomplete. Kafka is the durable source for alert and audit events, not an operator query API. OpenSearch is a searchable trace and incident read model, not the payment ledger.
 
-Prometheus alerts describe threshold violations. OpenTelemetry traces provide request context and timing, but can be sampled, late, or incomplete. Kafka is the durable source for alert and audit events; it is not an operator query API. OpenSearch is a searchable trace and incident read model; it is not the payment ledger.
-
-The service builds a bounded `IncidentContext` from an alert, service and deployment metadata, and trace spans correlated by identifiers and a time window. This resembles a small RAG flow: retrieve relevant evidence, record what was missing, then ask the model to reason over that bounded set. Retrieved runbook text is reference material, never an instruction with authority.
+The triage service builds a bounded `IncidentContext` from the alert, service and deployment metadata, and correlated spans within a time window. It records what was absent and when the evidence was observed. That is a small retrieval-and-reasoning flow, not permission to treat retrieved text as instructions.
 
 ```java
 public record IncidentContext(
@@ -88,19 +96,17 @@ public record Recommendation(ActionKind kind, String reason,
         String runbookId, boolean touchesMoney, boolean changesKycState) {}
 ```
 
-The AI core library already established in the series owns redaction, strict schema validation, provider metadata, prompt versions, and evaluation hooks. This service supplies incident facts and policy; it does not invent a second safety wrapper.
+The AI core established earlier in the series owns redaction, strict schema validation, provider metadata, prompt versions, and evaluation hooks. This service supplies incident facts and policy; it does not create a second authority mechanism.
 
-## Rules first, AI when ambiguity is worth the cost
+## Rules first, AI for ambiguity
 
-Rules are the right tool for a known condition such as a dead-letter queue above a threshold or a missing approval event. Statistical detection can identify an unusual latency or lag change, but an anomaly score is not a cause. A classifier can work for repeated, labelled incident categories. An LLM is useful for unstructured alert text, bounded runbook retrieval, and a readable hypothesis across services. It is also nondeterministic, rate-limited, costly, and vulnerable to malicious text in logs.
+A rule can classify a known condition such as a dead-letter queue over an approved threshold or a missing approval event. An anomaly score can flag unusual lag, but it cannot establish the cause. A classifier may fit repeated incident categories with labels. An LLM is useful for unstructured alert text, bounded runbook retrieval, and a readable hypothesis spanning services. It is also nondeterministic, rate-limited, costly, and exposed to malicious log text.
 
-FinPay therefore chooses rules-first, AI-assisted escalation. The rule path keeps known incidents moving during a provider outage. The model sees only cases where combining evidence has real value. This costs engineering effort in thresholds and incident taxonomy, but it reduces provider dependency, review noise, and retry amplification.
+Rules-first therefore becomes the degraded mode as well as the fast path. When the provider is unavailable, known incidents still produce useful triage. Ambiguous high-risk cases become `AWAITING_REVIEW`, not automatic block or release. Policy rejects or downgrades outputs with stale evidence, missing fields, low approved confidence, a non-allow-listed runbook, or an unapproved money/KYC proposal. “Insufficient evidence” is a valid result.
 
-Policy rejects or downgrades a result when evidence is stale, confidence is below the approved threshold, required fields are absent, the runbook is not allow-listed, or the proposal touches money or KYC without approval. The model can say “insufficient evidence”; that is a valid outcome.
+## Async fixes coupling and introduces duplicates
 
-## Async processing creates a new problem
-
-Moving provider calls off the Kafka listener fixes latency coupling, but creates duplicate delivery and abandoned work. The listener validates the event and atomically claims it; bounded workers enrich evidence and call the provider. The offset is committed only after durable outcome and audit intent. A retry topic, backoff with jitter, a circuit breaker, and a retry budget make pressure visible instead of infinite.
+The asynchronous decision creates a new problem: a crash or rebalance can redeliver the same alert, while a claimed task can be abandoned. The listener validates the event and atomically claims it. Bounded workers enrich evidence and call the provider. The offset is committed only after the outcome and audit intent are durable.
 
 ```java
 public interface IdempotencyPort {
@@ -119,11 +125,11 @@ public boolean tryClaim(String eventId) {
 }
 ```
 
-The same atomic uniqueness can be implemented with a database unique constraint and inbox table. Redis `SETNX` can be suitable for a short-lived claim, but an expiry is not a complete recovery protocol. A claim lease needs an owner, timeout, and safe retry state. Storage idempotency also does not make side effects idempotent: approval creation, paging, and any controlled command need their own idempotency key.
+The same atomic uniqueness can use a database unique constraint and inbox table. Redis `SETNX` may fit a short-lived claim, but expiry alone is not recovery. A lease needs an owner, timeout, and safe retry state. Inbox idempotency also does not make paging, approval creation, or a controlled command idempotent; each side effect needs its own key.
 
-The default design is a Kafka work topic with bounded workers plus the rules-first filter. At-most-once processing would avoid duplicates but can lose an incident when a process crashes. At-least-once keeps replay and recovery, so FinPay accepts duplicate delivery and pays the idempotency cost. Direct HTTP would be simpler at low volume, but it provides a weaker replay boundary and makes producer availability part of the caller’s timeout budget.
+Retry topics, jittered backoff, a circuit breaker, bounded queues, and a retry budget make pressure visible. They do not make an unavailable provider healthy. When a claim is stuck, recovery must be explicit rather than allowing two workers to act concurrently.
 
-## The resulting architecture
+## Architecture after the reasoning
 
 ```text
 Prometheus / OTel ─▶ Kafka source ─▶ validator + atomic inbox claim
@@ -148,31 +154,39 @@ Prometheus / OTel ─▶ Kafka source ─▶ validator + atomic inbox claim
                            authoritative action service
 ```
 
-Each box exists for a failure or authority boundary. Kafka provides retained input and replay. OpenSearch makes evidence queryable without pretending to be the ledger. Bounded workers contain provider latency. The AI adapter isolates provider-specific timeouts and credentials. Policy prevents a model response from becoming a command. The approval task records a human-controlled transition rather than executing one.
+Each box answers a concrete failure. Kafka retains the source and supports replay. The inbox prevents duplicate claims. Bounded workers contain provider latency. OpenSearch makes evidence queryable without becoming the ledger. The adapter isolates provider timeout, retry, credentials, and circuit state. Policy prevents a model response from becoming a command. The approval task records a human-controlled transition rather than executing one.
 
-## Capacity and operational reality
+## Operational reality
 
-If the target triage rate is `R`, p95 provider latency is `L`, and desired utilization is `U`, a first estimate is:
+If target triage rate is `R`, p95 provider latency is `L`, and desired utilization is `U`, a first capacity estimate is:
 
 ```text
 worker slots >= ceil(R × L / U)
 ```
 
-For illustrative `R=200 events/s`, `L=2s`, and `U=0.7`, this is `ceil(572)` concurrent slots before retries, enrichment, and provider quotas. The result may justify more workers, but it may instead justify more rules, a faster model, or lower admission. Bounded connection pools and queues are part of the design. Track oldest event age, queue utilization, Kafka lag, provider latency and errors, OpenSearch latency, retry volume, and dead-letter rate. Per-tenant quotas prevent one BYOK tenant from consuming shared capacity.
+For the **illustrative assumption** `R=200 events/s`, `L=2s`, and `U=0.7`, the estimate is `ceil(572)` slots before retries, enrichment, and provider quotas. That result might justify capacity, but it might instead justify more rules, a faster model, or lower admission. Bounded connection pools and queues are part of the design.
 
-At 03:00, an on-call engineer needs one traceable chain: request or payment reference, alert event, evidence freshness, AI inference ID, model and prompt versions, policy version, fallback reason, approval actor, and timestamps. Put these in structured logs, traces, and audit records, not high-cardinality Prometheus labels. Use bounded labels such as service, provider, model version, outcome, and environment. Never use `payment_id`, `account_id`, `event_id`, or `trace_id` as metric labels.
+Track oldest event age, queue utilization, Kafka lag, provider latency and errors, OpenSearch latency, retry volume, claim age, and dead-letter rate. Define an alert SLO using actual requirements; do not treat the example numbers as FinPay commitments. Use bounded metric labels such as service, provider, model version, outcome, and environment. Do not use `payment_id`, `account_id`, `event_id`, or `trace_id` as Prometheus labels.
 
-Security follows the same boundary. Redact before prompt construction. Send neither card data, credentials, KYC documents, nor raw customer payloads unless an explicit data-processing decision permits it. Use structured allow-lists rather than relying on regex alone; protect provider credentials with secret management; enforce tenant authorization; audit prompt access; and apply retention limits. Treat logs and retrieved runbooks as untrusted input because prompt injection can instruct the model to ignore policy.
+At 03:00, one traceable chain matters: request or payment reference, alert event, evidence freshness, AI inference ID, model and prompt versions, policy version, fallback reason, approval actor, and timestamps. Keep these in structured logs, traces, and audit records.
 
-When the provider fails, the circuit opens and known incidents use rules. Ambiguous incidents remain visible with `source=rules` or `status=AWAITING_REVIEW`; they do not silently disappear. When OpenSearch fails, Kafka retains the source and enrichment freshness is exposed. When an approval service fails, the triage result remains pending. When a poison message cannot pass schema validation, a dead-letter topic records the bounded reason and supports later replay.
+Redact before prompt construction. Do not send card data, credentials, KYC documents, or raw customer payloads without an explicit data-processing decision. Enforce tenant authorization, protect provider credentials with secret management, audit prompt access, and apply retention limits. Treat logs and retrieved runbooks as untrusted input because prompt injection can tell a model to ignore policy.
 
-## Evaluation, rollback, and learning
+If the provider fails, the circuit opens and rules handle known incidents. If OpenSearch fails, Kafka retains the source and the missing freshness is visible. If approval fails, the result stays pending. If schema validation rejects a poison message, a dead-letter topic records the bounded reason for later replay. None of these paths mutate the ledger.
 
-Lower temperature and JSON Schema can reduce output variation; neither establishes correctness. Evaluate historical and synthetic incidents for false positives, false negatives, calibration, abstention, unsupported claims, and prompt-injection resistance. Version the model, prompt, retrieval corpus, policy, and AI core independently. A replay with a new model must create a new evaluation run and must not overwrite the original audit decision.
+## Evaluation and learning
 
-The first release should be read-only and rules-first. Add model assistance after measuring the incident taxonomy and operator review burden. If approval state outgrows a search index, move claims and approvals to a transactional database without changing the signal contract. The architecture is allowed to evolve; the authority boundary is not.
+Lower temperature and JSON Schema can reduce output variation; neither proves correctness. Evaluate historical and synthetic incidents for false positives, false negatives, calibration, abstention, unsupported claims, and prompt-injection resistance. Version the model, prompt, retrieval corpus, policy, and AI core independently. A replay with a new model creates a new evaluation run and never overwrites the original audit decision.
 
-The lesson is not “use an LLM for operations.” It is to place an unreliable inference system where it can add evidence without gaining authority. **AI proposes. Policy constrains. An authorized deterministic path acts.** That is how an evolving FinPay system can use AI at 03:00 without letting a plausible sentence become a financial or operational side effect.
+The first release should be read-only and rules-first. Add model assistance after measuring the incident taxonomy and operator review burden. If approval state outgrows a search index, move claims and approvals to a transactional database without changing the signal contract.
+
+The lesson is not “use an LLM for operations.” Place unreliable inference where it can add evidence without gaining authority:
+
+```text
+AI proposes → policy constrains → authorized deterministic path acts
+```
+
+That boundary lets FinPay investigate a 03:00 incident without turning a plausible sentence into an operational or financial side effect.
 
 ## References
 

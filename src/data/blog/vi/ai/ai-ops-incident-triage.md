@@ -7,70 +7,78 @@ draft: false
 featured: false
 ---
 
-## Sự cố chưa phải là chẩn đoán
+## Câu hỏi lúc 03:00
 
-Hãy giả sử một lô settlement bị trễ lúc 03:00. Prometheus báo độ trễ API tăng, KYC bắt đầu timeout, consumer lag của Kafka tăng và nhiều dead-letter queue bắt đầu đầy. Kỹ sư on-call có bốn dashboard nhưng chưa có câu chuyện nhân quả đáng tin cậy. Một số cảnh báo có thể là triệu chứng của cùng một dependency lỗi; số khác có thể không liên quan.
+Lúc 03:00, một lô settlement của FinPay bị trễ. Prometheus cho thấy API latency tăng. Request KYC bắt đầu timeout. Kafka consumer lag tăng, còn nhiều dead-letter queue bắt đầu đầy.
 
-Yêu cầu đầu tiên thường là: “Nên restart thành phần nào?” Đó là điểm bắt đầu sai đối với hệ thống tài chính. Một thao tác vận hành sai có thể làm settlement trễ hơn, bỏ qua kiểm soát KYC hoặc lặp lại side effect phía payment. FinPay cần tạo giả thuyết hữu ích nhanh, nhưng vẫn phải giữ invariant xuyên suốt series: ledger là nguồn sự thật, settlement mang tính tất định, và kết quả AI không bao giờ là quyền thay đổi trạng thái tài chính.
+Kỹ sư on-call có bốn dashboard và một câu hỏi khẩn cấp: “Nên restart thành phần nào?” Câu hỏi này nguy hiểm. Restart có thể che khuất triệu chứng, tạo thêm công việc trùng lặp hoặc làm settlement trễ hơn. Thay đổi KYC state, payment state, balance hay ledger còn nguy hiểm hơn.
 
-Đây là bài viết khép lại mạch reliability đó. Nó dùng lại các AI core port, trường audit, cách tách idempotency và ranh giới `Kafka = replay / database = record / OpenSearch = read model` đã có trong các bài trước. Vấn đề mới là tập hợp bằng chứng từ alert và trace mà không nhầm tương quan với nguyên nhân. Insight trung tâm là: **tương quan chỉ tập hợp bằng chứng; nó không chứng minh sự thật nhân quả. Recommendation là proposal có kiểu, không phải lệnh thực thi.**
+Kết quả hữu ích đầu tiên không phải là chẩn đoán. Đó là một giả thuyết có giới hạn, có bằng chứng và có mức độ không chắc chắn rõ ràng. Các invariant của FinPay phải đứng trước: ledger là nguồn sự thật tài chính, settlement chạy theo state machine tất định, và AI không bao giờ authorize một action không thể đảo ngược.
 
-## Vì sao thiết kế hiển nhiên thất bại
+Bài viết này tập trung vào một insight: **correlation chỉ tập hợp bằng chứng; nó không chứng minh causality. Recommendation từ AI là proposal có kiểu, không phải lệnh thực thi.**
 
-Thiết kế đầu tiên khá hấp dẫn:
+## Bắt đầu từ thiết kế hiển nhiên
+
+Thiết kế đầu tiên rất dễ vẽ:
 
 ```text
 Prometheus alert ──▶ Kafka ──▶ consumer ──▶ LLM ──▶ execute runbook action
 ```
 
-Consumer gửi nội dung alert, vài trường trace và câu hỏi “Chúng ta nên làm gì?” cho model. Nó lưu câu trả lời rồi acknowledge Kafka. Cách này có thể ổn trong test nhỏ, nhưng ghép bốn miền lỗi khác nhau vào cùng một path: nhận alert, tìm bằng chứng, inference từ provider và thẩm quyền vận hành.
+Consumer gửi alert text và vài trường trace cho LLM, lưu câu trả lời, acknowledge Kafka rồi thực thi runbook được đề xuất. Nó đơn giản vì ingestion, investigation, inference và authority nằm trong cùng một request.
 
-Các con số dưới đây là giả định để suy luận capacity, không phải số đo của FinPay. Nếu 10.000 alert event mỗi giây đều giữ một LLM call trong hai giây, stage đó tạo ra:
+Sự đơn giản đó không chịu được traffic và failure. Các con số sau là **giả định minh họa**, không phải số đo của FinPay. Với 10.000 alert event mỗi giây và model latency hai giây:
 
 ```text
-concurrency = throughput × latency = 10,000 × 2 = 20,000 in-flight calls
+in-flight calls = throughput × latency = 10,000 × 2 = 20,000
 ```
 
-Ở mười giây, con số là 100.000. Điều đó không có nghĩa phải tạo từng ấy thread. Nó cho thấy quota provider, connection pool, memory và đường consumer Kafka không thể tăng theo độ trễ provider. Listener đồng bộ còn biến outage của provider thành outage nhìn như của partition.
+Ở mười giây, cùng path có 100.000 call đang xử lý. Đây không phải đề xuất tạo 100.000 thread. Nó cho thấy provider quota, connection pool, memory và Kafka listener không thể tăng theo provider latency.
 
-Lúc 14:03, giả sử độ trễ provider tăng từ 300 ms lên 4 giây. Worker của listener bị giữ lại, poll chậm đi và consumer lag tăng. Chính sách retry ba lần gửi khoảng gấp ba traffic thất bại trong lúc provider đã không khỏe. Client timeout không chứng minh provider không xử lý request; request có thể hoàn tất sau khi client bỏ cuộc. Retry vì vậy có thể tạo nhiều model call trùng và recommendation mâu thuẫn. Queue không giới hạn chỉ chuyển lỗi từ Kafka lag sang cạn heap.
+Giả sử provider latency tăng từ 300 ms lên bốn giây. Worker của listener bị giữ lại, poll chậm đi và Kafka lag trông như lỗi chính. Retry ba lần có thể đẩy khoảng gấp ba traffic thất bại vào provider vốn đã không khỏe. Client timeout cũng không chứng minh provider chưa xử lý request: request có thể hoàn tất sau khi client bỏ cuộc. Retry vì vậy có thể tạo hypothesis trùng lặp và mâu thuẫn.
 
-Còn có vấn đề về dữ liệu. Trace có thể đến sau alert, bị sampling hoặc không được index trong khi Kafka vẫn khỏe. “Không tìm thấy span” không có nghĩa “không có lỗi”. Kafka redelivery và consumer rebalance là những tình huống at-least-once bình thường. `exists()` rồi `insert()` không phải lock: hai consumer có thể cùng thấy chưa có bản ghi và tạo hai review task.
+Queue nội bộ không giới hạn chỉ chuyển failure từ Kafka lag sang cạn heap. `exists()` rồi `insert()` cũng không phải atomic claim; hai consumer có thể cùng tạo hai review task. Trace có thể đến sau alert, bị sampling hoặc không được index. “Không tìm thấy span” là bằng chứng về evidence bị thiếu, không phải bằng chứng rằng không có failure.
 
-Mũi tên cuối cùng nguy hiểm nhất. LLM không được restart settlement consumer, đổi trạng thái KYC, authorize payment, cập nhật account balance, sửa ledger hoặc settlement funds. Log và runbook là input không đáng tin cậy và có thể chứa prompt injection. Một lời giải thích nghe hợp lý vẫn chỉ là giả thuyết.
+Mũi tên cuối cùng không thể chấp nhận. LLM không được restart settlement consumer, đổi KYC state, authorize payment, cập nhật balance, mutate ledger hay settle funds. Log và runbook là input không đáng tin và có thể chứa prompt injection. Một đoạn văn nghe hợp lý vẫn chỉ là giả thuyết.
 
-## Xác định constraint trước component
+## Constraint trước component
 
-Trong thiết kế tham chiếu này, ta giả định:
+Với thiết kế tham chiếu này, ta dùng các **giả định và yêu cầu** sau:
 
-- Nhận alert vẫn tiếp tục khi AI provider chậm hoặc không khả dụng.
-- Triage có thể trễ, nhưng alert nguồn phải được giữ lại và replay được.
-- Trace thiếu hoặc cũ phải hiện thành uncertainty, không âm thầm trở thành bằng chứng.
-- Failure pattern đã biết phải có path tất định và ít tốn kém.
-- Recommendation ảnh hưởng đến production control phải đi qua approval workflow rõ ràng.
-- Payment, ledger, settlement và KYC state vẫn authoritative trong các deterministic store tương ứng.
-- Mọi decision phải giải thích được từ evidence, policy và metadata phiên bản.
-- Rate và latency trong ví dụ chỉ để minh họa; giới hạn thật đến từ load test, hợp đồng provider và alert SLO.
+- Alert ingestion tiếp tục khi AI provider chậm hoặc không khả dụng.
+- Triage có thể trễ, nhưng alert nguồn vẫn durable và replay được.
+- Trace thiếu hoặc cũ phải được ghi nhận là uncertainty.
+- Pattern đã biết có path tất định, ít tốn kém.
+- Recommendation ảnh hưởng đến production control phải có approval rõ ràng.
+- Payment, KYC, settlement và ledger state vẫn authoritative trong deterministic store tương ứng.
+- Mọi result phải giải thích được từ evidence, policy và version metadata.
+- Rate và latency trong ví dụ chỉ để minh họa; giới hạn thật cần load test, hợp đồng provider và alert SLO được thống nhất.
 
-Các constraint này loại bỏ giả định “model quyết định” trước cả khi chọn database hay queue.
+Các constraint này đã loại bỏ giả định “model quyết định”. Sau đó ta mới so sánh boundary, thay vì chọn infrastructure theo thói quen.
 
-## Ranh giới làm hệ thống an toàn
+## Chọn boundary
 
-Thiết kế tách **signal path** và **authority path**:
+Synchronous processing có ưu điểm là caller nhận câu trả lời ngay. Nhưng nó đặt provider latency và availability vào timeout của alert ingestion. Nó phù hợp với operator query volume thấp, nơi mất query là chấp nhận được. Nó không phải default tốt cho việc xử lý alert durable.
+
+Direct HTTP với database inbox đơn giản hơn broker ở volume thấp. Đổi lại, producer phụ thuộc availability của consumer và phải tự có cơ chế replay khác. Durable work topic tạo handoff rõ ràng: nhận source event trước, điều tra sau.
+
+At-most-once tránh duplicate work nhưng có thể làm mất incident khi process crash sau action và trước acknowledge. At-least-once giữ replay và recovery, nên FinPay chấp nhận duplicate delivery và trả chi phí bằng atomic claim cùng idempotent side effect.
+
+Vì vậy, ta chọn signal path bất đồng bộ với bounded worker. Rules chạy trước model. Model chỉ được dùng khi việc ghép evidence đáng với chi phí. Thiết kế này thêm queue lag và cơ chế vận hành, nhưng ngăn provider outage biến thành alert-ingestion outage.
+
+Authority boundary được tách riêng:
 
 ```text
 AI signal ──▶ deterministic policy ──▶ triage state / approval task ──▶ controlled action
 ```
 
-AI tạo signal có kiểu: severity suggestion, hypothesis, confidence, reference đến evidence và recommendation kind. Policy kiểm tra schema, độ mới của evidence, ngưỡng confidence, runbook được phép và việc proposal có chạm đến money hoặc KYC hay không. Kết quả có thể là guidance chỉ đọc, task chờ người duyệt hoặc trạng thái abstention rõ ràng.
+Model trả về severity suggestion, hypothesis, confidence, evidence reference và recommendation kind có kiểu rõ ràng. Policy validate schema, evidence freshness, confidence threshold, runbook trong allow-list, và proposal có ảnh hưởng money hoặc KYC không. Result có thể là guidance chỉ đọc, approval task hoặc abstention rõ ràng. Approval task không phải action; operator được authorize hoặc deterministic service phải thực hiện state transition tiếp theo.
 
-Đây là contract `AI signal → policy → business decision` được dùng ở các AI surface khác của FinPay. Authority path tách riêng vì approval task không phải action. Operator được kiểm soát hoặc deterministic service phải authorize state transition tiếp theo; ledger hoặc KYC system phải áp dụng nó theo invariant riêng. Khi AI unavailable, rules có thể phân loại incident đã biết; với case mơ hồ và rủi ro cao, degraded mode đúng là “awaiting review”, không tự động block hay tự động release.
+## Tập hợp evidence, không tự bịa nguyên nhân
 
-## Tập hợp bằng chứng nhưng không khẳng định quá mức
+Prometheus mô tả threshold violation. OpenTelemetry trace cung cấp timing và request context nhưng có thể bị sampling, đến trễ hoặc thiếu. Kafka là durable source cho alert và audit event, không phải operator query API. OpenSearch là trace và incident read model có thể tìm kiếm, không phải payment ledger.
 
-Prometheus alert mô tả threshold violation. OpenTelemetry trace cung cấp request context và timing nhưng có thể bị sampling, đến trễ hoặc thiếu. Kafka là durable source cho alert và audit event; nó không phải query API cho operator. OpenSearch là trace và incident read model có thể tìm kiếm; nó không phải payment ledger.
-
-Service xây `IncidentContext` có giới hạn từ alert, metadata service/deployment và span được correlate bằng identifier cùng time window. Đây giống một RAG flow nhỏ: lấy evidence liên quan, ghi nhận evidence nào thiếu, rồi yêu cầu model suy luận trên tập dữ liệu giới hạn. Runbook text được retrieve chỉ là tài liệu tham khảo, không bao giờ là instruction có authority.
+Triage service dựng `IncidentContext` có giới hạn từ alert, service/deployment metadata và span được correlate trong một time window. Service ghi lại evidence nào thiếu và evidence được quan sát lúc nào. Đây là một flow retrieval-and-reasoning nhỏ, không phải quyền coi text được retrieve là instruction.
 
 ```java
 public record IncidentContext(
@@ -88,19 +96,17 @@ public record Recommendation(ActionKind kind, String reason,
         String runbookId, boolean touchesMoney, boolean changesKycState) {}
 ```
 
-AI core library đã được thiết lập trong series sở hữu redaction, strict schema validation, provider metadata, prompt version và evaluation hook. Service này cung cấp incident fact và policy; nó không tạo thêm một safety wrapper khác.
+AI core đã được thiết lập trong các bài trước sở hữu redaction, strict schema validation, provider metadata, prompt version và evaluation hook. Service này cung cấp incident fact và policy; nó không tạo thêm một cơ chế authority thứ hai.
 
-## Rules trước, dùng AI khi ambiguity đáng với chi phí
+## Rules trước, AI cho ambiguity
 
-Rules phù hợp với điều kiện đã biết như dead-letter queue vượt ngưỡng hoặc thiếu approval event. Statistical detection có thể phát hiện latency hay lag thay đổi bất thường, nhưng anomaly score không phải nguyên nhân. Classifier có thể phù hợp với nhóm incident lặp lại và có label. LLM hữu ích với alert text không có cấu trúc, bounded runbook retrieval và giả thuyết dễ đọc xuyên nhiều service. Nó cũng nondeterministic, bị rate-limit, tốn chi phí và dễ bị text độc hại trong log tác động.
+Rule phù hợp với condition đã biết như dead-letter queue vượt threshold được duyệt hoặc thiếu approval event. Anomaly score có thể đánh dấu lag bất thường nhưng không thể chứng minh nguyên nhân. Classifier có thể phù hợp với nhóm incident lặp lại và có label. LLM hữu ích cho alert text không có cấu trúc, bounded runbook retrieval và hypothesis dễ đọc xuyên nhiều service. Nó cũng nondeterministic, bị rate-limit, tốn chi phí và chịu ảnh hưởng của log độc hại.
 
-Vì vậy FinPay chọn rules-first, AI-assisted escalation. Rule path giữ các incident đã biết tiếp tục chạy khi provider outage. Model chỉ thấy các case mà việc ghép evidence thực sự có giá trị. Đổi lại, đội ngũ phải duy trì threshold và incident taxonomy, nhưng giảm phụ thuộc provider, review noise và retry amplification.
+Rules-first vì thế vừa là fast path vừa là degraded mode. Khi provider unavailable, incident đã biết vẫn có triage hữu ích. Case mơ hồ và rủi ro cao trở thành `AWAITING_REVIEW`, không tự động block hay release. Policy reject hoặc downgrade output khi evidence cũ, thiếu field, confidence thấp hơn threshold được duyệt, runbook không nằm trong allow-list hoặc proposal money/KYC chưa được approve. “Insufficient evidence” là result hợp lệ.
 
-Policy reject hoặc downgrade kết quả khi evidence cũ, confidence dưới ngưỡng được duyệt, thiếu field bắt buộc, runbook không nằm trong allow-list hoặc proposal chạm money/KYC mà chưa có approval. Model có thể trả lời “insufficient evidence”; đó là outcome hợp lệ.
+## Async sửa coupling và tạo duplicate
 
-## Async giải quyết một lỗi và tạo ra lỗi mới
-
-Đưa provider call ra khỏi Kafka listener giải quyết việc ghép latency, nhưng tạo duplicate delivery và abandoned work. Listener validate event rồi atomic claim; bounded worker enrich evidence và gọi provider. Offset chỉ commit sau durable outcome và audit intent. Retry topic, backoff có jitter, circuit breaker và retry budget làm pressure hiện rõ thay vì vô hạn.
+Quyết định async tạo ra vấn đề mới: crash hoặc rebalance có thể redeliver cùng alert, còn task đã claim có thể bị bỏ dở. Listener validate event và atomic claim. Bounded worker enrich evidence rồi gọi provider. Offset chỉ commit sau khi outcome và audit intent đã durable.
 
 ```java
 public interface IdempotencyPort {
@@ -119,11 +125,11 @@ public boolean tryClaim(String eventId) {
 }
 ```
 
-Cùng tính duy nhất atomic có thể làm bằng database unique constraint và inbox table. Redis `SETNX` có thể phù hợp cho claim ngắn hạn, nhưng expiry không phải recovery protocol hoàn chỉnh. Claim lease cần owner, timeout và retry state an toàn. Storage idempotency cũng không làm side effect idempotent: tạo approval, paging và controlled command đều cần idempotency key riêng.
+Cùng atomic uniqueness có thể dùng database unique constraint và inbox table. Redis `SETNX` có thể phù hợp với claim ngắn hạn, nhưng expiry một mình không phải recovery. Lease cần owner, timeout và retry state an toàn. Inbox idempotency cũng không làm paging, tạo approval hay controlled command trở thành idempotent; mỗi side effect cần key riêng.
 
-Thiết kế mặc định là Kafka work topic với bounded worker cộng rule-first filter. At-most-once tránh duplicate nhưng có thể làm mất incident khi process crash. At-least-once giữ replay và recovery, nên FinPay chấp nhận duplicate delivery và trả chi phí bằng idempotency. Direct HTTP đơn giản hơn ở volume thấp, nhưng replay boundary yếu hơn và biến availability của producer thành một phần timeout budget của caller.
+Retry topic, backoff có jitter, circuit breaker, bounded queue và retry budget làm pressure lộ rõ. Chúng không làm provider unavailable trở nên khỏe lại. Khi claim bị kẹt, recovery phải explicit thay vì cho phép hai worker xử lý đồng thời.
 
-## Kiến trúc hình thành sau các quyết định
+## Kiến trúc sau quá trình suy luận
 
 ```text
 Prometheus / OTel ─▶ Kafka source ─▶ validator + atomic inbox claim
@@ -148,31 +154,39 @@ Prometheus / OTel ─▶ Kafka source ─▶ validator + atomic inbox claim
                            authoritative action service
 ```
 
-Mỗi box tồn tại vì một failure hoặc authority boundary. Kafka cung cấp input được giữ lại và replay. OpenSearch làm evidence dễ query mà không giả làm ledger. Bounded worker cô lập provider latency. AI adapter cô lập timeout và credential theo provider. Policy ngăn model response trở thành command. Approval task ghi lại một state transition do người kiểm soát thay vì thực thi nó.
+Mỗi box trả lời một failure cụ thể. Kafka giữ source và hỗ trợ replay. Inbox ngăn duplicate claim. Bounded worker cô lập provider latency. OpenSearch giúp query evidence mà không trở thành ledger. Adapter cô lập timeout, retry, credential và circuit state theo provider. Policy ngăn model response trở thành command. Approval task ghi lại transition do người kiểm soát thay vì thực thi nó.
 
-## Capacity và thực tế vận hành
+## Thực tế vận hành
 
-Nếu triage rate mục tiêu là `R`, p95 provider latency là `L`, utilization mong muốn là `U`, ước lượng đầu tiên là:
+Nếu triage rate mục tiêu là `R`, p95 provider latency là `L`, utilization mong muốn là `U`, capacity estimate ban đầu là:
 
 ```text
 worker slots >= ceil(R × L / U)
 ```
 
-Với `R=200 events/s`, `L=2s`, `U=0.7` chỉ để minh họa, cần `ceil(572)` concurrent slot trước khi tính retry, enrichment và provider quota. Kết quả có thể biện minh cho nhiều worker hơn, nhưng cũng có thể cho thấy cần thêm rules, model nhanh hơn hoặc admission thấp hơn. Bounded connection pool và queue là một phần thiết kế. Theo dõi oldest event age, queue utilization, Kafka lag, provider latency/error, OpenSearch latency, retry volume và dead-letter rate. Per-tenant quota ngăn một BYOK tenant chiếm capacity dùng chung.
+Với **giả định minh họa** `R=200 events/s`, `L=2s`, `U=0.7`, kết quả là `ceil(572)` slot trước khi tính retry, enrichment và provider quota. Kết quả có thể cần thêm capacity, nhưng cũng có thể cho thấy cần thêm rule, model nhanh hơn hoặc admission thấp hơn. Bounded connection pool và queue là một phần của thiết kế.
 
-Lúc 03:00, on-call cần một chuỗi có thể trace: request hoặc payment reference, alert event, evidence freshness, AI inference ID, model/prompt version, policy version, fallback reason, approval actor và timestamp. Đặt chúng trong structured log, trace và audit record, không đặt làm Prometheus label cardinality cao. Dùng label có miền giới hạn như service, provider, model version, outcome và environment. Không dùng `payment_id`, `account_id`, `event_id` hoặc `trace_id` làm metric label.
+Theo dõi oldest event age, queue utilization, Kafka lag, provider latency/error, OpenSearch latency, retry volume, claim age và dead-letter rate. Định nghĩa alert SLO theo yêu cầu thật; không coi các con số ví dụ là cam kết của FinPay. Dùng metric label có miền giới hạn như service, provider, model version, outcome và environment. Không dùng `payment_id`, `account_id`, `event_id` hay `trace_id` làm Prometheus label.
 
-Security tuân theo cùng ranh giới. Redact trước khi dựng prompt. Không gửi card data, credential, KYC document hay raw customer payload nếu chưa có quyết định xử lý dữ liệu rõ ràng. Dùng structured allow-list thay vì chỉ dựa vào regex; bảo vệ provider credential bằng secret management; enforce tenant authorization; audit quyền truy cập prompt; áp dụng retention limit. Coi log và runbook retrieve là input không đáng tin vì prompt injection có thể yêu cầu model bỏ qua policy.
+Lúc 03:00, một chuỗi có thể trace là điều quan trọng: request hoặc payment reference, alert event, evidence freshness, AI inference ID, model/prompt version, policy version, fallback reason, approval actor và timestamp. Lưu chúng trong structured log, trace và audit record.
 
-Khi provider fail, circuit mở và incident đã biết dùng rules. Incident mơ hồ vẫn hiện với `source=rules` hoặc `status=AWAITING_REVIEW`; không được biến mất. Khi OpenSearch fail, Kafka giữ source và freshness của enrichment được hiển thị. Khi approval service fail, triage result ở trạng thái pending. Khi poison message không qua schema validation, dead-letter topic ghi bounded reason và hỗ trợ replay sau đó.
+Redact trước khi dựng prompt. Không gửi card data, credential, KYC document hoặc raw customer payload nếu chưa có quyết định xử lý dữ liệu rõ ràng. Enforce tenant authorization, bảo vệ provider credential bằng secret management, audit quyền truy cập prompt và áp dụng retention limit. Coi log và runbook được retrieve là input không đáng tin vì prompt injection có thể yêu cầu model bỏ qua policy.
 
-## Evaluation, rollback và bài học
+Nếu provider fail, circuit mở và rule xử lý incident đã biết. Nếu OpenSearch fail, Kafka giữ source và freshness bị thiếu được hiển thị. Nếu approval fail, result giữ trạng thái pending. Nếu schema validation reject poison message, dead-letter topic ghi bounded reason để replay sau. Không path nào trong số này mutate ledger.
 
-Temperature thấp hơn và JSON Schema có thể giảm output variation; không điều nào chứng minh correctness. Đánh giá incident lịch sử và synthetic theo false positive, false negative, calibration, abstention, unsupported claim và khả năng chống prompt injection. Version model, prompt, retrieval corpus, policy và AI core độc lập. Replay bằng model mới phải tạo evaluation run mới, không overwrite audit decision ban đầu.
+## Đánh giá và bài học
 
-Release đầu nên read-only và rules-first. Chỉ thêm model assistance sau khi đo incident taxonomy và review burden của operator. Nếu approval state vượt khả năng của search index, chuyển claim và approval sang transactional database mà không đổi signal contract. Kiến trúc được phép tiến hóa; authority boundary thì không.
+Temperature thấp hơn và JSON Schema có thể giảm output variation; không điều nào chứng minh correctness. Đánh giá incident lịch sử và synthetic theo false positive, false negative, calibration, abstention, unsupported claim và khả năng chống prompt injection. Version model, prompt, retrieval corpus, policy và AI core độc lập. Replay bằng model mới tạo evaluation run mới và không overwrite audit decision ban đầu.
 
-Bài học không phải “dùng LLM cho operations”. Hãy đặt hệ thống inference không đáng tin ở nơi nó có thể bổ sung evidence nhưng không có authority. **AI đề xuất. Policy giới hạn. Một path tất định được cấp quyền mới thực thi.** Nhờ vậy FinPay đang tiến hóa có thể dùng AI lúc 03:00 mà không biến một câu nghe hợp lý thành side effect vận hành hoặc tài chính.
+Release đầu nên read-only và rules-first. Chỉ thêm model assistance sau khi đo incident taxonomy và review burden của operator. Nếu approval state vượt khả năng của search index, chuyển claim và approval sang transactional database mà không đổi signal contract.
+
+Bài học không phải “dùng LLM cho operations”. Hãy đặt inference không đáng tin ở nơi nó có thể bổ sung evidence nhưng không có authority:
+
+```text
+AI đề xuất → policy giới hạn → path tất định được cấp quyền thực thi
+```
+
+Boundary này cho phép FinPay điều tra sự cố lúc 03:00 mà không biến một câu nghe hợp lý thành side effect vận hành hoặc tài chính.
 
 ## Tài liệu tham khảo
 
