@@ -1,13 +1,13 @@
 ---
 title: "About"
-description: "About Java Guru and the author Phạm Thanh Hưng (Harry) — a fullstack engineer who is strongest in the backend."
+description: "About Java Guru and the author Phạm Thanh Hưng (Adrian) — a fullstack engineer who is strongest in the backend."
 ---
 
-**Java Guru** is a technical blog by **Phạm Thanh Hưng (Harry)** — a fullstack software engineer who is strongest in the backend, and who treats "why isn't this automated yet?" as a personality trait.
+**Java Guru** is a technical blog by **Phạm Thanh Hưng (Adrian)** — a fullstack software engineer who is strongest in the backend, and who treats "why isn't this automated yet?" as a personality trait.
 
 ## About the Author
 
-Hi! I'm **Harry (Hưng)** — part engineer, part "why is this not automated yet" machine.
+Hi! I'm **Adrian (Hưng)** — part engineer, part "why is this not automated yet" machine.
 
 I'm **AI-driven**: not in the "I let the robot write my code" way (mostly), but in the "what if this whole workflow just… did itself?" way. I like building things, but I _love_ optimizing them — if a process takes three clicks, I've already imagined the one-click version and resented the extra two. I'm equal parts **creative and logical**: I'll whiteboard a wild idea at 9pm and have a boring, sane architecture for it by 9:05. **Open-minded** enough to try your stack, **pragmatic** enough to ship the simple one first.
 

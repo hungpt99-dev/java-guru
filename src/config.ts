@@ -1,6 +1,6 @@
 export const SITE = {
   website: "https://java-guru.dev/", // replace this with your deployed domain
-  author: "Phạm Thanh Hưng (Harry)",
+  author: "Phạm Thanh Hưng (Adrian)",
   profile: "https://github.com/hungpt99-dev",
   ogImage: "astropaper-og.jpg",
   lightAndDarkMode: true,

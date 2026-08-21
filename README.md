@@ -162,7 +162,7 @@ java-guru/
 
 ## Author
 
-**Phạm Thanh Hưng (Harry)**  
+**Phạm Thanh Hưng (Adrian)**  
 Software Engineer (Full-stack)  
 GitHub: [hungpt99-dev](https://github.com/hungpt99-dev)  
 Email: [thanhhungpham6@gmail.com](mailto:thanhhungpham6@gmail.com)

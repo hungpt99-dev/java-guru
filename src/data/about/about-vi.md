@@ -1,13 +1,13 @@
 ---
 title: "Giới thiệu"
-description: "Giới thiệu về Java Guru và tác giả Phạm Thanh Hưng (Harry) — một fullstack engineer mạnh về backend."
+description: "Giới thiệu về Java Guru và tác giả Phạm Thanh Hưng (Adrian) — một fullstack engineer mạnh về backend."
 ---
 
-**Java Guru** là blog của **Phạm Thanh Hưng (Harry)** — một fullstack software engineer mạnh về backend, và coi "sao cái này chưa tự động hóa vậy" như một nét tính cách.
+**Java Guru** là blog của **Phạm Thanh Hưng (Adrian)** — một fullstack software engineer mạnh về backend, và coi "sao cái này chưa tự động hóa vậy" như một nét tính cách.
 
 ## Về tác giả
 
-Xin chào! Mình là **Harry (Hưng)** — nửa kỹ sư, nửa cái máy "sao cái này chưa tự động hóa vậy".
+Xin chào! Mình là **Adrian (Hưng)** — nửa kỹ sư, nửa cái máy "sao cái này chưa tự động hóa vậy".
 
 Mình **hướng tới AI**: không phải kiểu "để robot viết code giùm" (phần lớn là không), mà là kiểu "giá mà cả quy trình này… tự chạy được thì sao". Mình thích xây dựng, nhưng càng thích tối ưu: quy trình nào mất ba cú click, mình đã hình dung bản một click và thấy phiền cái hai click thừa. Mình vừa **sáng tạo vừa logic**: tối 9h vẽ ý tưởng điên rồ, 9h05 có kiến trúc nhàm chán mà hợp lý. **Cởi mở** đủ để thử stack của bạn, **thực tế** đủ để ship bản đơn giản trước.
 
