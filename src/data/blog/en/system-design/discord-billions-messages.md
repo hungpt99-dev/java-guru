@@ -7,31 +7,93 @@ draft: false
 featured: false
 ---
 
-The title describes a useful engineering question, but the permitted historical source does not report a completed Cassandra-to-ScyllaDB migration. It reports Cassandra in production and Scylla as a long-term option. This article keeps that boundary explicit.
+The title describes an interesting engineering question, but there is an important limitation in the available historical source: it does not report a completed Cassandra-to-ScyllaDB migration. It describes Cassandra running in production and mentions Scylla as a possible long-term option.
+
+This article keeps that distinction explicit. The goal is not to claim that Discord completed a migration that the source does not report, but to use the real Discord engineering experience as a foundation for understanding the storage design and then extend it into a proposed migration scenario.
 
 ## 1. Original Engineering Problem
 
-**[SOURCE FACT]** Discord wanted to retain chat history forever, while message data kept increasing in velocity and size and had to remain available. In the source article, traffic had grown from 40 million messages per day in July, to 100 million in December, and to more than 120 million by January 2017. [Discord, “How Discord Stores Billions of Messages”](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Discord wanted to keep chat history indefinitely while the number of messages continued to grow rapidly. The data also had to remain available and support predictable reads and writes. In the source article, traffic increased from 40 million messages per day in July, to 100 million in December, and to more than 120 million by January 2017. Discord, “How Discord Stores Billions of Messages”
 
-**[SOURCE FACT]** The initial MongoDB replica set used a compound index on `channel_id` and `created_at`. At 100 million stored messages, the data and index no longer fit in RAM and latency became unpredictable. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Discord initially stored messages in a MongoDB replica set with a compound index on channel_id and created_at. Once the system reached around 100 million stored messages, the data and index could no longer fit in RAM. As a result, query latency became unpredictable. Source
 
-**[ANALYSIS]** This is a time-series access problem with an uneven key distribution. The natural query is “messages around a position in one channel,” not an arbitrary relational join. Yet inactive channels cause random disk seeks, busy public channels create hot recent ranges, and deleted history can leave expensive tombstone scans.
+[ANALYSIS] The underlying problem was closely related to the way messages were accessed. Most requests were about a range of messages in a particular channel rather than arbitrary relational queries.
+
+This made the storage model important.
+
+There were several challenges:
+
+- Inactive channels could require random disk reads.
+- Very active public channels could create heavily used recent ranges.
+- Deleted messages could leave behind large numbers of tombstones.
+- As the amount of data increased, keeping partitions reasonably sized became increasingly important.
+
+The key lesson is that at this scale, choosing a database is only part of the problem. The data model and access pattern have to match each other.
 
 ## 2. What the Original System Did
 
-**[SOURCE FACT]** Discord first moved from MongoDB to Cassandra because Cassandra met the stated requirements: linear scale by adding nodes, automatic failover, low maintenance, proven operation, predictable performance, no need for a message cache, a non-blob data model, and open source. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Discord moved from MongoDB to Cassandra because Cassandra matched the requirements they had identified at the time. These included scaling by adding nodes, automatic failover, low operational overhead, predictable performance, no need for a separate message cache, a data model that was not based on large blobs, and open-source availability. Source
 
-**[SOURCE FACT]** The migration used a dark launch: application code double-read and double-wrote MongoDB and Cassandra before Cassandra became primary. Cassandra reads were observed under 5 milliseconds and writes were sub-millisecond during a week of testing. Discord later reported a 12-node cluster with replication factor 3. These are historical observations and configuration values, not current capacity targets. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Discord used a dark launch during the migration. The application temporarily read from and wrote to both MongoDB and Cassandra before Cassandra became the primary store. During one week of testing, Cassandra reads were observed below 5 milliseconds and writes below 1 millisecond. Discord later reported a 12-node cluster with a replication factor of 3. These are historical observations and configuration values, not current capacity recommendations. Source
 
-**[SOURCE FACT]** The first Cassandra key was `(channel_id, message_id)`, where the Snowflake `message_id` provided chronological ordering. Large partitions then appeared, so Discord introduced time buckets and changed the key to `((channel_id, bucket), message_id)`. The source says the bucket was chosen as about 10 days for the largest channels to stay comfortably below 100 MB. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+The first Cassandra key was:
 
-**[SOURCE FACT]** Cassandra upserts and last-write-wins behavior exposed an edit/delete race. Discord detected a corrupt row using the required `author_id` field, deleted corrupt messages, and changed writes to include only non-null values. Deletes produced tombstones; after a production incident involving millions of deleted messages, Discord reduced tombstone lifespan from 10 days to 2 days and tracked empty buckets to avoid rescanning them. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+```text
+(channel_id, message_id)
+```
 
-**[SOURCE FACT]** The article says Scylla was a long-term idea because Cassandra repair became CPU-bound and increased in duration with accumulated writes; it does not say that Discord completed a migration. The second permitted article concerns switching from Redis to relational databases and does not establish a Cassandra-to-Scylla migration. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages) [Source](https://discord.com/blog/why-discord-is-switching-from-redis-to-relational-databases-and-whats-next)
+[SOURCE FACT] The message_id was a Snowflake ID, which provided chronological ordering.
+
+This design worked initially, but large channels eventually produced very large partitions.
+
+Discord therefore introduced time buckets and changed the key to:
+
+```text
+((channel_id, bucket), message_id)
+```
+
+[SOURCE FACT] For the largest channels, the source says Discord used a bucket of roughly 10 days so that partitions would remain comfortably below 100 MB. Source
+
+This is an important design change.
+
+Instead of allowing all messages from a channel to live in one continuously growing partition, the data is divided into smaller time ranges.
+
+For example:
+
+```text
+Channel A
+│
+├── Bucket 1: Jan 1 - Jan 10
+├── Bucket 2: Jan 11 - Jan 20
+├── Bucket 3: Jan 21 - Jan 30
+└── Bucket 4: Jan 31 - Feb 9
+```
+
+The application can then determine which bucket contains the requested messages instead of scanning one potentially huge partition.
+
+### The Edit/Delete Problem
+
+[SOURCE FACT] Cassandra's upsert behavior and last-write-wins semantics introduced an edit/delete race. Discord used the required author_id field to detect corrupted rows, deleted those messages, and changed writes so that only non-null fields were written. Deletes created tombstones. After a production incident involving millions of deleted messages, Discord reduced the tombstone lifetime from 10 days to 2 days and tracked empty buckets to avoid repeatedly scanning them. Source
+
+This illustrates an important point about distributed databases:
+
+> A write succeeding does not automatically mean that the resulting data is semantically correct.
+
+The application still needs to understand how concurrent edits, deletes, retries, and partial data interact.
+
+### Cassandra and ScyllaDB
+
+[SOURCE FACT] The source mentions Scylla as a long-term idea because Cassandra repair had become CPU-intensive and took longer as the amount of accumulated data and writes increased. The source does not say that Discord completed a migration from Cassandra to ScyllaDB. Source
+
+The second permitted Discord article is about moving from Redis to relational databases. It does not provide evidence of a Cassandra-to-ScyllaDB migration. Source
+
+Therefore, the ScyllaDB migration discussed later in this article is a proposed design exercise, not a historical claim about Discord.
 
 ## 3. Architecture Diagram
 
-```mermaid
+The architecture below separates what is supported by the historical source from what is added for the proposed migration design.
+
+```text
 flowchart LR
     C[Client]
     API[Message API\n[Source-backed component]]
@@ -41,7 +103,7 @@ flowchart LR
     REP[Replication and repair\n[Source-backed component]]
     IDX[Empty-bucket tracking\n[Source-backed component]]
     SCY[(ScyllaDB cluster\n[Proposed component])]
-    MIG[Dual-read / dual-write migration controller\n[Proposed component]]
+    MIG[Migration controller\n[Proposed component]]
 
     C --> API
     API -. dark launch .-> MONGO
@@ -54,21 +116,69 @@ flowchart LR
     MIG -. validation .-> CAS
 ```
 
-**[SOURCE FACT]** MongoDB dual reads/writes, Cassandra, time buckets, replication, repair, and empty-bucket tracking are described in the source. **[PROPOSED DESIGN]** The ScyllaDB cluster and migration controller are extensions for an interview design; the diagram must not be read as Discord's reported production architecture.
+[SOURCE FACT] MongoDB dual reads and writes, Cassandra, time buckets, replication, repair, and empty-bucket tracking are described in the source.
+
+[PROPOSED DESIGN] The ScyllaDB cluster and migration controller are additions for the interview-style design in this article. They should not be interpreted as Discord's reported production architecture.
 
 ## 4. System Design Analysis
 
-**[ANALYSIS]** Partitioning by `(channel_id, bucket)` addresses two independent risks. `channel_id` preserves the main access locality, while `bucket` bounds the amount of data and tombstones a read or compaction operation can touch. A single unbounded channel partition is a hotspot in storage, not only a routing hotspot.
+[ANALYSIS] Partitioning by (channel_id, bucket) solves two related problems.
 
-**[ANALYSIS]** The design is intentionally query-shaped. A recent-history request computes candidate buckets and range-scans by `message_id`; it does not ask Cassandra to discover rows through a secondary index. The cost for a quiet channel is extra bucket probes, while the common active-channel case usually finds enough rows in the newest bucket.
+First, channel_id keeps messages from the same channel together, which matches the main access pattern.
 
-**[ANALYSIS]** Cassandra and ScyllaDB are compatible at the data-model level, but compatibility is not proof of operational equivalence. Repair behavior, compaction, drivers, metrics, consistency settings, and workload isolation still require migration tests. “Faster repair” is a hypothesis to validate, not a migration guarantee.
+Second, bucket puts a limit on how much data can accumulate in one partition.
+
+This matters because an unbounded channel partition can become expensive not only because it contains a lot of data, but also because compaction, deletion, and reads may have to deal with an increasingly large amount of data.
+
+### Query-Driven Data Modeling
+
+The design is intentionally shaped around the queries the application needs to run.
+
+A request for recent messages in a channel can:
+
+- Determine the relevant bucket.
+- Read a range of message_id values inside that partition.
+- Move to an older bucket if necessary.
+- Stop once enough valid messages have been collected.
+
+The system does not need a secondary index to discover where the messages are.
+
+For a quiet channel, this can mean checking several buckets before finding enough messages.
+
+For a busy channel, the newest bucket will often contain enough recent messages to satisfy the request.
+
+This is a reasonable trade-off because the common case remains efficient while partition size stays bounded.
+
+### Cassandra vs. ScyllaDB
+
+[ANALYSIS] Cassandra and ScyllaDB share a similar data-model approach, so the same partitioning strategy can be used as a starting point.
+
+However, similar data models do not mean that the two systems behave identically in production.
+
+A real migration would still need to validate:
+
+- Repair behavior.
+- Compaction behavior.
+- Database drivers.
+- Consistency settings.
+- Metrics and monitoring.
+- Failure handling.
+- Workload isolation.
+- Operational procedures.
+
+Therefore, saying that ScyllaDB has faster repair is not enough to justify a migration. The expected improvement needs to be measured under the actual workload.
 
 ## 5. Data Model
 
-**[SOURCE FACT]** The source describes Cassandra as a partition-and-clustering-key store: the partition key locates data, and the clustering key identifies and sorts rows within a partition. The production message key became `((channel_id, bucket), message_id)`. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] The source describes Cassandra as a partition-and-clustering-key data store. The partition key determines where the data belongs, while the clustering key identifies and orders rows within a partition. The production message key became:
 
-**[PROPOSED DESIGN]** A minimal table for the same access pattern could be:
+```text
+((channel_id, bucket), message_id)
+```
+
+Source
+
+[PROPOSED DESIGN] A minimal table for the same access pattern could look like this:
 
 ```sql
 CREATE TABLE messages_by_channel_bucket (
@@ -83,11 +193,36 @@ CREATE TABLE messages_by_channel_bucket (
 ) WITH CLUSTERING ORDER BY (message_id DESC);
 ```
 
-**[PROPOSED DESIGN]** `bucket` must be deterministic from message time or ID, and the service should maintain a small channel metadata record containing known empty buckets. If edits and deletes can race, writes should be whole-message or field-aware, and reads should reject rows missing required fields rather than silently returning partial data.
+The important part is the primary key:
+
+```text
+((channel_id, bucket), message_id)
+```
+
+Here:
+
+- channel_id identifies the channel.
+- bucket limits the size of each partition.
+- message_id provides ordering inside the partition.
+
+[PROPOSED DESIGN] The bucket must be calculated deterministically from the message time or ID.
+
+The service should also maintain a small amount of metadata about known empty buckets. This prevents the read path from repeatedly querying buckets that are known to contain no messages.
+
+Because edits and deletes can happen concurrently, the write model also needs to account for ordering.
+
+Possible approaches include:
+
+- Storing complete message versions.
+- Using field-aware updates carefully.
+- Attaching a version number or event timestamp.
+- Validating required fields when reading.
+
+The exact choice depends on the consistency and update semantics required by the application.
 
 ## 6. API Design
 
-**[PROPOSED DESIGN]** Keep APIs aligned to partition-local operations:
+[PROPOSED DESIGN] The API should stay close to the operations that the database can handle efficiently:
 
 ```text
 POST   /channels/{channel_id}/messages
@@ -97,73 +232,492 @@ PATCH  /channels/{channel_id}/messages/{message_id}
 DELETE /channels/{channel_id}/messages/{message_id}
 ```
 
-**[ANALYSIS]** `before` and `after` are opaque cursors built from Snowflake-like ordering, not offsets. The read service derives bucket candidates, skips recorded empty buckets, queries in order, and stops after `limit` valid rows. A request for mentions, pins, or full-text search needs a separate read model; forcing it into the message table recreates the random-read problem.
+The read APIs use before and after rather than numeric offsets.
 
-**[PROPOSED DESIGN]** During migration, reads can be sampled from both stores and compared by message ID plus required-field validity. Writes need an idempotency key and a deterministic retry policy so a timeout does not create divergent versions.
+For example:
+
+```text
+GET /channels/123/messages?before=847362918273&limit=50
+```
+
+This means:
+
+> Return up to 50 messages older than the specified message ID.
+
+### Why Not Offset Pagination?
+
+Offset pagination is not a good fit for a very large, continuously changing message table.
+
+For example:
+
+```text
+?page=10000
+```
+
+requires the database to conceptually skip a large number of rows before returning the requested page.
+
+A cursor based on the message ID is more natural for this access pattern.
+
+[ANALYSIS] The read service can calculate the relevant bucket candidates from the cursor, skip known empty buckets, query each partition in order, and stop when it has collected the requested number of valid rows.
+
+The application should also put a limit on the number of buckets it is willing to check for one request. Otherwise, a pathological request could turn into an unbounded scan.
+
+### Other Queries Need Other Models
+
+Messages by channel are only one access pattern.
+
+A request such as:
+
+- Find all messages mentioning a user.
+- Search message content.
+- Find pinned messages.
+- Build analytics.
+- Find messages across many channels.
+
+does not naturally fit the primary message table.
+
+Trying to support every query with the same table would recreate the random-read problem that the original design was trying to avoid.
+
+A better approach is to create separate read models for those use cases.
+
+### Migration API Behavior
+
+[PROPOSED DESIGN] During migration, the application can read from both stores for a controlled sample of traffic and compare the results.
+
+Writes should also carry an operation ID or idempotency key so that a retry cannot create different versions of the same message in the two databases.
 
 ## 7. Scaling Strategy
 
-**[SOURCE FACT]** Discord's strategy was to add nodes instead of manually re-sharding, with replication and repair providing resilience. The source reports a 12-node Cassandra cluster with replication factor 3 at that point in time. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Discord's strategy was to add nodes rather than manually re-shard the system. Replication and repair were used to provide resilience. The source reports a 12-node Cassandra cluster with a replication factor of 3 at that point in time. Source
 
-**[ANALYSIS]** Adding nodes solves aggregate capacity but not every hotspot. One extremely active channel still maps to a bounded sequence of buckets, and its newest bucket can be disproportionately hot. Monitor per-partition and per-node latency, compaction debt, tombstone scans, and bucket-size distribution, not only cluster averages.
+Adding nodes increases the total capacity of the cluster, but it does not automatically solve every hotspot.
 
-**[PROPOSED DESIGN]** For a Scylla migration, use a staged path: shadow reads, dual writes, consistency comparison, bounded cohort rollout, then rollback by routing reads back to Cassandra. Keep schema and bucket derivation identical first; changing storage engine and partition semantics at the same time makes discrepancies hard to diagnose. Treat repair, compaction, backfill, and failover as separate load tests.
+Consider a very active channel:
+
+```text
+Channel A
+│
+├── Bucket 1
+├── Bucket 2
+├── Bucket 3
+└── Current Bucket  ← very high traffic
+```
+
+The overall cluster may have plenty of capacity while the current partition for one popular channel is receiving a disproportionate amount of traffic.
+
+Therefore, monitoring only cluster-wide averages is not enough.
+
+[ANALYSIS] Useful metrics include:
+
+- Latency by partition or channel.
+- Per-node latency.
+- Partition-size distribution.
+- Tombstone scans.
+- Compaction backlog.
+- Repair duration.
+- Read and write throughput.
+- Hot-channel distribution.
+
+### Proposed ScyllaDB Migration
+
+[PROPOSED DESIGN] A migration should be performed gradually rather than switching the entire system at once.
+
+A possible sequence is:
+
+```text
+1. Shadow reads
+       ↓
+2. Dual writes
+       ↓
+3. Compare data
+       ↓
+4. Small production cohort
+       ↓
+5. Expand rollout
+       ↓
+6. Full cutover
+```
+
+Keep the schema and bucket calculation the same during the first stage.
+
+This is important because changing both the database engine and the partitioning strategy at the same time makes it much harder to determine the source of any data mismatch or performance regression.
+
+Repair, compaction, backfill, and failover should also be tested independently rather than assuming that a successful migration test covers all of them.
 
 ## 8. Failure Scenarios
 
-**[SOURCE FACT]** A deleted channel history left millions of tombstones. Loading the channel caused Cassandra to scan them and triggered repeated 10-second stop-the-world garbage collection. Discord reduced tombstone lifespan and avoided known empty buckets. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Discord experienced a production problem involving millions of tombstones created by deleted channel history. Loading the affected channel caused Cassandra to scan the tombstones and resulted in repeated 10-second stop-the-world garbage-collection pauses. Discord reduced the tombstone lifetime and added empty-bucket tracking to avoid repeatedly scanning known-empty ranges. Source
 
-**[ANALYSIS]** A second failure class is semantic rather than mechanical: an edit concurrent with deletion can leave a partial row under column-level last-write-wins upserts. “Successful write” therefore does not imply “valid message.” Required-field validation and delete/edit ordering are part of correctness.
+This shows why deletion needs to be treated as part of the storage design rather than as a simple opposite operation to insertion.
 
-**[PROPOSED DESIGN]** A migration must also handle asymmetric success: Cassandra accepts a write while Scylla times out, or the reverse. Record the operation ID, retry idempotently, compare asynchronously, and expose a repair queue. Do not cut over until divergence is measurable and bounded. If both stores disagree, prefer the version selected by an explicit event timestamp or version policy, not wall-clock arrival at the API.
+### Edit/Delete Race
+
+[ANALYSIS] Another failure mode is semantic rather than purely mechanical.
+
+Suppose an edit and a delete happen at nearly the same time:
+
+```text
+Edit message
+     │
+     ├─────────────┐
+     │             │
+     ▼             ▼
+Write content    Delete fields
+     │             │
+     └──────┬──────┘
+            ▼
+       Final row
+```
+
+Under column-level last-write-wins behavior, the final row can contain only some of the expected fields.
+
+Therefore:
+
+> A successful database write does not necessarily mean that the resulting message is valid.
+
+Required-field validation and explicit ordering rules are part of the application's correctness model.
+
+### Migration Failure
+
+[PROPOSED DESIGN] A database migration introduces another class of failure.
+
+For example:
+
+```text
+Cassandra write → SUCCESS
+Scylla write   → TIMEOUT
+```
+
+or:
+
+```text
+Cassandra write → TIMEOUT
+Scylla write   → SUCCESS
+```
+
+The two databases can now temporarily disagree.
+
+The migration layer should therefore record an operation ID and make retries idempotent.
+
+Differences can be detected asynchronously:
+
+```text
+Write
+ │
+ ├── Cassandra
+ │
+ └── Scylla
+       │
+       ▼
+  Async comparison
+       │
+       ├── Match
+       │
+       └── Divergence → Repair Queue
+```
+
+The system should not move to the next migration stage until the amount of divergence is measurable and within an acceptable limit.
+
+If the two databases disagree, the winner should be determined by an explicit version or event-ordering policy rather than whichever write happened to arrive last according to wall-clock time.
 
 ## 9. Capacity Estimation
 
-**[SOURCE FACT]** Historical source numbers include more than 120 million messages per day, a 12-node cluster, replication factor 3, nearly 1 TB of compressed data per node, and a stated possibility of increasing that to 2 TB per node. The source also reports reads under 5 milliseconds and writes below 1 millisecond during testing. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Historical source numbers include more than 120 million messages per day, a 12-node cluster, replication factor 3, nearly 1 TB of compressed data per node, and a stated possibility of increasing that to 2 TB per node. The source also reports reads below 5 milliseconds and writes below 1 millisecond during testing. Source
 
-**[PROPOSED DESIGN]** The following is an illustrative assumption, not a Discord measurement: assume 200 bytes of stored message payload and metadata before replication. At 120 million messages per day, raw logical storage would be:
+These numbers are useful historical reference points, but they should not be copied directly into a new production capacity plan.
+
+[PROPOSED DESIGN] For illustration, assume an average stored message payload and metadata size of 200 bytes before replication.
+
+At 120 million messages per day:
 
 ```text
 120,000,000 messages/day * 200 bytes/message
 = 24,000,000,000 bytes/day
-≈ 24 GB/day (illustrative assumption)
+≈ 24 GB/day
 ```
 
-**[PROPOSED DESIGN]** With replication factor 3, the illustrative physical payload is about 72 GB/day before compaction overhead, indexes, backups, and tombstones. Real sizing must replace the assumed row size with measured distributions, then reserve headroom for repair and compaction. No new throughput target is asserted here.
+This is only an illustrative calculation.
+
+With a replication factor of 3:
+
+```text
+24 GB/day * 3
+≈ 72 GB/day
+```
+
+That is the approximate replicated payload before considering:
+
+- Compaction overhead.
+- Tombstones.
+- Internal metadata.
+- Backups.
+- Temporary repair space.
+- Operational headroom.
+
+Real capacity planning should replace the assumed 200-byte row size with measurements from the actual message distribution.
+
+It should also consider the distribution of traffic rather than only the daily average.
+
+For example, 120 million messages spread evenly across 24 hours is very different from the same number concentrated into several peak hours.
 
 ## 10. Trade-offs
 
-**[SOURCE FACT]** Cassandra offered availability, node-based scale, predictable latency, and locality for related data, but its eventual consistency and tombstones created correctness and operational issues that Discord had to handle explicitly. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Cassandra provided availability, scale through additional nodes, predictable latency, and locality for related data. At the same time, its eventual-consistency model and tombstone behavior created correctness and operational problems that Discord had to handle explicitly. Source
 
-**[ANALYSIS]** Time buckets trade write simplicity for read fan-out on quiet channels. Smaller buckets reduce worst-case partition and tombstone cost but increase metadata and probes. Larger buckets reduce probes but increase compaction and hotspot exposure.
+### Bucket Size
 
-**[PROPOSED DESIGN]** Scylla may be attractive where repair CPU and duration are the bottleneck, but migration has a real cost: dual operation, data validation, driver behavior, observability parity, and rollback. A database name is not a scaling strategy; the partition key, deletion policy, and operational evidence are.
+[ANALYSIS] Time buckets introduce a trade-off.
+
+Smaller buckets:
+
+- Keep partitions smaller.
+- Reduce the amount of data affected by compaction.
+- Reduce the worst-case tombstone range.
+- Increase the number of buckets that a read may need to check.
+
+Larger buckets:
+
+- Reduce the number of bucket lookups.
+- Reduce metadata overhead.
+- Increase partition size.
+- Increase the amount of data affected by compaction.
+- Increase the risk of hotspots.
+
+There is no universally correct bucket size.
+
+The right value depends on the actual message distribution and the largest channels in the workload.
+
+### ScyllaDB Migration Cost
+
+[PROPOSED DESIGN] ScyllaDB may be attractive if database repair CPU usage and repair duration are important bottlenecks.
+
+However, moving databases has a real engineering cost:
+
+- Running both systems during migration.
+- Validating data.
+- Testing drivers.
+- Matching observability.
+- Testing failure behavior.
+- Building rollback procedures.
+- Managing backfill.
+- Operating two systems temporarily.
+
+Therefore:
+
+> Changing the database does not automatically solve the scaling problem.
+
+The partition key, data distribution, deletion strategy, compaction behavior, and operational process still determine whether the system works well.
 
 ## 11. What We Can Learn From This Architecture
 
-**[ANALYSIS]** Model the dominant query before choosing the database. Discord moved from a general-purpose indexed collection to a key layout that tells the database exactly which channel range to scan.
+### 1. Start with the query
 
-**[ANALYSIS]** Bound partitions proactively. The source's 2 GB advertised limit was not a safe operating target; observed large partitions created GC and distribution pressure. Limits in documentation are not automatically limits for a healthy production workload.
+[ANALYSIS] Before choosing a database, understand the dominant query.
 
-**[ANALYSIS]** Deletion is a storage workload. Tombstones, repairs, compaction, and empty-range metadata deserve first-class dashboards and tests.
+Discord's message access pattern was primarily:
 
-**[SOURCE FACT]** Dark launching, measured latency, and a migration path were central to the original effort. The article also describes a small engineering team operating the system without dedicated DevOps engineers at that time. [Source](https://discord.com/blog/how-discord-stores-billions-of-messages)
+```text
+Give me messages from this channel around this point in time.
+```
+
+That led naturally to a key structure based on:
+
+```text
+(channel_id, bucket, message_id)
+```
+
+The database is therefore not being asked to perform a general search. It is being given a very specific location and range to read.
+
+### 2. Put a limit on partition size
+
+[ANALYSIS] Partitions should have a practical size limit based on the workload.
+
+The source discusses Cassandra's documented partition-size limits, but those limits should not be interpreted as healthy production targets.
+
+A partition can become operationally expensive well before a database reaches its theoretical maximum.
+
+The right question is:
+
+> How large can this partition become before reads, compaction, repair, and failure recovery become uncomfortable?
+
+### 3. Treat deletion as a workload
+
+[ANALYSIS] Deletes create storage work.
+
+Tombstones affect:
+
+- Reads.
+- Compaction.
+- Repair.
+- Garbage collection.
+- Storage usage.
+
+Therefore, deletion metrics should be part of the normal operational dashboard.
+
+### 4. Migration should be measurable
+
+[SOURCE FACT] Dark launching, measured latency, and a gradual migration path were central to the original Discord effort. The source also describes a small engineering team operating the system without dedicated DevOps engineers at that time. Source
+
+The broader lesson is that large migrations should not depend on assumptions such as:
+
+```text
+"The new database should be faster."
+```
+
+Instead, define what success means:
+
+- p95 latency
+- p99 latency
+- error rate
+- data divergence
+- repair duration
+- compaction backlog
+- storage growth
+- failure recovery time
+
+Then measure the new system against those criteria.
 
 ## 12. Proposed Interview-Style System Design
 
-**[PROPOSED DESIGN]** Requirements: retain messages, read a bounded page around a channel cursor, support edits and deletes, tolerate node loss, and scale by adding nodes. Search and analytics are separate systems.
+[PROPOSED DESIGN]
 
-**[PROPOSED DESIGN]** Storage: use `((channel_id, bucket), message_id)` with descending clustering order. Pick the bucket duration from measured largest-channel growth, not a universal constant. Keep an empty-bucket index and a repair queue.
+### Requirements
 
-**[PROPOSED DESIGN]** Write path: authenticate, allocate a monotonic message ID, write only populated fields, and make retries idempotent. For edits/deletes, attach a version or event timestamp and enforce required-field validation on reads.
+The system should:
 
-**[PROPOSED DESIGN]** Read path: calculate bucket candidates from the cursor, skip known empty buckets, issue partition-local range reads, merge in message-ID order, and stop at the requested page size. Bound the number of bucket probes and return a retryable error rather than an unbounded scan.
+- Retain messages for a long period.
+- Read a bounded page of messages around a channel cursor.
+- Support edits and deletes.
+- Tolerate node failures.
+- Scale by adding nodes.
+- Keep search and analytics outside the primary message store.
 
-**[PROPOSED DESIGN]** Migration path: keep the Cassandra schema as the compatibility baseline; shadow-read Scylla; dual-write with operation IDs; compare IDs, versions, and required fields; roll out by channel cohorts; monitor p95/p99 latency, read divergence, repair duration, tombstone density, and compaction backlog; retain a tested rollback switch.
+### Storage
 
-**[PROPOSED DESIGN]** Capacity: use source measurements as historical anchors, but size the proposed system from observed row-size percentiles, message-rate distribution, replication, repair bandwidth, and failure headroom. Any numeric target not quoted from the source is an illustrative assumption and must be labeled accordingly.
+Use:
+
+```text
+((channel_id, bucket), message_id)
+```
+
+with descending clustering order.
+
+Choose the bucket duration from the measured growth of the largest channels rather than using a universal constant.
+
+Maintain metadata for known empty buckets and a repair queue for data mismatches.
+
+### Write Path
+
+The write flow can be:
+
+```text
+Client
+  │
+  ▼
+Message API
+  │
+  ├── Authenticate
+  ├── Validate
+  ├── Generate message ID
+  ├── Write message
+  └── Return result
+```
+
+Writes should include an idempotency key or operation ID so that a retry does not create a second logical operation.
+
+For edits and deletes, attach an explicit version or event timestamp.
+
+On reads, validate required fields so that a partially written or corrupted row is not silently returned as a valid message.
+
+### Read Path
+
+The read flow can be:
+
+```text
+Client
+  │
+  ▼
+Message API
+  │
+  ▼
+Calculate bucket candidates
+  │
+  ▼
+Skip known empty buckets
+  │
+  ▼
+Read partition-local ranges
+  │
+  ▼
+Merge by message ID
+  │
+  ▼
+Return requested page
+```
+
+The service should stop once it has enough valid messages.
+
+It should also limit how many buckets a single request can scan.
+
+If the request would require an excessive number of bucket reads, the API should return a controlled retryable error rather than performing an unbounded scan.
+
+### Migration Path
+
+A proposed Cassandra-to-ScyllaDB migration could follow this sequence:
+
+```text
+1. Keep Cassandra as the compatibility baseline
+             ↓
+2. Shadow-read Scylla
+             ↓
+3. Dual-write with operation IDs
+             ↓
+4. Compare IDs, versions, and required fields
+             ↓
+5. Roll out by channel cohorts
+             ↓
+6. Monitor production behavior
+             ↓
+7. Increase rollout gradually
+             ↓
+8. Keep rollback available
+```
+
+Important metrics include:
+
+- p95 latency.
+- p99 latency.
+- Read divergence.
+- Write divergence.
+- Repair duration.
+- Tombstone density.
+- Compaction backlog.
+- Error rate.
+- Recovery time.
+
+### Capacity
+
+Use the historical Discord measurements as context, not as current capacity targets.
+
+For a new system, calculate capacity from:
+
+- Actual row-size percentiles.
+- Peak message rate.
+- Message distribution across channels.
+- Replication factor.
+- Repair bandwidth.
+- Compaction requirements.
+- Failure headroom.
+- Storage growth.
+
+Any number that is not directly quoted from the source should be treated as an assumption and validated with measurements.
 
 ## Original Sources
 
-1. Company: Discord. Exact Article Title: “How Discord Stores Billions of Messages.” URL: https://discord.com/blog/how-discord-stores-billions-of-messages. What information from the source was used: message-retention goal, MongoDB limitations, Cassandra requirements and model, time buckets, dark launch, eventual-consistency behavior, tombstones, performance observations, historical cluster configuration, and Scylla as a future exploration rather than a reported completed migration.
-2. Company: Discord. Exact Article Title: “Why Discord is switching from Redis to relational databases and what’s next.” URL: https://discord.com/blog/why-discord-is-switching-from-redis-to-relational-databases-and-whats-next. What information from the source was used: only the scope distinction that this permitted article concerns Redis and relational databases, not a Cassandra-to-ScyllaDB migration.
+Company: Discord. Exact Article Title: “How Discord Stores Billions of Messages.” URL: https://discord.com/blog/how-discord-stores-billions-of-messages.
+
+Information used from the source: the message-retention goal, MongoDB limitations, Cassandra requirements and data model, time buckets, dark launch, eventual-consistency behavior, tombstones, performance observations, historical cluster configuration, and ScyllaDB as a future possibility rather than a completed migration.
+
+Company: Discord. Exact Article Title: “Why Discord is switching from Redis to relational databases and what’s next.” URL: https://discord.com/blog/why-discord-is-switching-from-redis-to-relational-databases-and-whats-next.
+
+Information used from the source: only the scope distinction that this article concerns Redis and relational databases, not a Cassandra-to-ScyllaDB migration.

@@ -7,31 +7,93 @@ draft: false
 featured: false
 ---
 
-Tiêu đề đặt ra một câu hỏi kỹ thuật hữu ích, nhưng nguồn lịch sử được phép sử dụng không báo cáo một cuộc di trú Cassandra sang ScyllaDB đã hoàn tất. Nguồn này nói Cassandra đang chạy production và Scylla là một lựa chọn dài hạn. Bài viết giữ ranh giới đó một cách rõ ràng.
+Tiêu đề đặt ra một câu hỏi kỹ thuật thú vị, nhưng nguồn lịch sử hiện có có một giới hạn quan trọng: nguồn này không nói rằng Discord đã hoàn tất việc chuyển đổi từ Cassandra sang ScyllaDB. Nguồn mô tả Cassandra đang chạy trong production và đề cập Scylla như một lựa chọn có thể cân nhắc về dài hạn.
 
-## 1. Original Engineering Problem
+Bài viết giữ rõ sự phân biệt này. Mục tiêu không phải khẳng định Discord đã thực hiện một migration mà nguồn không đề cập, mà là dùng kinh nghiệm kỹ thuật thực tế của Discord làm cơ sở để hiểu thiết kế lưu trữ, sau đó mở rộng thành một kịch bản migration được đề xuất.
 
-**[SOURCE FACT]** Discord muốn giữ lịch sử trò chuyện vĩnh viễn, trong khi dữ liệu tin nhắn tiếp tục tăng về tốc độ và kích thước, đồng thời phải luôn khả dụng. Trong bài nguồn, lưu lượng đã tăng từ 40 triệu tin nhắn mỗi ngày vào tháng 7, lên 100 triệu vào tháng 12, và hơn 120 triệu vào tháng 1 năm 2017. [Discord, “How Discord Stores Billions of Messages”](https://discord.com/blog/how-discord-stores-billions-of-messages)
+## 1. Bài toán kỹ thuật ban đầu
 
-**[SOURCE FACT]** Replica set MongoDB ban đầu dùng một compound index trên `channel_id` và `created_at`. Khi đạt 100 triệu tin nhắn được lưu, dữ liệu và index không còn vừa trong RAM, còn độ trễ trở nên không dự đoán được. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Discord muốn lưu giữ lịch sử chat trong thời gian dài trong khi số lượng tin nhắn tiếp tục tăng rất nhanh. Dữ liệu đồng thời phải luôn sẵn sàng và hỗ trợ đọc/ghi với hiệu năng có thể dự đoán được. Theo bài viết nguồn, lưu lượng tăng từ 40 triệu tin nhắn mỗi ngày vào tháng 7 lên 100 triệu vào tháng 12 và hơn 120 triệu vào tháng 1/2017. Discord, “How Discord Stores Billions of Messages”
 
-**[ANALYSIS]** Đây là bài toán truy cập chuỗi thời gian với phân phối khóa không đồng đều. Truy vấn tự nhiên là “các tin nhắn quanh một vị trí trong một kênh”, chứ không phải một phép join quan hệ tùy ý. Tuy nhiên, kênh không hoạt động gây ra các lần seek đĩa ngẫu nhiên, kênh công khai bận rộn tạo ra các vùng gần đây nóng, và lịch sử bị xóa có thể để lại các lần quét tombstone tốn kém.
+[SOURCE FACT] Ban đầu Discord lưu tin nhắn trong một MongoDB replica set với compound index trên channel_id và created_at. Khi hệ thống đạt khoảng 100 triệu tin nhắn, dữ liệu và index không còn vừa trong RAM. Kết quả là latency của query trở nên khó dự đoán. Source
 
-## 2. What the Original System Did
+[ANALYSIS] Vấn đề cốt lõi liên quan chặt chẽ đến cách ứng dụng truy cập tin nhắn. Phần lớn request cần lấy một khoảng tin nhắn trong một channel cụ thể, thay vì thực hiện các truy vấn quan hệ tùy ý.
 
-**[SOURCE FACT]** Discord chuyển từ MongoDB sang Cassandra vì Cassandra đáp ứng các yêu cầu đã nêu: mở rộng tuyến tính bằng cách thêm node, failover tự động, ít bảo trì, đã được chứng minh, hiệu năng có thể dự đoán, không cần cache tin nhắn, mô hình dữ liệu không phải blob và mã nguồn mở. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+Điều này khiến data model của hệ thống lưu trữ trở thành một yếu tố rất quan trọng.
 
-**[SOURCE FACT]** Quá trình di trú dùng dark launch: mã ứng dụng đọc kép và ghi kép vào MongoDB và Cassandra trước khi Cassandra trở thành cơ sở dữ liệu chính. Trong một tuần kiểm thử, read được quan sát dưới 5 mili-giây và write dưới 1 mili-giây. Sau đó Discord báo cáo một cluster 12 node với replication factor bằng 3. Đây là các quan sát và cấu hình lịch sử, không phải mục tiêu capacity hiện tại. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+Có một số thách thức chính:
 
-**[SOURCE FACT]** Khóa Cassandra đầu tiên là `(channel_id, message_id)`, trong đó Snowflake `message_id` cung cấp thứ tự thời gian. Sau khi xuất hiện các partition lớn, Discord thêm time bucket và đổi khóa thành `((channel_id, bucket), message_id)`. Bài nguồn nói bucket được chọn khoảng 10 ngày cho các kênh lớn nhất để giữ kích thước dưới 100 MB một cách an toàn. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+- Các channel ít hoạt động có thể yêu cầu random disk reads.
+- Các public channel có lưu lượng rất cao có thể tạo ra những vùng dữ liệu gần nhất bị truy cập rất nhiều.
+- Tin nhắn bị xóa có thể để lại một lượng lớn tombstone.
+- Khi lượng dữ liệu tăng lên, việc giữ partition ở kích thước hợp lý ngày càng trở nên quan trọng.
 
-**[SOURCE FACT]** Cassandra upsert và last-write-wins đã làm lộ race giữa edit và delete. Discord phát hiện row hỏng bằng trường bắt buộc `author_id`, xóa tin nhắn hỏng và thay đổi write để chỉ bao gồm các giá trị non-null. Delete tạo tombstone; sau một sự cố production liên quan đến hàng triệu tin nhắn bị xóa, Discord giảm thời gian sống của tombstone từ 10 ngày xuống 2 ngày và theo dõi các bucket rỗng để tránh quét lại chúng. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+Bài học quan trọng là ở quy mô này, chọn database mới chỉ là một phần của bài toán. Data model và access pattern phải phù hợp với nhau.
 
-**[SOURCE FACT]** Bài viết nói Scylla là ý tưởng dài hạn vì repair của Cassandra bị giới hạn bởi CPU và thời lượng tăng theo lượng write tích lũy; bài viết không nói Discord đã hoàn tất di trú. Bài viết được phép thứ hai nói về việc chuyển từ Redis sang cơ sở dữ liệu quan hệ và không chứng minh một cuộc di trú Cassandra sang Scylla. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages) [Nguồn](https://discord.com/blog/why-discord-is-switching-from-redis-to-relational-databases-and-whats-next)
+## 2. Hệ thống ban đầu đã làm gì
 
-## 3. Architecture Diagram
+[SOURCE FACT] Discord chuyển từ MongoDB sang Cassandra vì Cassandra phù hợp với các yêu cầu mà họ xác định tại thời điểm đó. Các yêu cầu này bao gồm khả năng scale bằng cách thêm node, automatic failover, chi phí vận hành thấp, hiệu năng có thể dự đoán, không cần một message cache riêng, data model không dựa trên các blob lớn và khả năng sử dụng mã nguồn mở. Source
 
-```mermaid
+[SOURCE FACT] Discord sử dụng dark launch trong quá trình migration. Ứng dụng tạm thời đọc và ghi vào cả MongoDB và Cassandra trước khi Cassandra trở thành primary store. Trong một tuần kiểm thử, latency đọc của Cassandra được ghi nhận dưới 5 ms và ghi dưới 1 ms. Sau đó Discord báo cáo một cluster 12 node với replication factor bằng 3. Đây là các số liệu và cấu hình trong lịch sử, không phải khuyến nghị capacity hiện tại. Source
+
+Key đầu tiên của Cassandra là:
+
+```text
+(channel_id, message_id)
+```
+
+[SOURCE FACT] message_id là Snowflake ID, cung cấp thứ tự theo thời gian.
+
+Thiết kế này hoạt động tốt trong giai đoạn đầu, nhưng các channel lớn cuối cùng vẫn tạo ra những partition rất lớn.
+
+Discord vì vậy đã đưa vào time bucket và đổi key thành:
+
+```text
+((channel_id, bucket), message_id)
+```
+
+[SOURCE FACT] Với các channel lớn nhất, nguồn cho biết Discord sử dụng bucket khoảng 10 ngày để giữ partition ở mức thấp hơn đáng kể so với 100 MB. Source
+
+Đây là một thay đổi quan trọng trong thiết kế.
+
+Thay vì để toàn bộ tin nhắn của một channel nằm trong một partition liên tục tăng kích thước, dữ liệu được chia thành các khoảng thời gian nhỏ hơn.
+
+Ví dụ:
+
+```text
+Channel A
+│
+├── Bucket 1: Jan 1 - Jan 10
+├── Bucket 2: Jan 11 - Jan 20
+├── Bucket 3: Jan 21 - Jan 30
+└── Bucket 4: Jan 31 - Feb 9
+```
+
+Ứng dụng sau đó có thể xác định bucket nào chứa các tin nhắn cần tìm thay vì phải scan một partition có thể rất lớn.
+
+### Vấn đề Edit/Delete
+
+[SOURCE FACT] Cơ chế upsert và semantics last-write-wins của Cassandra tạo ra race condition giữa edit và delete. Discord sử dụng field bắt buộc author_id để phát hiện các row bị lỗi, xóa các message đó và thay đổi cách ghi để chỉ ghi những field không-null. Delete tạo ra tombstone. Sau một sự cố production liên quan đến hàng triệu message đã bị xóa, Discord giảm thời gian tồn tại của tombstone từ 10 ngày xuống 2 ngày và theo dõi các bucket rỗng để tránh scan lặp lại chúng. Source
+
+Điều này cho thấy một điểm quan trọng về distributed database:
+
+> Một write thành công không đồng nghĩa với việc dữ liệu cuối cùng chắc chắn đúng về mặt nghiệp vụ.
+
+Ứng dụng vẫn cần hiểu rõ cách các edit, delete, retry và dữ liệu chưa đầy đủ tương tác với nhau khi xảy ra đồng thời.
+
+### Cassandra và ScyllaDB
+
+[SOURCE FACT] Nguồn đề cập Scylla như một ý tưởng dài hạn vì quá trình repair của Cassandra trở nên ngốn CPU và mất nhiều thời gian hơn khi lượng dữ liệu tích lũy và số lượng write tăng lên. Nguồn không nói rằng Discord đã hoàn tất migration từ Cassandra sang ScyllaDB. Source
+
+Bài viết Discord thứ hai được sử dụng nói về việc chuyển từ Redis sang relational database. Nó không cung cấp bằng chứng về một migration từ Cassandra sang ScyllaDB. Source
+
+Vì vậy, migration sang ScyllaDB được thảo luận ở phần sau là một bài tập thiết kế được đề xuất, không phải một khẳng định lịch sử về Discord.
+
+## 3. Sơ đồ kiến trúc
+
+Kiến trúc bên dưới phân biệt rõ phần nào được nguồn lịch sử hỗ trợ và phần nào được bổ sung cho thiết kế migration được đề xuất.
+
+```text
 flowchart LR
     C[Client]
     API[Message API\n[Source-backed component]]
@@ -41,7 +103,7 @@ flowchart LR
     REP[Replication and repair\n[Source-backed component]]
     IDX[Empty-bucket tracking\n[Source-backed component]]
     SCY[(ScyllaDB cluster\n[Proposed component])]
-    MIG[Dual-read / dual-write migration controller\n[Proposed component]]
+    MIG[Migration controller\n[Proposed component]]
 
     C --> API
     API -. dark launch .-> MONGO
@@ -54,21 +116,69 @@ flowchart LR
     MIG -. validation .-> CAS
 ```
 
-**[SOURCE FACT]** MongoDB đọc/ghi kép, Cassandra, time bucket, replication, repair và theo dõi bucket rỗng được mô tả trong nguồn. **[PROPOSED DESIGN]** Cluster ScyllaDB và migration controller là phần mở rộng cho thiết kế phỏng vấn; không được hiểu đây là kiến trúc production được Discord báo cáo.
+[SOURCE FACT] Việc dual read/write với MongoDB, Cassandra, time bucket, replication, repair và empty-bucket tracking đều được mô tả trong nguồn.
 
-## 4. System Design Analysis
+[PROPOSED DESIGN] ScyllaDB cluster và migration controller là các thành phần được bổ sung cho thiết kế theo kiểu system-design interview trong bài viết này. Không nên hiểu chúng là kiến trúc production mà Discord đã công bố.
 
-**[ANALYSIS]** Partition theo `(channel_id, bucket)` xử lý hai rủi ro độc lập. `channel_id` giữ locality của truy cập chính, còn `bucket` giới hạn lượng dữ liệu và tombstone mà một thao tác đọc hoặc compaction có thể chạm tới. Một partition kênh không giới hạn là hotspot trong storage, không chỉ là hotspot định tuyến.
+## 4. Phân tích System Design
 
-**[ANALYSIS]** Thiết kế này cố ý bám theo hình dạng truy vấn. Request lịch sử gần đây tính các bucket cần xét rồi range-scan theo `message_id`; nó không yêu cầu Cassandra tự tìm row qua secondary index. Chi phí của kênh yên ắng là thêm các lần thăm dò bucket, còn trường hợp kênh hoạt động thường tìm đủ row trong bucket mới nhất.
+[ANALYSIS] Partition theo (channel_id, bucket) giải quyết hai vấn đề liên quan với nhau.
 
-**[ANALYSIS]** Cassandra và ScyllaDB tương thích ở cấp mô hình dữ liệu, nhưng tương thích không chứng minh tương đương về vận hành. Cách repair, compaction, driver, metric, thiết lập consistency và cô lập workload vẫn cần kiểm thử di trú. “Repair nhanh hơn” là giả thuyết cần xác nhận, không phải bảo đảm di trú.
+Thứ nhất, channel_id giữ các message của cùng một channel lại với nhau, phù hợp với access pattern chính.
+
+Thứ hai, bucket giới hạn lượng dữ liệu có thể tích lũy trong một partition.
+
+Điều này quan trọng vì một partition của channel không có giới hạn có thể trở nên tốn kém không chỉ vì chứa nhiều dữ liệu, mà còn vì compaction, delete và read phải xử lý một lượng dữ liệu ngày càng lớn.
+
+### Data Modeling dựa trên Query
+
+Thiết kế được xây dựng có chủ đích xoay quanh những query mà ứng dụng cần thực hiện.
+
+Một request lấy các message gần đây trong một channel có thể:
+
+- Xác định bucket liên quan.
+- Đọc một range message_id bên trong partition đó.
+- Chuyển sang bucket cũ hơn nếu cần.
+- Dừng khi đã lấy đủ số message hợp lệ.
+
+Hệ thống không cần secondary index để tìm xem message nằm ở đâu.
+
+Với một channel ít hoạt động, điều này có thể đồng nghĩa với việc phải kiểm tra nhiều bucket trước khi tìm đủ message.
+
+Với một channel hoạt động mạnh, bucket mới nhất thường đã chứa đủ message gần đây để đáp ứng request.
+
+Đây là một trade-off hợp lý vì common case vẫn hiệu quả trong khi kích thước partition được giới hạn.
+
+### Cassandra vs. ScyllaDB
+
+[ANALYSIS] Cassandra và ScyllaDB có cách tiếp cận data model tương tự nhau, vì vậy có thể sử dụng cùng chiến lược partitioning làm điểm bắt đầu.
+
+Tuy nhiên, data model tương tự không có nghĩa hai hệ thống sẽ hoạt động giống hệt nhau trong production.
+
+Một migration thực tế vẫn cần kiểm chứng:
+
+- Cách repair hoạt động.
+- Cách compaction hoạt động.
+- Database driver.
+- Consistency setting.
+- Metrics và monitoring.
+- Failure handling.
+- Workload isolation.
+- Quy trình vận hành.
+
+Vì vậy, chỉ nói rằng ScyllaDB repair nhanh hơn là chưa đủ để biện minh cho một migration. Mức cải thiện kỳ vọng cần được đo trên workload thực tế.
 
 ## 5. Data Model
 
-**[SOURCE FACT]** Nguồn mô tả Cassandra là một kho key gồm partition và clustering: partition key định vị dữ liệu, còn clustering key nhận diện và sắp xếp row trong partition. Khóa tin nhắn production trở thành `((channel_id, bucket), message_id)`. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Nguồn mô tả Cassandra là một data store dựa trên partition key và clustering key. Partition key xác định dữ liệu thuộc về đâu, còn clustering key xác định và sắp xếp các row bên trong partition. Production message key trở thành:
 
-**[PROPOSED DESIGN]** Một bảng tối thiểu cho cùng access pattern có thể là:
+```text
+((channel_id, bucket), message_id)
+```
+
+Source
+
+[PROPOSED DESIGN] Một table tối thiểu cho cùng access pattern có thể như sau:
 
 ```sql
 CREATE TABLE messages_by_channel_bucket (
@@ -83,11 +193,36 @@ CREATE TABLE messages_by_channel_bucket (
 ) WITH CLUSTERING ORDER BY (message_id DESC);
 ```
 
-**[PROPOSED DESIGN]** `bucket` phải được suy ra xác định từ thời gian hoặc ID của tin nhắn, và service nên duy trì một record metadata nhỏ của kênh chứa các bucket rỗng đã biết. Nếu edit và delete có thể race, write nên là toàn bộ tin nhắn hoặc có nhận biết field, còn read nên loại row thiếu trường bắt buộc thay vì âm thầm trả về dữ liệu một phần.
+Phần quan trọng là primary key:
 
-## 6. API Design
+```text
+((channel_id, bucket), message_id)
+```
 
-**[PROPOSED DESIGN]** Giữ API phù hợp với các thao tác trong một partition:
+Trong đó:
+
+- channel_id xác định channel.
+- bucket giới hạn kích thước của mỗi partition.
+- message_id cung cấp thứ tự bên trong partition.
+
+[PROPOSED DESIGN] Bucket phải được tính toán một cách deterministic từ thời gian hoặc ID của message.
+
+Service cũng nên duy trì một lượng metadata nhỏ về các bucket được biết là rỗng. Điều này giúp read path không phải query lặp lại những bucket đã biết chắc là không có message.
+
+Vì edit và delete có thể xảy ra đồng thời, write model cũng cần xử lý vấn đề ordering.
+
+Các hướng tiếp cận có thể gồm:
+
+- Lưu đầy đủ các version của message.
+- Cẩn thận khi thực hiện field-aware update.
+- Gắn version number hoặc event timestamp.
+- Validate các field bắt buộc khi đọc.
+
+Lựa chọn cụ thể phụ thuộc vào consistency và update semantics mà ứng dụng yêu cầu.
+
+## 6. Thiết kế API
+
+[PROPOSED DESIGN] API nên bám sát các operation mà database có thể xử lý hiệu quả:
 
 ```text
 POST   /channels/{channel_id}/messages
@@ -97,73 +232,492 @@ PATCH  /channels/{channel_id}/messages/{message_id}
 DELETE /channels/{channel_id}/messages/{message_id}
 ```
 
-**[ANALYSIS]** `before` và `after` là cursor opaque được xây dựng từ thứ tự giống Snowflake, không phải offset. Service đọc suy ra các bucket ứng viên, bỏ qua bucket rỗng đã ghi nhận, truy vấn theo thứ tự và dừng sau `limit` row hợp lệ. Request mention, pin hoặc full-text search cần read model riêng; ép chúng vào bảng tin nhắn sẽ tái tạo vấn đề đọc ngẫu nhiên.
+Read API sử dụng before và after thay vì numeric offset.
 
-**[PROPOSED DESIGN]** Trong quá trình di trú, read có thể được lấy mẫu từ cả hai store và so sánh theo message ID cùng tính hợp lệ của trường bắt buộc. Write cần idempotency key và chính sách retry xác định để timeout không tạo ra các version khác nhau.
+Ví dụ:
 
-## 7. Scaling Strategy
+```text
+GET /channels/123/messages?before=847362918273&limit=50
+```
 
-**[SOURCE FACT]** Chiến lược của Discord là thêm node thay vì re-shard thủ công, trong đó replication và repair cung cấp khả năng chống lỗi. Nguồn báo cáo cluster Cassandra 12 node với replication factor bằng 3 tại thời điểm đó. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+Điều này có nghĩa là:
 
-**[ANALYSIS]** Thêm node giải quyết capacity tổng thể nhưng không giải quyết mọi hotspot. Một kênh cực kỳ hoạt động vẫn ánh xạ vào một chuỗi bucket hữu hạn, và bucket mới nhất có thể nóng không cân xứng. Hãy theo dõi latency theo partition và node, compaction debt, lần quét tombstone và phân phối kích thước bucket, không chỉ trung bình của cluster.
+> Trả về tối đa 50 message cũ hơn message ID được chỉ định.
 
-**[PROPOSED DESIGN]** Với di trú sang Scylla, dùng lộ trình theo giai đoạn: shadow read, dual write, so sánh consistency, rollout theo cohort giới hạn rồi rollback bằng cách định tuyến read trở lại Cassandra. Trước tiên giữ schema và cách suy ra bucket giống nhau; thay storage engine và semantics partition cùng lúc khiến sai lệch khó chẩn đoán. Xem repair, compaction, backfill và failover là các load test riêng.
+### Tại sao không dùng Offset Pagination?
 
-## 8. Failure Scenarios
+Offset pagination không phù hợp với một message table rất lớn và liên tục thay đổi.
 
-**[SOURCE FACT]** Lịch sử của một kênh bị xóa để lại hàng triệu tombstone. Khi tải kênh, Cassandra phải quét chúng và liên tục gặp stop-the-world garbage collection kéo dài 10 giây. Discord giảm thời gian sống tombstone và tránh các bucket rỗng đã biết. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+Ví dụ:
 
-**[ANALYSIS]** Nhóm lỗi thứ hai mang tính ngữ nghĩa thay vì cơ học: edit đồng thời với delete có thể để lại row không đầy đủ dưới cơ chế upsert last-write-wins theo từng column. “Write thành công” vì thế không đồng nghĩa với “tin nhắn hợp lệ.” Kiểm tra trường bắt buộc và thứ tự edit/delete là một phần của correctness.
+```text
+?page=10000
+```
 
-**[PROPOSED DESIGN]** Di trú còn phải xử lý thành công bất đối xứng: Cassandra nhận write trong khi Scylla timeout, hoặc ngược lại. Ghi operation ID, retry idempotent, so sánh bất đồng bộ và cung cấp repair queue. Không cutover trước khi độ lệch có thể đo lường và được giới hạn. Nếu hai store bất đồng, ưu tiên version được chọn bởi timestamp sự kiện hoặc chính sách version rõ ràng, không phải thời điểm request đến API.
+yêu cầu database về mặt logic phải bỏ qua một lượng lớn row trước khi trả về page được yêu cầu.
 
-## 9. Capacity Estimation
+Cursor dựa trên message ID phù hợp với access pattern này hơn.
 
-**[SOURCE FACT]** Các số liệu lịch sử của nguồn gồm hơn 120 triệu tin nhắn mỗi ngày, cluster 12 node, replication factor bằng 3, gần 1 TB dữ liệu nén trên mỗi node và khả năng được nêu là tăng lên 2 TB mỗi node. Nguồn cũng báo cáo read dưới 5 mili-giây và write dưới 1 mili-giây trong kiểm thử. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[ANALYSIS] Read service có thể tính các bucket candidate liên quan từ cursor, bỏ qua các bucket đã biết là rỗng, query từng partition theo thứ tự và dừng khi đã lấy đủ số row hợp lệ.
 
-**[PROPOSED DESIGN]** Sau đây là một giả định minh họa, không phải phép đo của Discord: giả sử 200 byte payload và metadata lưu trữ cho mỗi tin nhắn trước replication. Với 120 triệu tin nhắn mỗi ngày, storage logic thô là:
+Ứng dụng cũng nên đặt giới hạn cho số bucket mà một request được phép kiểm tra. Nếu không, một request bất thường có thể biến thành một unbounded scan.
+
+### Các Query khác cần Model khác
+
+Message theo channel chỉ là một access pattern.
+
+Các request như:
+
+- Tìm tất cả message nhắc đến một user.
+- Search nội dung message.
+- Tìm message được ghim.
+- Xây dựng analytics.
+- Tìm message trên nhiều channel.
+
+không phù hợp một cách tự nhiên với primary message table.
+
+Cố gắng hỗ trợ mọi query bằng cùng một table sẽ tạo lại vấn đề random-read mà thiết kế ban đầu muốn tránh.
+
+Cách tốt hơn là tạo các read model riêng cho những use case đó.
+
+### Hành vi API trong Migration
+
+[PROPOSED DESIGN] Trong quá trình migration, ứng dụng có thể đọc từ cả hai store với một sample traffic được kiểm soát và so sánh kết quả.
+
+Write cũng nên mang theo operation ID hoặc idempotency key để một retry không tạo ra các version khác nhau của cùng một message ở hai database.
+
+## 7. Chiến lược Scale
+
+[SOURCE FACT] Chiến lược của Discord là thêm node thay vì thực hiện re-shard thủ công. Replication và repair được sử dụng để tăng khả năng chịu lỗi. Nguồn báo cáo một Cassandra cluster 12 node với replication factor bằng 3 tại thời điểm đó. Source
+
+Thêm node làm tăng tổng capacity của cluster, nhưng không tự động giải quyết mọi hotspot.
+
+Hãy xét một channel có lưu lượng rất cao:
+
+```text
+Channel A
+│
+├── Bucket 1
+├── Bucket 2
+├── Bucket 3
+└── Current Bucket  ← very high traffic
+```
+
+Toàn bộ cluster có thể vẫn còn rất nhiều capacity trong khi partition hiện tại của một channel phổ biến lại nhận lượng traffic không cân xứng.
+
+Vì vậy, chỉ monitoring các giá trị trung bình của toàn cluster là chưa đủ.
+
+[ANALYSIS] Các metric hữu ích gồm:
+
+- Latency theo partition hoặc channel.
+- Latency theo từng node.
+- Phân bố kích thước partition.
+- Tombstone scan.
+- Compaction backlog.
+- Thời gian repair.
+- Read/write throughput.
+- Phân bố hot channel.
+
+### Migration ScyllaDB được đề xuất
+
+[PROPOSED DESIGN] Migration nên được thực hiện từng bước thay vì chuyển toàn bộ hệ thống cùng lúc.
+
+Một quy trình có thể là:
+
+```text
+1. Shadow reads
+       ↓
+2. Dual writes
+       ↓
+3. Compare data
+       ↓
+4. Small production cohort
+       ↓
+5. Expand rollout
+       ↓
+6. Full cutover
+```
+
+Trong giai đoạn đầu, giữ nguyên schema và cách tính bucket.
+
+Điều này quan trọng vì nếu đồng thời thay đổi cả database engine lẫn partitioning strategy thì sẽ khó xác định nguyên nhân của data mismatch hoặc performance regression.
+
+Repair, compaction, backfill và failover cũng nên được kiểm thử độc lập thay vì giả định rằng một migration test thành công đã bao phủ tất cả các trường hợp này.
+
+## 8. Các kịch bản Failure
+
+[SOURCE FACT] Discord từng gặp một vấn đề production liên quan đến hàng triệu tombstone được tạo ra bởi lịch sử channel đã bị xóa. Khi load channel bị ảnh hưởng, Cassandra phải scan các tombstone và dẫn đến các lần stop-the-world garbage-collection pause kéo dài khoảng 10 giây. Discord giảm thời gian tồn tại của tombstone và thêm empty-bucket tracking để tránh scan lặp lại những range đã biết là rỗng. Source
+
+Điều này cho thấy delete cần được xem là một phần của storage design, thay vì chỉ đơn giản là thao tác ngược lại với insert.
+
+### Race giữa Edit/Delete
+
+[ANALYSIS] Một failure mode khác nằm ở semantics chứ không chỉ ở cơ chế kỹ thuật.
+
+Giả sử một edit và một delete xảy ra gần như cùng lúc:
+
+```text
+Edit message
+     │
+     ├─────────────┐
+     │             │
+     ▼             ▼
+Write content    Delete fields
+     │             │
+     └──────┬──────┘
+            ▼
+       Final row
+```
+
+Với cơ chế column-level last-write-wins, row cuối cùng có thể chỉ còn một phần các field đáng lẽ phải có.
+
+Vì vậy:
+
+> Một database write thành công không nhất thiết có nghĩa message cuối cùng là hợp lệ.
+
+Validation các field bắt buộc và quy tắc ordering rõ ràng là một phần của correctness model của ứng dụng.
+
+### Migration Failure
+
+[PROPOSED DESIGN] Database migration tạo ra thêm một nhóm failure khác.
+
+Ví dụ:
+
+```text
+Cassandra write → SUCCESS
+Scylla write   → TIMEOUT
+```
+
+hoặc:
+
+```text
+Cassandra write → TIMEOUT
+Scylla write   → SUCCESS
+```
+
+Hai database lúc này có thể tạm thời không đồng nhất.
+
+Vì vậy, migration layer nên ghi nhận operation ID và đảm bảo retry là idempotent.
+
+Data mismatch có thể được phát hiện bất đồng bộ:
+
+```text
+Write
+ │
+ ├── Cassandra
+ │
+ └── Scylla
+       │
+       ▼
+  Async comparison
+       │
+       ├── Match
+       │
+       └── Divergence → Repair Queue
+```
+
+Hệ thống không nên chuyển sang giai đoạn migration tiếp theo cho đến khi mức divergence có thể đo được và nằm trong giới hạn chấp nhận được.
+
+Nếu hai database không đồng nhất, giá trị được chọn làm nguồn đúng nên được quyết định bằng version hoặc event-ordering policy rõ ràng, thay vì đơn giản chọn write đến sau theo wall-clock time.
+
+## 9. Ước tính Capacity
+
+[SOURCE FACT] Các số liệu lịch sử trong nguồn gồm hơn 120 triệu message mỗi ngày, cluster 12 node, replication factor 3, gần 1 TB compressed data trên mỗi node và khả năng được đề cập là tăng lên 2 TB mỗi node. Nguồn cũng báo cáo read dưới 5 ms và write dưới 1 ms trong quá trình kiểm thử. Source
+
+Những con số này hữu ích như các mốc tham khảo lịch sử, nhưng không nên được copy trực tiếp vào một production capacity plan mới.
+
+[PROPOSED DESIGN] Để minh họa, giả sử payload và metadata trung bình của một message có kích thước 200 byte trước replication.
+
+Với 120 triệu message mỗi ngày:
 
 ```text
 120,000,000 messages/day * 200 bytes/message
 = 24,000,000,000 bytes/day
-≈ 24 GB/day (illustrative assumption)
+≈ 24 GB/day
 ```
 
-**[PROPOSED DESIGN]** Với replication factor bằng 3, payload vật lý theo giả định minh họa khoảng 72 GB mỗi ngày, trước overhead của compaction, index, backup và tombstone. Việc sizing thực tế phải thay kích thước row giả định bằng phân phối đã đo, rồi dành headroom cho repair và compaction. Bài viết không khẳng định mục tiêu throughput mới nào.
+Đây chỉ là phép tính minh họa.
 
-## 10. Trade-offs
+Với replication factor bằng 3:
 
-**[SOURCE FACT]** Cassandra cung cấp availability, scale theo node, latency có thể dự đoán và locality cho dữ liệu liên quan, nhưng eventual consistency và tombstone tạo ra các vấn đề correctness và vận hành mà Discord phải xử lý rõ ràng. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+```text
+24 GB/day * 3
+≈ 72 GB/day
+```
 
-**[ANALYSIS]** Time bucket đánh đổi sự đơn giản của write lấy fan-out read trên các kênh yên ắng. Bucket nhỏ giảm chi phí partition và tombstone tệ nhất nhưng tăng metadata và số lần probe. Bucket lớn giảm số lần probe nhưng tăng mức phơi nhiễm với compaction và hotspot.
+Đây là replicated payload gần đúng trước khi tính đến:
 
-**[PROPOSED DESIGN]** Scylla có thể hấp dẫn khi CPU và thời lượng repair là bottleneck, nhưng di trú có chi phí thực: vận hành kép, kiểm chứng dữ liệu, hành vi driver, tương đương observability và rollback. Tên database không phải chiến lược scale; partition key, chính sách delete và bằng chứng vận hành mới là nền tảng.
+- Compaction overhead.
+- Tombstone.
+- Internal metadata.
+- Backup.
+- Temporary repair space.
+- Operational headroom.
 
-## 11. What We Can Learn From This Architecture
+Capacity planning thực tế nên thay kích thước row giả định 200 byte bằng số liệu đo từ phân bố message thực tế.
 
-**[ANALYSIS]** Hãy mô hình hóa truy vấn chi phối trước khi chọn database. Discord chuyển từ một collection có index đa dụng sang layout khóa cho phép database biết chính xác range của kênh cần quét.
+Nó cũng cần xét đến phân bố traffic thay vì chỉ nhìn vào average theo ngày.
 
-**[ANALYSIS]** Chủ động giới hạn partition. Giới hạn 2 GB được quảng bá trong nguồn không phải mục tiêu vận hành an toàn; partition lớn quan sát được gây áp lực lên GC và việc phân phối. Giới hạn trong tài liệu không tự động là giới hạn cho workload production khỏe mạnh.
+Ví dụ, 120 triệu message phân bố đều trong 24 giờ rất khác với cùng số lượng đó nhưng tập trung vào một vài giờ peak.
 
-**[ANALYSIS]** Delete là một workload storage. Tombstone, repair, compaction và metadata về range rỗng cần dashboard và test hạng nhất.
+## 10. Trade-off
 
-**[SOURCE FACT]** Dark launch, latency đo được và đường di trú là trọng tâm của nỗ lực ban đầu. Bài viết cũng mô tả một đội kỹ sư nhỏ vận hành hệ thống khi đó mà không có kỹ sư DevOps chuyên trách. [Nguồn](https://discord.com/blog/how-discord-stores-billions-of-messages)
+[SOURCE FACT] Cassandra cung cấp availability, khả năng scale bằng cách thêm node, latency có thể dự đoán và locality cho dữ liệu liên quan. Đồng thời, eventual-consistency model và cách tombstone hoạt động tạo ra các vấn đề về correctness và vận hành mà Discord phải xử lý một cách rõ ràng. Source
 
-## 12. Proposed Interview-Style System Design
+### Kích thước Bucket
 
-**[PROPOSED DESIGN]** Yêu cầu: giữ tin nhắn, đọc một page giới hạn quanh cursor của kênh, hỗ trợ edit và delete, chịu được mất node và scale bằng cách thêm node. Search và analytics là các hệ thống riêng.
+[ANALYSIS] Time bucket tạo ra một trade-off.
 
-**[PROPOSED DESIGN]** Storage: dùng `((channel_id, bucket), message_id)` với thứ tự clustering giảm dần. Chọn thời lượng bucket từ tốc độ tăng trưởng đo được của các kênh lớn nhất, không dùng một hằng số chung. Duy trì empty-bucket index và repair queue.
+Bucket nhỏ:
 
-**[PROPOSED DESIGN]** Write path: xác thực, cấp message ID đơn điệu, chỉ ghi các field có giá trị và làm retry thành idempotent. Với edit/delete, gắn version hoặc event timestamp và kiểm tra trường bắt buộc khi read.
+- Giữ partition nhỏ hơn.
+- Giảm lượng dữ liệu bị ảnh hưởng bởi compaction.
+- Giảm phạm vi tombstone trong trường hợp xấu nhất.
+- Tăng số lượng bucket mà một read có thể phải kiểm tra.
 
-**[PROPOSED DESIGN]** Read path: tính các bucket ứng viên từ cursor, bỏ qua bucket rỗng đã biết, thực hiện range read trong partition, merge theo thứ tự message ID và dừng ở kích thước page yêu cầu. Giới hạn số bucket probe và trả lỗi có thể retry thay vì scan không giới hạn.
+Bucket lớn:
 
-**[PROPOSED DESIGN]** Lộ trình di trú: giữ schema Cassandra làm baseline tương thích; shadow-read Scylla; dual-write với operation ID; so sánh ID, version và trường bắt buộc; rollout theo cohort kênh; theo dõi p95/p99 latency, read divergence, thời lượng repair, mật độ tombstone và compaction backlog; giữ một công tắc rollback đã kiểm thử.
+- Giảm số lần lookup bucket.
+- Giảm metadata overhead.
+- Tăng kích thước partition.
+- Tăng lượng dữ liệu bị ảnh hưởng bởi compaction.
+- Tăng rủi ro hotspot.
 
-**[PROPOSED DESIGN]** Capacity: dùng số liệu nguồn làm mốc lịch sử, nhưng sizing hệ thống đề xuất từ percentile kích thước row quan sát được, phân phối message rate, replication, băng thông repair và headroom khi lỗi. Mọi mục tiêu số không được trích từ nguồn đều là giả định minh họa và phải được gắn nhãn tương ứng.
+Không có một bucket size đúng cho mọi hệ thống.
 
-## Original Sources
+Giá trị phù hợp phụ thuộc vào phân bố message thực tế và các channel lớn nhất trong workload.
 
-1. Company: Discord. Exact Article Title: “How Discord Stores Billions of Messages.” URL: https://discord.com/blog/how-discord-stores-billions-of-messages. What information from the source was used: mục tiêu giữ tin nhắn, giới hạn MongoDB, yêu cầu và mô hình Cassandra, time bucket, dark launch, eventual consistency, tombstone, quan sát hiệu năng, cấu hình cluster lịch sử và Scylla như hướng khám phá tương lai chứ không phải một cuộc di trú đã được báo cáo hoàn tất.
-2. Company: Discord. Exact Article Title: “Why Discord is switching from Redis to relational databases and what’s next.” URL: https://discord.com/blog/why-discord-is-switching-from-redis-to-relational-databases-and-whats-next. What information from the source was used: chỉ dùng để phân biệt phạm vi rằng bài được phép này nói về Redis và cơ sở dữ liệu quan hệ, không nói về di trú Cassandra sang ScyllaDB.
+### Chi phí Migration sang ScyllaDB
+
+[PROPOSED DESIGN] ScyllaDB có thể hấp dẫn nếu CPU usage của database repair và thời gian repair là các bottleneck quan trọng.
+
+Tuy nhiên, chuyển database có chi phí engineering thực tế:
+
+- Vận hành cả hai hệ thống trong thời gian migration.
+- Validate dữ liệu.
+- Test driver.
+- Đồng bộ observability.
+- Test failure behavior.
+- Xây dựng rollback procedure.
+- Quản lý backfill.
+- Tạm thời vận hành hai hệ thống song song.
+
+Vì vậy:
+
+> Thay database không tự động giải quyết bài toán scale.
+
+Partition key, data distribution, deletion strategy, compaction behavior và operational process vẫn quyết định hệ thống có hoạt động tốt hay không.
+
+## 11. Chúng ta có thể học gì từ kiến trúc này
+
+### 1. Bắt đầu từ Query
+
+[ANALYSIS] Trước khi chọn database, hãy hiểu dominant query.
+
+Access pattern chính của Discord đối với message là:
+
+```text
+Give me messages from this channel around this point in time.
+```
+
+Điều đó dẫn đến một key structure tự nhiên dựa trên:
+
+```text
+(channel_id, bucket, message_id)
+```
+
+Database vì vậy không bị yêu cầu thực hiện một general search. Nó được cung cấp một location và range rất cụ thể để đọc.
+
+### 2. Đặt giới hạn cho kích thước Partition
+
+[ANALYSIS] Partition nên có một giới hạn kích thước thực tế dựa trên workload.
+
+Nguồn có đề cập đến các giới hạn partition size được Cassandra document, nhưng không nên hiểu các giới hạn đó là production target lành mạnh.
+
+Một partition có thể trở nên tốn kém về mặt vận hành từ rất lâu trước khi database đạt đến giới hạn lý thuyết.
+
+Câu hỏi phù hợp là:
+
+> Partition này có thể lớn đến mức nào trước khi read, compaction, repair và failure recovery bắt đầu trở nên khó kiểm soát?
+
+### 3. Xem Delete như một loại Workload
+
+[ANALYSIS] Delete cũng tạo ra workload cho storage.
+
+Tombstone ảnh hưởng đến:
+
+- Read.
+- Compaction.
+- Repair.
+- Garbage collection.
+- Storage usage.
+
+Vì vậy, metric liên quan đến delete nên là một phần của operational dashboard bình thường.
+
+### 4. Migration phải đo lường được
+
+[SOURCE FACT] Dark launch, đo latency và migration từng bước là những phần quan trọng trong nỗ lực ban đầu của Discord. Nguồn cũng mô tả một team engineering nhỏ vận hành hệ thống mà tại thời điểm đó không có DevOps engineer chuyên trách. Source
+
+Bài học rộng hơn là các migration lớn không nên dựa vào những giả định như:
+
+```text
+"The new database should be faster."
+```
+
+Thay vào đó, hãy định nghĩa rõ success nghĩa là gì:
+
+- p95 latency
+- p99 latency
+- error rate
+- data divergence
+- repair duration
+- compaction backlog
+- storage growth
+- failure recovery time
+
+Sau đó đo hệ thống mới dựa trên các tiêu chí đó.
+
+## 12. System Design theo kiểu Interview được đề xuất
+
+[PROPOSED DESIGN]
+
+### Requirements
+
+Hệ thống cần:
+
+- Lưu message trong thời gian dài.
+- Đọc một page có giới hạn của các message quanh channel cursor.
+- Hỗ trợ edit và delete.
+- Chịu được node failure.
+- Scale bằng cách thêm node.
+- Giữ search và analytics bên ngoài primary message store.
+
+### Storage
+
+Sử dụng:
+
+```text
+((channel_id, bucket), message_id)
+```
+
+với descending clustering order.
+
+Chọn bucket duration dựa trên mức tăng trưởng được đo của các channel lớn nhất thay vì dùng một giá trị cố định cho mọi hệ thống.
+
+Duy trì metadata cho các bucket được biết là rỗng và repair queue cho các data mismatch.
+
+### Write Path
+
+Write flow có thể là:
+
+```text
+Client
+  │
+  ▼
+Message API
+  │
+  ├── Authenticate
+  ├── Validate
+  ├── Generate message ID
+  ├── Write message
+  └── Return result
+```
+
+Write nên bao gồm idempotency key hoặc operation ID để retry không tạo ra một logical operation thứ hai.
+
+Đối với edit và delete, gắn một version hoặc event timestamp rõ ràng.
+
+Khi đọc, validate các field bắt buộc để một row ghi chưa đầy đủ hoặc bị lỗi không bị trả về một cách im lặng như một message hợp lệ.
+
+### Read Path
+
+Read flow có thể là:
+
+```text
+Client
+  │
+  ▼
+Message API
+  │
+  ▼
+Calculate bucket candidates
+  │
+  ▼
+Skip known empty buckets
+  │
+  ▼
+Read partition-local ranges
+  │
+  ▼
+Merge by message ID
+  │
+  ▼
+Return requested page
+```
+
+Service nên dừng khi đã có đủ số message hợp lệ.
+
+Nó cũng nên giới hạn số bucket mà một request được phép scan.
+
+Nếu request cần đọc quá nhiều bucket, API nên trả về một retryable error có kiểm soát thay vì thực hiện một unbounded scan.
+
+### Migration Path
+
+Một migration từ Cassandra sang ScyllaDB được đề xuất có thể theo sequence sau:
+
+```text
+1. Keep Cassandra as the compatibility baseline
+             ↓
+2. Shadow-read Scylla
+             ↓
+3. Dual-write with operation IDs
+             ↓
+4. Compare IDs, versions, and required fields
+             ↓
+5. Roll out by channel cohorts
+             ↓
+6. Monitor production behavior
+             ↓
+7. Increase rollout gradually
+             ↓
+8. Keep rollback available
+```
+
+Các metric quan trọng gồm:
+
+- p95 latency.
+- p99 latency.
+- Read divergence.
+- Write divergence.
+- Repair duration.
+- Tombstone density.
+- Compaction backlog.
+- Error rate.
+- Recovery time.
+
+### Capacity
+
+Sử dụng các số liệu lịch sử của Discord làm context, không phải current capacity target.
+
+Với một hệ thống mới, hãy tính capacity dựa trên:
+
+- Row-size percentile thực tế.
+- Peak message rate.
+- Phân bố message giữa các channel.
+- Replication factor.
+- Repair bandwidth.
+- Compaction requirement.
+- Failure headroom.
+- Storage growth.
+
+Bất kỳ con số nào không được trích trực tiếp từ source nên được xem là assumption và phải được validate bằng measurement.
+
+## Nguồn gốc
+
+Công ty: Discord. Tên bài viết: “How Discord Stores Billions of Messages.” URL: https://discord.com/blog/how-discord-stores-billions-of-messages.
+
+Thông tin sử dụng từ source: mục tiêu lưu trữ message, giới hạn của MongoDB, yêu cầu và data model của Cassandra, time bucket, dark launch, eventual-consistency behavior, tombstone, các quan sát về performance, cấu hình cluster trong lịch sử và ScyllaDB như một khả năng trong tương lai thay vì một migration đã hoàn tất.
+
+Công ty: Discord. Tên bài viết: “Why Discord is switching from Redis to relational databases and what’s next.” URL: https://discord.com/blog/why-discord-is-switching-from-redis-to-relational-databases-and-whats-next.
+
+Thông tin sử dụng từ source: chỉ để phân biệt phạm vi rằng bài viết này nói về Redis và relational database, không phải migration từ Cassandra sang ScyllaDB.
