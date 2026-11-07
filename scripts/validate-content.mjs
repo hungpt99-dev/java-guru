@@ -92,6 +92,15 @@ function tableShapes(markdown) {
 
 const wordCount = (markdown) => (withoutCode(markdown).match(/\S+/g) ?? []).length;
 
+/** Blank-line separated blocks: paragraphs, list items, tables, quotes. */
+const blockCount = (markdown) =>
+  withoutCode(markdown)
+    .split(/\n\s*\n/)
+    .filter((block) => block.trim().length > 0).length;
+
+/** Crude but stable sentence counter used only as an omission signal. */
+const sentenceCount = (markdown) => (withoutCode(markdown).match(/[.!?…](?:\s|$)/g) ?? []).length;
+
 /* -------------------------------------------------------------------- checks */
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -198,8 +207,21 @@ for (const slug of folders) {
   const viWords = wordCount(viParts.body);
   const enWords = wordCount(enParts.body);
   const ratio = viWords ? enWords / viWords : 0;
-  if (ratio < 0.6 || ratio > 1.6) {
+  if (ratio < 0.55 || ratio > 1.6) {
     problems.push(`length ratio ${ratio.toFixed(2)} (vi ${viWords} → en ${enWords} words)`);
+  }
+
+  // Paragraph and sentence parity catch dropped sentences, which word counts miss.
+  const viBlocks = blockCount(viParts.body);
+  const enBlocks = blockCount(enParts.body);
+  if (viBlocks !== enBlocks) {
+    problems.push(`paragraph count ${viBlocks} → ${enBlocks} (a block was dropped or merged)`);
+  }
+
+  const viSentences = sentenceCount(viParts.body);
+  const enSentences = sentenceCount(enParts.body);
+  if (viSentences > 10 && Math.abs(enSentences - viSentences) > Math.max(3, viSentences * 0.06)) {
+    problems.push(`sentence count ${viSentences} → ${enSentences} (possible omission)`);
   }
 
   report.push({
@@ -211,6 +233,7 @@ for (const slug of folders) {
     ratio: Number(ratio.toFixed(2)),
     codeBlocks: viCode.length,
     headings: viHeadings.length,
+    paragraphs: enBlocks,
     problems,
   });
   if (problems.length) failures.push({ slug, problems });

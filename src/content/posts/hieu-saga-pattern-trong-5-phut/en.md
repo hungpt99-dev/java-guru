@@ -68,7 +68,7 @@ Instead of a **traditional transaction** (roll everything back if one step fails
 
 ## **3. Two ways to implement Saga Pattern**
 
-### **3.1 Event-Driven Saga**
+### **3.1 Event-Driven Saga (event-based)**
 
 * Each step **publishes a message (event)** when it completes or fails
 * The next step **listens for the event** to decide whether to proceed or compensate
