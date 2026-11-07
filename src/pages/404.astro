@@ -1,28 +1,45 @@
 ---
 import BaseLayout from "@/layouts/BaseLayout.astro";
 import { ArrowLeft, Compass } from "@lucide/astro";
+import { DEFAULT_LOCALE } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+const t = useTranslations(DEFAULT_LOCALE);
+const tvi = useTranslations("vi");
 ---
 
-<BaseLayout title="Not found" description="That page does not exist." noindex>
+<BaseLayout
+  title={t("notfound.heading")}
+  description={t("notfound.body")}
+  locale={DEFAULT_LOCALE}
+  noindex
+  route="/404"
+>
   <section class="shell flex min-h-[60vh] flex-col justify-center py-20">
-    <p class="text-primary/80 font-mono text-[0.7rem] tracking-[0.18em] uppercase">Error 404</p>
-    <h1 class="display-xl mt-4 max-w-[20ch]">
-      Dead link.<br /><span class="text-muted">Wrong terminal.</span>
+    <p class="text-primary/80 font-mono text-[0.7rem] tracking-[0.18em] uppercase">
+      {t("notfound.code")}
+    </p>
+    <h1 class="display-xl mt-4 max-w-[22ch]">
+      404<span class="text-accent">.</span><br />
+      <span class="text-muted">{t("notfound.heading")}</span>
     </h1>
-    <p class="text-muted mt-5 max-w-[36rem] text-[0.95rem] leading-relaxed">
-      The URL you followed does not exist — it may have moved during the migration from Viblo. The
-      journal, the topic index and full-text search are all still here.
+    <p class="text-muted mt-5 max-w-[36rem] text-[0.95rem] leading-relaxed">{t("notfound.body")}</p>
+    <p class="text-subtle mt-2 max-w-[36rem] text-[0.9rem] leading-relaxed" lang="vi">
+      {tvi("notfound.body")}
     </p>
     <div class="mt-8 flex flex-wrap gap-2.5">
-      <a href="/posts" class="btn btn--primary">
+      <a href="/en/posts/" class="btn btn--primary">
         <ArrowLeft size={13} stroke-width={2} />
-        Back to the journal
+        {t("notfound.back")}
       </a>
-      <a href="/categories" class="btn">
+      <a href="/vi/posts/" class="btn">
+        <ArrowLeft size={13} stroke-width={2} />
+        {tvi("notfound.back")}
+      </a>
+      <a href="/en/categories/" class="btn btn--ghost">
         <Compass size={13} stroke-width={2} />
-        Browse topics
+        {t("notfound.topics")}
       </a>
-      <button type="button" class="btn btn--ghost" data-search-open>Search instead</button>
     </div>
   </section>
 </BaseLayout>

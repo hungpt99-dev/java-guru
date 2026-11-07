@@ -2,20 +2,24 @@
 import { ArrowLeft, ArrowRight } from "@lucide/astro";
 import type { Post } from "@/utils/posts";
 import { postHref } from "@/utils/posts";
+import { type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
 
 export interface Props {
   newer?: Post;
   older?: Post;
+  locale: Locale;
 }
 
-const { newer, older } = Astro.props;
+const { newer, older, locale } = Astro.props;
+const t = useTranslations(locale);
 ---
 
 {
   (newer || older) && (
     <nav
       class="border-line mt-14 grid gap-3 border-t pt-8 sm:grid-cols-2"
-      aria-label="More articles"
+      aria-label={t("article.moreArticles")}
     >
       {older ? (
         <a
@@ -23,9 +27,12 @@ const { newer, older } = Astro.props;
           class="panel group hover:border-primary/50 flex flex-col gap-2 p-4 transition-colors"
         >
           <span class="label-mono flex items-center gap-1.5">
-            <ArrowLeft size={11} stroke-width={2} /> Older
+            <ArrowLeft size={11} stroke-width={2} /> {t("article.older")}
           </span>
-          <span class="font-display group-hover:text-primary text-[0.98rem] leading-snug font-semibold transition-colors">
+          <span
+            class="font-display group-hover:text-primary text-[0.98rem] leading-snug font-semibold transition-colors"
+            lang={older.data.locale}
+          >
             {older.data.title}
           </span>
         </a>
@@ -38,9 +45,12 @@ const { newer, older } = Astro.props;
           class="panel group hover:border-primary/50 flex flex-col items-end gap-2 p-4 text-right transition-colors sm:col-start-2"
         >
           <span class="label-mono flex items-center gap-1.5">
-            Newer <ArrowRight size={11} stroke-width={2} />
+            {t("article.newer")} <ArrowRight size={11} stroke-width={2} />
           </span>
-          <span class="font-display group-hover:text-primary text-[0.98rem] leading-snug font-semibold transition-colors">
+          <span
+            class="font-display group-hover:text-primary text-[0.98rem] leading-snug font-semibold transition-colors"
+            lang={newer.data.locale}
+          >
             {newer.data.title}
           </span>
         </a>

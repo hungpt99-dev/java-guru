@@ -1,0 +1,9 @@
+{
+  "title": "Java Threads and Concurrency: From CPU and Thread Pools to Virtual Threads",
+  "description": "Some requests need CPU to parse JSON, hash or compress data. Some are waiting on a database. Some are waiting on an external HTTP API that answers a few hundred milliseconds later.",
+  "flags": [
+    "Fenced ```text diagram blocks were kept byte-identical as required, so Vietnamese labels inside them (e.g. 'chờ database', 'giới hạn bởi số core', 'task chạy trên main') remain in Vietnamese.",
+    "Vietnamese thousands separators rendered in English form in prose (10.000 -> 10,000; 100.000 -> 100,000).",
+    "§9.1 'một cái bẫy' rendered as 'a trap' (idiomatic, same meaning)."
+  ]
+}

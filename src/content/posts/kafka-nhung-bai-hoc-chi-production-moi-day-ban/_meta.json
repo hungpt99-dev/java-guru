@@ -1,0 +1,9 @@
+{
+  "title": "Kafka: The Lessons Only Production Teaches You",
+  "description": "No Kafka tutorial prepares you for the feeling of being woken up at 2 a.m. because consumer lag is rising uncontrollably. You open Grafana and see the offset standing still like a bronze statue.",
+  "flags": [
+    "§9: 'Rule của ngón tay cái' is a literal rendering of 'rule of thumb' in the source; translated as 'Rule of thumb'",
+    "§9 heading 'Cấu hình không chỉ là default values' rendered as 'Configuration is more than default values'",
+    "§8 'thùng rác' rendered as 'trash can' (kept throughout for consistency with the heading)"
+  ]
+}

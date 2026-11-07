@@ -1,13 +1,10 @@
 ---
 export interface Props {
-  label?: string;
-  note?: string;
+  label: string;
+  note: string;
 }
 
-const {
-  label = "placeholder",
-  note = "Not documented yet — this section will be filled in from the actual setup, not guessed.",
-} = Astro.props;
+const { label, note } = Astro.props;
 ---
 
 <div class="border-line-strong/70 bg-sunken/30 rounded-lg border border-dashed p-4">

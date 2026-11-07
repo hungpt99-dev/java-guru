@@ -1,0 +1,8 @@
+{
+  "title": "GraalVM – The Future of Java in the Cloud-native Era",
+  "description": "For many years, the Java Virtual Machine (JVM) has been a reliable foundation for enterprise applications, from banking systems to e-commerce platforms.",
+  "flags": [
+    "§4.2 heading 'Đa ngôn ngữ (Polyglot)' rendered as 'Polyglot (multi-language)' to keep both the Vietnamese term and the English one.",
+    "Comparison-table separator line and column/row shape preserved; cell padding adjusted to the translated text width."
+  ]
+}

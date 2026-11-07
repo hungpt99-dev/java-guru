@@ -1,25 +1,49 @@
 ---
 import type { MarkdownHeading } from "astro";
+import { ChevronDown } from "@lucide/astro";
+import { type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
 
 export interface Props {
   headings: MarkdownHeading[];
+  locale: Locale;
+  variant?: "desktop" | "mobile";
 }
 
-const { headings } = Astro.props;
-// Drop the deepest level to keep the rail readable on a 68ch article.
+const { headings, locale, variant = "desktop" } = Astro.props;
+const t = useTranslations(locale);
+// Two levels keep the rail readable next to a 68ch article.
 const items = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
 ---
 
 {
-  items.length > 2 && (
-    <nav class="toc" aria-label="On this page" data-toc>
-      <p class="label-mono mb-2.5">On this page</p>
+  items.length > 2 && variant === "desktop" && (
+    <nav class="toc" aria-label={t("article.toc")} data-toc>
+      <p class="label-mono mb-2.5">{t("article.toc")}</p>
       {items.map((h) => (
         <a href={`#${h.slug}`} data-depth={h.depth} data-toc-link={h.slug}>
           {h.text}
         </a>
       ))}
     </nav>
+  )
+}
+
+{
+  items.length > 2 && variant === "mobile" && (
+    <details class="border-line mb-8 rounded-lg border bg-[color-mix(in_oklab,var(--bg-elev)_60%,transparent)] lg:hidden">
+      <summary class="text-muted flex cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 font-mono text-[0.7rem]">
+        <span class="label-mono">{t("article.toc")}</span>
+        <ChevronDown size={14} stroke-width={2} class="text-subtle" />
+      </summary>
+      <nav class="toc px-4 pb-4" aria-label={t("article.toc")}>
+        {items.map((h) => (
+          <a href={`#${h.slug}`} data-depth={h.depth}>
+            {h.text}
+          </a>
+        ))}
+      </nav>
+    </details>
   )
 }
 

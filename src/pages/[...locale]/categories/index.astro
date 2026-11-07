@@ -1,0 +1,100 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import { ArrowRight } from "@lucide/astro";
+import { getPosts, getCategories, getTags } from "@/utils/posts";
+import { formatDate, localePath } from "@/utils/i18n";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+
+const posts = await getPosts(locale);
+const categories = getCategories(posts, locale);
+const tags = getTags(posts);
+
+/** Most frequent tags inside one category — no invented taxonomy. */
+function leadingTags(categoryName: string, limit = 4): string[] {
+  const counts = new Map<string, number>();
+  for (const post of posts.filter((p) => p.data.category === categoryName)) {
+    for (const tag of post.data.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([name]) => name);
+}
+
+const latestIn = (categoryName: string) => posts.filter((p) => p.data.category === categoryName)[0];
+---
+
+<BaseLayout
+  title={t("categories.title")}
+  description={t("categories.lede")}
+  locale={locale}
+  route="/categories/"
+>
+  <section class="shell pt-12 pb-10 md:pt-16">
+    <p class="eyebrow">{t("categories.title")}</p>
+    <h1 class="display-lg mt-4 max-w-[24ch]">
+      {categories.length}
+      {locale === "vi" ? " mạch nội dung," : " threads,"}<br />
+      <span class="text-muted">
+        {locale === "vi" ? "một nghề kỹ thuật." : "one engineering practice."}
+      </span>
+    </h1>
+    <p class="text-muted mt-4 max-w-[40rem] text-[0.95rem] leading-relaxed">
+      {t("categories.lede")}
+    </p>
+  </section>
+
+  <section class="shell pb-16">
+    <div class="grid gap-4 sm:grid-cols-2">
+      {
+        categories.map((category) => (
+          <article class:list={["panel relative overflow-hidden p-5", `cat-${category.accent}`]}>
+            <div class="absolute inset-x-0 top-0 h-0.5 bg-[var(--chip-color)] opacity-60" />
+            <div class="flex items-baseline justify-between gap-3">
+              <h2 class="font-display text-xl font-semibold tracking-[-0.02em]">
+                <a
+                  href={localePath(locale, `/categories/${category.slug}/`)}
+                  class="hover:text-primary after:absolute after:inset-0"
+                >
+                  {category.label}
+                </a>
+              </h2>
+              <span class="text-subtle font-mono text-[0.62rem]">
+                {String(category.count).padStart(2, "0")}
+              </span>
+            </div>
+            <p class="text-muted mt-2 text-[0.88rem] leading-relaxed">{category.blurb}</p>
+            <div class="text-subtle mt-4 flex flex-wrap items-center gap-2 font-mono text-[0.62rem]">
+              {leadingTags(category.name).map((tag) => (
+                <span>#{tag}</span>
+              ))}
+            </div>
+            <p class="border-line text-subtle mt-3 border-t pt-3 font-mono text-[0.62rem]">
+              {latestIn(category.name)
+                ? t("categories.latest", {
+                    date: formatDate(latestIn(category.name)!.data.pubDate, locale),
+                  })
+                : t("categories.empty")}
+            </p>
+          </article>
+        ))
+      }
+    </div>
+
+    <p class="text-subtle mt-10 font-mono text-[0.7rem]">
+      {locale === "vi" ? "Muốn xem theo từng thẻ?" : "Looking for a single tag instead?"}
+      <a href={localePath(locale, "/tags/")} class="link ml-1">
+        {t("categories.allTags", { count: tags.length })}
+      </a>
+      <ArrowRight size={11} class="ml-1 inline" />
+    </p>
+  </section>
+</BaseLayout>

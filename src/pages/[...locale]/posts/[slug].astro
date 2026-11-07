@@ -1,0 +1,38 @@
+---
+import type { GetStaticPaths } from "astro";
+import { render } from "astro:content";
+import PostLayout from "@/layouts/PostLayout.astro";
+import { getAllEntries, buildTranslationIndex, getPosts, type Post } from "@/utils/posts";
+import type { Locale } from "@/i18n/config";
+
+export const getStaticPaths = (async () => {
+  const entries = await getAllEntries();
+  return entries.map((post) => ({
+    params: { locale: post.data.locale, slug: post.data.slug },
+    props: { post },
+  }));
+}) satisfies GetStaticPaths;
+
+const { post } = Astro.props as { post: Post };
+const locale = post.data.locale as Locale;
+
+// KaTeX styles are only pulled in when an article actually uses maths.
+const hasMath = /\$\$[\s\S]+?\$\$|\$[^$\n]+\$/.test(post.body ?? "");
+if (hasMath) await import("katex/dist/katex.min.css");
+
+const all = await getAllEntries();
+const index = buildTranslationIndex(all);
+const translation = index.get(post.data.translationKey)?.[locale === "en" ? "vi" : "en"];
+const localePosts = await getPosts(locale);
+const { Content, headings } = await render(post);
+---
+
+<PostLayout
+  post={post}
+  headings={headings}
+  locale={locale}
+  localePosts={localePosts}
+  translation={translation}
+>
+  <Content />
+</PostLayout>

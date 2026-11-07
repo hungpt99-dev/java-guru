@@ -1,7 +1,7 @@
 ---
 import { Image } from "astro:assets";
 import type { MarkdownHeading } from "astro";
-import { ArrowUpRight, ListOrdered, ExternalLink } from "@lucide/astro";
+import { ArrowUpRight, ListOrdered } from "@lucide/astro";
 import BaseLayout from "@/layouts/BaseLayout.astro";
 import TableOfContents from "@/components/article/TableOfContents.astro";
 import ShareBar from "@/components/article/ShareBar.astro";
@@ -10,46 +10,56 @@ import PostCard from "@/components/blog/PostCard.astro";
 import SectionHeader from "@/components/common/SectionHeader.astro";
 import type { Post } from "@/utils/posts";
 import { postHref, postTags, adjacentPosts, relatedPosts } from "@/utils/posts";
-import { categorySlug, formatLongDate, readingLabel, isoDate } from "@/utils/slug";
-import { CATEGORY_ACCENTS, SITE } from "@/config";
+import { categoryByKey, categoryLabel, categoryAccent } from "@/data/categories";
+import { formatLongDate, isoDate, localePath } from "@/utils/i18n";
+import { SITE } from "@/config";
+import { useTranslations } from "@/i18n/ui";
+import { LOCALE_META, otherLocale, type Locale } from "@/i18n/config";
 
 export interface Props {
   post: Post;
   headings: MarkdownHeading[];
-  allPosts: Post[];
+  locale: Locale;
+  localePosts: Post[];
+  /** Sibling translation, when it exists. */
+  translation?: Post;
 }
 
-const { post, headings, allPosts } = Astro.props;
+const { post, headings, locale, localePosts, translation } = Astro.props;
 const { data } = post;
-const accent = CATEGORY_ACCENTS[data.category] ?? "practices";
+const t = useTranslations(locale);
+const accent = categoryAccent(data.category);
+const categorySlug = categoryByKey(data.category)?.slug ?? "";
+const category = categoryLabel(data.category, locale);
 const tags = postTags(post);
 const href = postHref(post);
-const canonical = new URL(href, SITE.url).href;
-const { newer, older } = adjacentPosts(post, allPosts);
-const related = relatedPosts(post, allPosts, 3);
-const coverUrl = data.coverImage ? new URL(data.coverImage.src, SITE.url).href : undefined;
+const canonical = new URL(href, Astro.site ?? SITE.url).href;
+const { newer, older } = adjacentPosts(post, localePosts);
+const related = relatedPosts(post, localePosts, 3);
+const coverUrl = data.coverImage
+  ? new URL(data.coverImage.src, Astro.site ?? SITE.url).href
+  : undefined;
+const route = `/posts/${data.slug}/`;
 
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
   headline: data.title,
   description: data.description,
-  datePublished: data.pubDatetime.toISOString(),
-  ...(data.modDatetime ? { dateModified: data.modDatetime.toISOString() } : {}),
+  datePublished: data.pubDate.toISOString(),
   author: {
     "@type": "Person",
     name: SITE.author.name,
     alternateName: SITE.author.handle,
-    url: SITE.url,
+    url: new URL(SITE.url).href,
   },
-  publisher: { "@type": "Organization", name: SITE.title, url: SITE.url },
+  publisher: { "@type": "Organization", name: SITE.title, url: new URL(SITE.url).href },
   ...(coverUrl ? { image: [coverUrl] } : {}),
   mainEntityOfPage: { "@type": "WebPage", "@id": canonical },
   url: canonical,
-  inLanguage: data.lang,
-  articleSection: data.category,
+  inLanguage: LOCALE_META[locale].htmlLang,
+  articleSection: category,
   ...(data.tags.length ? { keywords: data.tags.join(", ") } : {}),
-  ...(data.sourceUrl ? { isBasedOn: data.sourceUrl } : {}),
   ...(data.readingTime ? { timeRequired: `PT${data.readingTime}M` } : {}),
 };
 ---
@@ -57,14 +67,14 @@ const jsonLd = {
 <BaseLayout
   title={data.title}
   description={data.description}
+  locale={locale}
   image={coverUrl}
   type="article"
-  lang={data.lang}
-  publishedTime={data.pubDatetime}
-  modifiedTime={data.modDatetime ?? undefined}
-  section={data.category}
+  publishedTime={data.pubDate}
+  section={category}
   tags={data.tags}
   jsonLd={jsonLd}
+  route={route}
 >
   <div class="progress" data-progress aria-hidden="true"></div>
 
@@ -74,38 +84,55 @@ const jsonLd = {
         class="text-subtle mb-8 flex flex-wrap items-center gap-2 font-mono text-[0.65rem]"
         aria-label="Breadcrumb"
       >
-        <a href="/" class="hover:text-primary">home</a>
+        <a href={localePath(locale, "/")} class="hover:text-primary">{t("nav.journal")}</a>
         <span aria-hidden="true">/</span>
-        <a href="/posts" class="hover:text-primary">journal</a>
+        <a href={localePath(locale, "/posts/")} class="hover:text-primary">{t("posts.title")}</a>
         <span aria-hidden="true">/</span>
         <a
-          href={`/categories/${categorySlug(data.category)}`}
+          href={localePath(locale, `/categories/${categorySlug}/`)}
           class="text-primary/80 hover:text-primary"
         >
-          {data.category.toLowerCase()}
+          {category.toLowerCase()}
         </a>
       </nav>
 
       <header>
         <div class="sr-only" aria-hidden="true">
-          <span data-pagefind-filter="category">{data.category}</span>
-          <span data-pagefind-meta="category">{data.category}</span>
-          <span data-pagefind-meta="date">{isoDate(data.pubDatetime)}</span>
-          <span data-pagefind-meta="lang">{data.lang}</span>
+          <span data-pagefind-filter="locale">{locale}</span>
+          <span data-pagefind-filter="category">{category}</span>
+          <span data-pagefind-meta="category">{category}</span>
+          <span data-pagefind-meta="date">{isoDate(data.pubDate)}</span>
+          <span data-pagefind-meta="lang">{locale}</span>
         </div>
+
         <div class="flex flex-wrap items-center gap-2">
           <a
-            href={`/categories/${categorySlug(data.category)}`}
+            href={localePath(locale, `/categories/${categorySlug}/`)}
             class:list={["chip", `cat-${accent}`]}
           >
-            {data.category}
+            {category}
           </a>
           {data.series && <span class="chip chip--neutral">{data.series}</span>}
+          {
+            translation && (
+              <a
+                href={postHref(translation)}
+                class="chip chip--neutral chip--sm"
+                hreflang={translation.data.locale}
+                aria-label={t("nav.switchTo", {
+                  language: LOCALE_META[translation.data.locale].label,
+                })}
+              >
+                {LOCALE_META[translation.data.locale].short}
+                <ArrowUpRight size={10} stroke-width={2} />
+              </a>
+            )
+          }
         </div>
 
         <h1
           class="font-display mt-5 text-[clamp(1.85rem,4.6vw,2.9rem)] leading-[1.08] font-bold tracking-[-0.03em] text-balance"
-          lang={data.lang}
+          lang={locale}
           data-pagefind-meta="title"
         >
           {data.title}
@@ -114,31 +141,13 @@ const jsonLd = {
         <div
           class="text-subtle mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-[0.68rem]"
         >
-          <time datetime={isoDate(data.pubDatetime)} class="text-muted"
-            >{formatLongDate(data.pubDatetime)}</time
-          >
+          <time datetime={isoDate(data.pubDate)} class="text-muted">
+            {formatLongDate(data.pubDate, locale)}
+          </time>
           <span aria-hidden="true" class="opacity-40">·</span>
-          <span>{readingLabel(data.readingTime ?? 5)}</span>
+          <span>{t("common.readingTime", { minutes: data.readingTime ?? 5 })}</span>
           <span aria-hidden="true" class="opacity-40">·</span>
           <span>{SITE.author.name}</span>
-          {
-            data.sourceUrl && (
-              <>
-                <span aria-hidden="true" class="opacity-40">
-                  ·
-                </span>
-                <a
-                  href={data.sourceUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="text-subtle hover:text-primary inline-flex items-center gap-1 transition-colors"
-                >
-                  originally on Viblo
-                  <ArrowUpRight size={11} stroke-width={2} />
-                </a>
-              </>
-            )
-          }
         </div>
       </header>
 
@@ -160,16 +169,22 @@ const jsonLd = {
 
       <div class="mt-12 grid gap-12 lg:grid-cols-[minmax(0,1fr)_15rem] lg:gap-14">
         <div class="min-w-0">
-          <div class="prose-jg" data-article-body lang={data.lang} data-pagefind-body>
+          <TableOfContents headings={headings} locale={locale} variant="mobile" />
+
+          <div class="prose-jg" data-article-body lang={locale} data-pagefind-body>
+            <span class="sr-only">{data.description}</span>
             <slot />
           </div>
 
           {
             tags.length > 0 && (
               <div class="border-line mt-10 flex flex-wrap items-center gap-2 border-t pt-6">
-                <span class="label-mono mr-1">Tags</span>
+                <span class="label-mono mr-1">{t("article.tags")}</span>
                 {tags.map((tag) => (
-                  <a href={`/tags/${tag.slug}`} class="chip chip--neutral chip--sm">
+                  <a
+                    href={localePath(locale, `/tags/${tag.slug}/`)}
+                    class="chip chip--neutral chip--sm"
+                  >
                     #{tag.name}
                   </a>
                 ))}
@@ -178,40 +193,41 @@ const jsonLd = {
           }
 
           <div class="mt-6 flex flex-wrap items-center justify-between gap-4">
-            <ShareBar title={data.title} url={canonical} />
+            <ShareBar title={data.title} url={canonical} locale={locale} />
             <button
               type="button"
               class="btn !min-h-8 !px-2.5 !text-[0.65rem]"
               data-line-toggle
               aria-pressed="false"
+              data-label-on={t("article.lineNumbers")}
+              data-label-off={t("article.hideNumbers")}
             >
               <ListOrdered size={12} stroke-width={2} />
-              <span data-line-label>line numbers</span>
+              <span data-line-label>{t("article.lineNumbers")}</span>
             </button>
           </div>
 
           {
-            data.sourceUrl && (
-              <p class="border-line bg-sunken/50 text-subtle mt-8 flex items-start gap-2 rounded-lg border p-3.5 font-mono text-[0.65rem] leading-relaxed">
-                <ExternalLink size={13} stroke-width={1.75} class="mt-0.5 shrink-0" />
+            translation && (
+              <p class="border-line bg-sunken/40 text-subtle mt-8 flex flex-wrap items-center gap-2 rounded-lg border p-3.5 font-mono text-[0.65rem]">
                 <span>
-                  This text is the original Vietnamese article, migrated unchanged from
-                  <a href={data.sourceUrl} target="_blank" rel="noopener noreferrer" class="link">
-                    {" "}
-                    the author's Viblo profile
-                  </a>
-                  .
+                  {t("article.translationNote", {
+                    language: LOCALE_META[otherLocale(locale)].label,
+                  })}
                 </span>
+                <a href={postHref(translation)} class="link" hreflang={translation.data.locale}>
+                  {LOCALE_META[otherLocale(locale)].label} →
+                </a>
               </p>
             )
           }
 
-          <PrevNext newer={newer} older={older} />
+          <PrevNext newer={newer} older={older} locale={locale} />
         </div>
 
         <aside class="hidden lg:block">
           <div class="sticky top-24 max-h-[calc(100vh-8rem)] overflow-y-auto pb-8">
-            <TableOfContents headings={headings} />
+            <TableOfContents headings={headings} locale={locale} />
           </div>
         </aside>
       </div>
@@ -222,10 +238,10 @@ const jsonLd = {
         <section class="border-line mt-20 border-t pt-10">
           <SectionHeader
             index="—"
-            label="Keep reading"
-            title="Related notes"
-            href="/posts"
-            linkLabel="all"
+            label={t("article.keepReading")}
+            title={t("article.related")}
+            href={localePath(locale, "/posts/")}
+            linkLabel={t("common.all")}
           />
           <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {related.map((entry) => (
@@ -243,7 +259,6 @@ const jsonLd = {
   const bar = document.querySelector<HTMLElement>("[data-progress]");
   const body = document.querySelector<HTMLElement>("[data-article-body]");
 
-  // --- reading progress ------------------------------------------------------
   if (article && bar && body) {
     const update = () => {
       const start = body.offsetTop - 120;
@@ -256,19 +271,19 @@ const jsonLd = {
     window.addEventListener("resize", update);
   }
 
-  // --- copy code -------------------------------------------------------------
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
     button.addEventListener("click", async () => {
       const figure = button.closest("figure");
       const code = figure?.querySelector("pre code");
       if (!code) return;
+      const original = button.textContent ?? "copy";
       try {
         await navigator.clipboard.writeText(code.textContent ?? "");
         button.dataset.copied = "true";
         button.textContent = "copied";
         setTimeout(() => {
           button.dataset.copied = "false";
-          button.textContent = "copy";
+          button.textContent = original;
         }, 1600);
       } catch {
         button.textContent = "ctrl+c";
@@ -276,7 +291,6 @@ const jsonLd = {
     });
   }
 
-  // --- line numbers ----------------------------------------------------------
   const lineToggle = document.querySelector<HTMLButtonElement>("[data-line-toggle]");
   lineToggle?.addEventListener("click", () => {
     if (!article) return;
@@ -284,10 +298,10 @@ const jsonLd = {
     article.dataset.lineNumbers = on ? "off" : "on";
     lineToggle.setAttribute("aria-pressed", String(!on));
     const label = lineToggle.querySelector("[data-line-label]");
-    if (label) label.textContent = on ? "line numbers" : "hide numbers";
+    const next = on ? lineToggle.dataset.labelOn : lineToggle.dataset.labelOff;
+    if (label && next) label.textContent = next;
   });
 
-  // --- mermaid (loaded only when a diagram is actually present) --------------
   const diagrams = [...document.querySelectorAll<HTMLElement>("[data-mermaid]")];
   if (diagrams.length) {
     import("mermaid")

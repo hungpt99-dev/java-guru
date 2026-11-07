@@ -10,9 +10,17 @@ import { SITE } from "./src/config";
 // https://astro.build/config
 export default defineConfig({
   site: SITE.url,
+  // Every route is generated under /en/… and /vi/…; the bare root is a small
+  // preference-aware redirect page.
+  trailingSlash: "ignore",
   integrations: [
     sitemap({
       filter: (page) => !page.includes("/search"),
+      // Emits <xhtml:link rel="alternate" hreflang> pairs for both locales.
+      i18n: {
+        defaultLocale: "en",
+        locales: { en: "en-US", vi: "vi-VN" },
+      },
       changefreq: "weekly",
       lastmod: new Date(),
     }),

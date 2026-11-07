@@ -1,12 +1,14 @@
 # Java Guru
 
-A personal engineering journal — backend engineering, distributed systems, the
-Java and JVM ecosystem, security and AI — built as a static Astro site.
+A bilingual personal engineering journal — backend engineering, system design,
+distributed systems, the Java and JVM ecosystem, security and AI.
 
-**26 articles**, written in Vietnamese, migrated **verbatim** from
-[@lowkey_dev on Viblo](https://viblo.asia/u/lowkey_dev). Every body is verified
-byte-identical to the published original — see
-[`migration-report/REPORT.md`](migration-report/REPORT.md).
+Every article is published in **Vietnamese and English**. Both versions share one
+slug and one `translationKey`, so switching language keeps the reader on the same
+article.
+
+- Live: <https://java-guru.pages.dev>
+- Author: Hưng Phạm ([@lowkey_dev](https://github.com/hungpt99-dev))
 
 ---
 
@@ -14,140 +16,160 @@ byte-identical to the published original — see
 
 | Concern      | Choice                                                            |
 | ------------ | ----------------------------------------------------------------- |
-| Framework    | [Astro](https://astro.build) 5 (static output)                    |
+| Framework    | [Astro](https://astro.build) 5, fully static                      |
 | Language     | TypeScript (strict)                                               |
 | Styling      | Tailwind CSS 4 + a hand-written prose layer                       |
-| Content      | Astro Content Collections (Markdown)                              |
-| Highlighting | [Shiki](https://shiki.style) — five themes, one payload           |
-| Search       | [Pagefind](https://pagefind.app) (static index)                   |
+| Content      | Content Collections — `src/content/posts/<slug>/{vi,en}.md`       |
+| Highlighting | [Shiki](https://shiki.style) — five themes in one payload         |
+| Search       | [Pagefind](https://pagefind.app) — one index, filtered by locale  |
 | Icons        | [Lucide](https://lucide.dev) (`@lucide/astro`)                    |
 | Fonts        | Self-hosted: Bricolage Grotesque, Inter, JetBrains Mono, Fraunces |
-| Deployment   | Docker → Caddy (non-root, read-only rootfs)                       |
+| Deployment   | Cloudflare Pages (primary) · Docker + Caddy (alternative)         |
 
-No database, no runtime server, no client framework. The JS on an article page is
-a few kilobytes of progressive enhancement (copy buttons, TOC scrollspy, theme
-picker, search dialog, reading progress).
+No database, no runtime server, no client framework.
 
 ## Quick start
 
 ```bash
 pnpm install
-pnpm dev            # http://localhost:4321
+pnpm dev            # http://localhost:4321 → redirects to /en/
 pnpm build          # static build + Pagefind index
-pnpm preview        # serve the production build
+pnpm preview        # preview the production build
 ```
 
-Node 20.19+ and pnpm 10 are expected (`corepack enable` is enough).
+Node 20.19+ and pnpm 10 (`corepack enable` is enough).
 
 ### Scripts
 
-| Script                      | What it does                                                   |
-| --------------------------- | -------------------------------------------------------------- |
-| `pnpm dev`                  | Dev server with HMR                                            |
-| `pnpm build`                | `astro build` then `pagefind --site dist`                      |
-| `pnpm preview`              | Preview the built site                                         |
-| `pnpm check`                | `astro check` (types + Astro diagnostics)                      |
-| `pnpm lint` / `pnpm format` | ESLint / Prettier                                              |
-| `pnpm migrate`              | Re-fetch from Viblo, rebuild Markdown, re-validate             |
-| `pnpm migrate:build`        | Rebuild Markdown from the stored snapshot + validate (offline) |
-| `pnpm fonts`                | Re-download the self-hosted font subsets                       |
-| `pnpm assets`               | Regenerate avatar, favicons and the default OG image           |
+| Script                       | What it does                                                             |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `pnpm dev`                   | Dev server with HMR                                                      |
+| `pnpm build`                 | `astro build`, then Pagefind (`--force-language en`, filtered by locale) |
+| `pnpm preview`               | Serve the built site                                                     |
+| `pnpm check`                 | `astro check` — types and Astro diagnostics                              |
+| `pnpm lint` / `pnpm format`  | ESLint / Prettier                                                        |
+| `pnpm validate`              | Bilingual content gate: locale parity, code blocks, links, structure     |
+| `pnpm check:disclosures`     | Fails if the build exposes content-source metadata                       |
+| `pnpm fonts` / `pnpm assets` | Regenerate fonts / avatar, favicons, OG image                            |
 
 ## Project structure
 
 ```text
 java-guru/
 ├── deploy/
-│   ├── Caddyfile                 # container web server config
+│   ├── Caddyfile                 # container web server + legacy redirects
 │   └── nginx.conf                # alternative host config (example)
-├── docs/deployment.md            # Docker, TLS, reverse proxy, rollback
-├── migration-report/             # manifest.json, validation.json, images.json, REPORT.md
+├── docs/deployment.md            # Cloudflare Pages, Docker, TLS, rollback
 ├── public/
+│   ├── _redirects                # legacy URL → /en/… (Cloudflare Pages)
 │   ├── fonts/                    # self-hosted woff2 (latin + vietnamese)
-│   ├── images/articles/<slug>/   # inline article figures
-│   ├── favicon/, favicon.svg, site.webmanifest
+│   ├── images/articles/<slug>/   # inline figures
+│   └── favicon/, favicon.svg, site.webmanifest
 ├── scripts/
-│   ├── fonts.mjs                 # font downloader
-│   ├── prepare-assets.mjs        # avatar, favicons, OG image
-│   └── migration/
-│       ├── fetch.mjs             # Viblo public API → source/ snapshot
-│       ├── migrate.mjs           # snapshot → src/content/blog/*.md + images
-│       ├── validate.mjs          # integrity proof → migration-report/
-│       └── source/               # verbatim API payloads (audit trail)
+│   ├── validate-content.mjs      # bilingual QA
+│   ├── check-disclosures.mjs     # publication hygiene
+│   ├── fonts.mjs
+│   └── prepare-assets.mjs
 ├── src/
-│   ├── assets/articles/<slug>/   # cover images (optimised at build)
 │   ├── components/{layout,blog,article,navigation,common}/
-│   ├── content/blog/*.md         # one file per article
-│   ├── data/projects.ts          # curated, real GitHub metadata
+│   ├── content/posts/<slug>/     # vi.md · en.md · cover.png
+│   ├── data/{categories,projects}.ts
+│   ├── i18n/{config,ui}.ts       # locales + interface copy
 │   ├── layouts/                  # BaseLayout, PostLayout
-│   ├── pages/                    # /, /posts, /posts/[slug], /categories, /tags,
-│   │                             # /archives, /projects, /homelab, /about, /search
-│   ├── styles/                   # global.css (design tokens), fonts.css
-│   ├── utils/                    # posts, slugs/dates, rehype plugins
-│   └── config.ts                 # site identity, navigation, theme list
+│   ├── pages/
+│   │   ├── index.astro           # locale-preference redirect
+│   │   ├── [...locale]/          # every localized route
+│   │   └── robots.txt.ts
+│   ├── styles/                   # global.css (tokens), fonts.css
+│   └── utils/                    # posts, i18n paths/dates, rehype plugins
 ├── astro.config.ts
 ├── Dockerfile / docker-compose.yml / .env.example
 └── README.md
 ```
 
+## URL structure
+
+```text
+/            → sends first-time visitors to /en/, returning ones to their choice
+/en/         /vi/
+/en/posts/   /vi/posts/            (paginated: /posts/2/)
+/en/posts/<slug>/                  same slug in both locales
+/en/categories/  /en/categories/<slug>/
+/en/tags/        /en/tags/<slug>/
+/en/archives/  /en/about/  /en/projects/  /en/homelab/  /en/search/
+/en/rss.xml      /vi/rss.xml
+```
+
+Legacy single-language URLs (`/posts/…`, `/about`, `/rss.xml`, …) 301 to their
+`/en/` equivalents — configured in `public/_redirects` (Cloudflare Pages) and in
+`deploy/Caddyfile` (Docker).
+
 ## Content
 
-### Frontmatter
+### Adding an article
+
+```
+src/content/posts/<slug>/
+├── vi.md        # Vietnamese version
+├── en.md        # English version
+└── cover.png    # optional cover, referenced as ./cover.png
+```
+
+Frontmatter (identical in both files except `title`, `description`, `locale`,
+`readingTime`):
 
 ```yaml
 ---
 title: "Hiểu Saga Pattern trong 5 phút"
-description: "First paragraph of the article, verbatim — used for cards and meta."
-pubDatetime: 2025-09-02T18:59:56+07:00
-modDatetime: null
+description: "Một câu mô tả lấy từ đoạn mở đầu của bài."
+slug: "hieu-saga-pattern-trong-5-phut"
+locale: "vi" # "vi" in vi.md, "en" in en.md
+translationKey: "hieu-saga-pattern-trong-5-phut"
+pubDate: 2025-09-02T18:59:56+07:00
 category: "Microservices"
 tags: ["saga pattern", "System Design"]
-lang: "vi"
 featured: true
 draft: false
 readingTime: 9
-coverImage: "../../assets/articles/<slug>/cover.png"
 series: null
-sourceUrl: "https://viblo.asia/p/…"
-sourceReleasedAt: "2025-09-02T11:59:56.000000Z"
-sourceUpdatedAt: "2026-11-07T05:34:01.000000Z"
-sourceTags: ["saga pattern", "System Design"]
+coverImage: "./cover.png"
 ---
 ```
 
-`category` is assigned from the article's dominant topic (Viblo has no category
-field for personal posts). `tags` and `sourceTags` are the original tag names,
-unchanged — including their original casing and any typos. `modDatetime` is
-deliberately `null`: Viblo re-saved every post in Nov 2026 with `edited_at: null`,
-which is not an author edit; the raw values live in `sourceUpdatedAt`.
+Rules enforced by the schema and the validator:
 
-### Adding or editing an article
+- `slug` must equal the folder name and `translationKey` (it is what the language
+  switcher resolves).
+- `category` must be one of the canonical keys in `src/data/categories.ts`
+  (display labels are localized there).
+- `tags` are shared across both locales.
+- Inline figures live in `public/images/articles/<slug>/` and are referenced by
+  absolute path, e.g. `/images/articles/<slug>/figure-1.png`.
 
-1. Create `src/content/blog/<slug>.md` with the frontmatter above.
-2. Put the cover in `src/assets/articles/<slug>/cover.png` (imported via the schema).
-3. Put inline figures in `public/images/articles/<slug>/` and reference them with
-   an absolute path (`/images/articles/<slug>/figure-1.png`).
-4. Run `pnpm dev` — the collection schema validates on save.
+### Adding a translation
 
-Draft posts: `draft: true` (excluded from build, listings and RSS).
+1. Create `en.md` next to `vi.md` with the same `slug`/`translationKey`,
+   `locale: "en"`, and translated `title`/`description`.
+2. Translate the body only. Code fences, commands, config, identifiers, URLs and
+   image paths stay byte-identical; headings keep their count and levels.
+3. Set `readingTime` for the translation (≈220 words/minute).
+4. Run `pnpm validate`.
 
-### Migration pipeline
+### Content validation
 
-The Viblo articles are reproducible, not hand-copied:
+`pnpm validate` walks every article folder and fails the build when:
 
-```bash
-pnpm migrate         # fetch → build → validate (network)
-pnpm migrate:build   # build → validate from scripts/migration/source (offline)
-```
-
-`validate.mjs` compares each migrated body against the stored API payload after
-mapping local image paths back to their original URLs, and fails on any
-difference in title, body, tags, date, source link or missing image. CI runs it on
-every push.
+- a locale file is missing, empty, or missing required metadata;
+- `slug` / `translationKey` / `category` / `pubDate` / `coverImage` / `tags`
+  disagree between locales;
+- a fenced code block differs (count, language tag, or body);
+- a link target or image path was lost;
+- heading structure or table shape changed;
+- the translation is implausibly short or long (length-ratio sanity check).
 
 ## Design system
 
-Five themes, all driven by CSS custom properties in `src/styles/global.css`:
+Five themes, driven by CSS custom properties in `src/styles/global.css`:
 
 | Theme                 | Mode  | Background | Primary   |
 | --------------------- | ----- | ---------- | --------- |
@@ -157,57 +179,71 @@ Five themes, all driven by CSS custom properties in `src/styles/global.css`:
 | Gruvbox               | dark  | `#282828`  | `#FABD2F` |
 | Daylight              | light | `#FAF9F6`  | `#2B5FD9` |
 
-- The theme is applied by an inline script **before first paint**, so there is no
-  wrong-theme flash; the choice is stored in `localStorage` under `jg-theme`.
-- Section accents come from nine topic hues expressed in OKLCH
-  (`--cat-java`, `--cat-system`, …) whose lightness and chroma adapt per theme, so
-  chips stay legible on every palette.
-- Syntax highlighting is generated by `src/utils/rehype-code.ts`: Shiki renders
-  every code block once for **all five themes** into `--shiki-<theme>` custom
-  properties, and CSS maps the active theme to its own variable. One HTML
-  payload, five correct palettes, no client-side highlighter.
+- The theme is applied by an inline script **before first paint** (no flash) and
+  stored in `localStorage` under `jg-theme`.
+- Topic accents use nine OKLCH hues (`--cat-java`, `--cat-system`, …) whose
+  lightness/chroma adapt per theme, so chips stay legible everywhere.
+- `src/utils/rehype-code.ts` renders each code block once for **all five themes**
+  into `--shiki-<theme>` custom properties; CSS maps the active theme to its own
+  variable — one payload, five correct palettes, no client highlighter.
 
 ### Adding a theme
 
-1. Append an entry to `THEMES` in `src/config.ts`.
-2. Add an `html[data-theme="<id>"]` block in `src/styles/global.css` with the same
+1. Append to `THEMES` in `src/config.ts`.
+2. Add an `html[data-theme="<id>"]` block in `src/styles/global.css` with the full
    token contract (`--bg`, `--fg`, `--primary`, `--cat-l`, `--cat-c`, …).
-3. Add the theme to the Shiki map in `src/utils/rehype-code.ts`.
+3. Add the theme to `THEMES` in `src/utils/rehype-code.ts`.
 4. Add swatches in `src/components/navigation/ThemePicker.astro` and the allowed
-   list in the inline script of `src/layouts/BaseLayout.astro`.
+   list in `src/layouts/BaseLayout.astro`.
+
+## Interface localisation
+
+`src/i18n/ui.ts` holds every string the chrome renders, typed against the English
+dictionary so a missing Vietnamese key fails `pnpm check`. Dates use
+`Intl.DateTimeFormat` with `vi-VN` / `en-GB`; reading time, empty states, search
+labels, pagination and error pages are all localized.
+
+The language switcher preserves the current page: on an article it links to the
+sibling translation (`/vi/posts/<slug>/` ↔ `/en/posts/<slug>/`); elsewhere it
+swaps the locale prefix of the same route.
 
 ## Search
 
-Pagefind indexes **article bodies only** (`data-pagefind-body` on the prose
-container), with `category`, `date` and `lang` metadata. Two entry points share
-one index: the ⌘K / Ctrl-K dialog in the header and `/search?q=…`. Matches are
-highlighted by Pagefind at build time, so no query leaves the browser.
+Pagefind indexes article bodies only (`data-pagefind-body` on the prose
+container). Each page carries a `locale` filter, so the UI can offer:
 
-## SEO
+- **This language** — results in the language you are reading;
+- **All languages** — both editions, clearly separated by URL.
 
-- Canonical URLs, Open Graph and Twitter cards, per-article OG image from the cover.
-- `BlogPosting` JSON-LD (author, dates, `inLanguage`, `isBasedOn` → original URL)
-  plus `WebSite` structured data.
-- `sitemap-index.xml` via `@astrojs/sitemap`, `robots.txt`, RSS at `/rss.xml`.
-- `<html lang>` follows the article's own language (`vi`), so the Vietnamese
-  content is declared correctly inside an English-language UI.
+Available from the header dialog (⌘K / Ctrl-K) and `/en/search/` · `/vi/search/`.
 
 ## Deployment
+
+### Cloudflare Pages (primary)
+
+Connected to this repository. Build settings:
+
+| Setting          | Value                          |
+| ---------------- | ------------------------------ |
+| Build command    | `pnpm build`                   |
+| Output directory | `dist`                         |
+| Node version     | 22 (env var `NODE_VERSION=22`) |
+
+`public/_redirects` is copied into `dist` and applied automatically.
+
+### Docker
 
 ```bash
 cp .env.example .env      # set SITE_URL
 docker compose up -d --build
 ```
 
-Full instructions — TLS with a host Caddy/Nginx, health checks, rollback and
+Full instructions — TLS with a host Caddy/Nginx, health checks, rollback,
 troubleshooting — are in [`docs/deployment.md`](docs/deployment.md).
 
-## Content provenance & licence
+## Licence
 
-- Article text, titles, tags and images belong to **Hưng Phạm**, originally
-  published on [Viblo](https://viblo.asia/u/lowkey_dev); this repository is the
-  author's own mirror. Bodies are unmodified; the single transformation is
-  rewriting image URLs to locally downloaded copies.
+- Article text and images © Hưng Phạm.
 - Code in this repository is MIT licensed (see `LICENSE`).
 
 Built with Astro, Shiki, Pagefind, Tailwind CSS, Lucide and Caddy.

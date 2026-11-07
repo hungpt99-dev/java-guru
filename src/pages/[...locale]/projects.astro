@@ -1,0 +1,62 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import ProjectCard from "@/components/common/ProjectCard.astro";
+import { ArrowUpRight } from "@lucide/astro";
+import { PROJECTS } from "@/data/projects";
+import { SITE } from "@/config";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+
+const primary = PROJECTS.filter((project) => project.featured);
+const others = PROJECTS.filter((project) => !project.featured);
+---
+
+<BaseLayout
+  title={t("projects.title")}
+  description={t("projects.lede")}
+  locale={locale}
+  route="/projects/"
+>
+  <section class="shell pt-12 pb-10 md:pt-16">
+    <p class="eyebrow">{t("projects.title")}</p>
+    <h1 class="display-lg mt-4 max-w-[26ch]">
+      {t("projects.heading").split(",")[0]},<br />
+      <span class="text-muted">
+        {locale === "vi" ? "không phải portfolio mockup." : "not a portfolio of mockups."}
+      </span>
+    </h1>
+    <p class="text-muted mt-4 max-w-[42rem] text-[0.95rem] leading-relaxed">{t("projects.lede")}</p>
+    <div class="mt-6 flex flex-wrap items-center gap-3 font-mono text-[0.68rem]">
+      <a href={SITE.socials[0].href} target="_blank" rel="noopener noreferrer" class="btn">
+        {t("projects.profile")}
+        <ArrowUpRight size={12} stroke-width={2} />
+      </a>
+      <span class="text-subtle">{t("projects.profileNote", { count: 28 })}</span>
+    </div>
+  </section>
+
+  <section class="shell pb-12">
+    <p class="label-mono mb-4">{t("projects.primary")}</p>
+    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      {primary.map((project) => <ProjectCard project={project} locale={locale} />)}
+    </div>
+  </section>
+
+  <section class="shell pb-20">
+    <p class="label-mono mb-4">{t("projects.alsoMaintained")}</p>
+    <div class="grid gap-4 md:grid-cols-2">
+      {others.map((project) => <ProjectCard project={project} locale={locale} />)}
+    </div>
+
+    <p class="text-subtle mt-8 max-w-[42rem] font-mono text-[0.65rem] leading-relaxed">
+      {t("projects.forkNote")}
+    </p>
+  </section>
+</BaseLayout>

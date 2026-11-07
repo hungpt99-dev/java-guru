@@ -1,16 +1,15 @@
 ---
 import { ArrowUpRight } from "@lucide/astro";
+import type { Project } from "@/data/projects";
+import { type Locale } from "@/i18n/config";
 
 export interface Props {
-  name: string;
-  description: string;
-  href: string;
-  language?: string;
-  topics?: string[];
-  note?: string;
+  project: Project;
+  locale: Locale;
 }
 
-const { name, description, href, language, topics = [], note } = Astro.props;
+const { project, locale } = Astro.props;
+const { name, description, href, language, topics = [], note } = project;
 ---
 
 <a
@@ -31,10 +30,10 @@ const { name, description, href, language, topics = [], note } = Astro.props;
       class="text-subtle group-hover:text-primary mt-0.5 shrink-0 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
     />
   </div>
-  <p class="text-muted text-[0.875rem] leading-relaxed">{description}</p>
+  <p class="text-muted text-[0.875rem] leading-relaxed">{description[locale]}</p>
   <div class="text-subtle mt-auto flex flex-wrap items-center gap-2 pt-1 font-mono text-[0.62rem]">
     {language && <span class="chip chip--neutral chip--sm">{language}</span>}
     {topics.slice(0, 3).map((topic) => <span class="text-subtle/80">#{topic}</span>)}
-    {note && <span class="text-subtle/70 ml-auto">{note}</span>}
+    {note && <span class="text-subtle/70 ml-auto">{note[locale]}</span>}
   </div>
 </a>

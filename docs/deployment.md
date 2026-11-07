@@ -1,5 +1,43 @@
 # Deployment
 
+Two paths are supported: **Cloudflare Pages** (the live deployment) and a
+**Docker container** for self-hosting. Both serve the same static `dist/`.
+
+---
+
+## Cloudflare Pages
+
+The repository is connected to a Pages project; a push to `main` triggers a build.
+
+| Setting                | Value                                                   |
+| ---------------------- | ------------------------------------------------------- |
+| Framework preset       | Astro                                                   |
+| Build command          | `pnpm build`                                            |
+| Build output directory | `dist`                                                  |
+| Environment variable   | `NODE_VERSION=22` (or `.nvmrc`)                         |
+| Environment variable   | `SITE_URL=https://java-guru.pages.dev` (or your domain) |
+
+`pnpm build` runs Astro and then Pagefind, so the search index ships with the
+deployment. `public/_redirects` is copied into `dist`; Cloudflare applies those
+rules before serving, which is how legacy single-language URLs keep working:
+
+```
+/posts/:splat      → /en/posts/:splat      301
+/categories/:splat → /en/categories/:splat 301
+/about             → /en/about/            301
+/rss.xml           → /en/rss.xml           301
+```
+
+Preview deployments get their own `*.pages.dev` hostname; canonical URLs follow
+`SITE_URL`, so set it per environment if you want previews to self-canonicalize.
+
+Cache behaviour is Cloudflare's default for static assets plus the `_headers`
+values baked into the HTML (assets are content-hashed, HTML revalidates).
+
+---
+
+## Docker / self-hosted
+
 The site is a fully static build: HTML, CSS, a little JS, self-hosted fonts, local
 images and a Pagefind index. There is no database, no server runtime and no
 secrets baked into the image.
@@ -149,7 +187,9 @@ curl -sI https://java-guru.dev/                 # 200, cache headers
 curl -s  https://java-guru.dev/robots.txt       # Sitemap: .../sitemap-index.xml
 curl -s  https://java-guru.dev/rss.xml | head   # valid RSS
 curl -s  https://java-guru.dev/sitemap-index.xml | head
-curl -s https://java-guru.dev/posts/ | grep -c 'post-row'   # listing rendered
+curl -s https://java-guru.dev/en/posts/ | grep -c 'post-row'  # English listing
+curl -s https://java-guru.dev/vi/posts/ | grep -c 'post-row'  # Vietnamese listing
+curl -sI https://java-guru.dev/posts/hieu-saga-pattern-trong-5-phut/ | head -1   # 301 → /en/…
 ```
 
 Search only works in a production build: `pnpm build` runs Pagefind and writes
@@ -157,13 +197,14 @@ Search only works in a production build: `pnpm build` runs Pagefind and writes
 
 ## 7. Troubleshooting
 
-| Symptom                                     | Cause / fix                                                                                                         |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `permission denied` writing `/config`       | Root filesystem is read-only; compose provides `tmpfs` mounts. Keep them.                                           |
-| 404 on `/posts/foo` but `/posts/foo/` works | The proxy is stripping the trailing slash; use `reverse_proxy` (Option A/B) rather than hand-written rewrite rules. |
-| Old content after deploy                    | Browser/CDN cache on HTML — HTML is `max-age=0, must-revalidate`; purge the CDN if one sits in front.               |
-| Search returns nothing                      | `dist/pagefind/` missing: the image build must run `pnpm build`, not `astro build` alone.                           |
-| Container restarts every few seconds        | Usually a Caddyfile syntax error: `docker compose logs web`.                                                        |
+| Symptom                                           | Cause / fix                                                                                                         |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `permission denied` writing `/config`             | Root filesystem is read-only; compose provides `tmpfs` mounts. Keep them.                                           |
+| Legacy URL returns 200 instead of 301             | `public/_redirects` is only applied by Cloudflare Pages; for Docker the same rules live in `deploy/Caddyfile`.      |
+| 404 on `/en/posts/foo` but `/en/posts/foo/` works | The proxy is stripping the trailing slash; use `reverse_proxy` (Option A/B) rather than hand-written rewrite rules. |
+| Old content after deploy                          | Browser/CDN cache on HTML — HTML is `max-age=0, must-revalidate`; purge the CDN if one sits in front.               |
+| Search returns nothing                            | `dist/pagefind/` missing: the image build must run `pnpm build`, not `astro build` alone.                           |
+| Container restarts every few seconds              | Usually a Caddyfile syntax error: `docker compose logs web`.                                                        |
 
 ## 8. Resource use
 

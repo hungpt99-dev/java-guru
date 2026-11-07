@@ -1,0 +1,209 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import { Search } from "@lucide/astro";
+import { getPosts, getCategories } from "@/utils/posts";
+import { localePath } from "@/utils/i18n";
+import { LOCALES, LOCALE_META, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+
+const posts = await getPosts(locale);
+const categories = getCategories(posts, locale);
+---
+
+<BaseLayout
+  title={t("search.title")}
+  description={t("search.lede")}
+  locale={locale}
+  noindex
+  route="/search/"
+>
+  <section class="shell pt-12 pb-8 md:pt-16">
+    <p class="eyebrow">{t("search.title")}</p>
+    <h1 class="display-lg mt-4 max-w-[24ch]">{t("search.heading")}</h1>
+    <p class="text-muted mt-4 max-w-[38rem] text-[0.95rem] leading-relaxed">{t("search.lede")}</p>
+  </section>
+
+  <section class="shell pb-20">
+    <div class="panel p-1.5">
+      <div class="flex items-center gap-2 px-2">
+        <Search size={16} stroke-width={1.75} class="text-subtle shrink-0" />
+        <input
+          type="search"
+          class="text-fg placeholder:text-subtle w-full bg-transparent py-3 font-mono text-[0.9rem] outline-none"
+          placeholder={t("search.placeholder")}
+          aria-label={t("common.searchArticles")}
+          autocomplete="off"
+          spellcheck="false"
+          data-search-page-input
+        />
+      </div>
+    </div>
+
+    <div class="mt-3 flex flex-wrap items-center gap-3">
+      <span class="text-subtle font-mono text-[0.62rem]" data-search-status>{t("search.hint")}</span
+      >
+      <div class="ml-auto flex items-center gap-2" role="radiogroup" aria-label={t("search.scope")}>
+        <span class="label-mono">{t("search.scope")}</span>
+        <button
+          type="button"
+          class="scope-pill"
+          role="radio"
+          aria-checked="true"
+          data-scope="locale"
+          data-locale={locale}
+        >
+          {t("search.scopeCurrent")}
+        </button>
+        <button type="button" class="scope-pill" role="radio" aria-checked="false" data-scope="all">
+          {t("search.scopeAll")}
+        </button>
+      </div>
+    </div>
+
+    <div
+      class="mt-6 space-y-px"
+      data-search-page-results
+      data-locale={locale}
+      data-none={t("search.none")}
+      data-short={t("search.short")}
+      data-missing={t("search.indexMissing")}
+      data-results={t("search.results")}
+      data-one={t("search.one")}
+    >
+    </div>
+
+    <div class="border-line mt-12 border-t pt-8">
+      <p class="label-mono mb-3">{t("search.jump")}</p>
+      <div class="flex flex-wrap gap-2">
+        {
+          categories.map((category) => (
+            <a
+              href={localePath(locale, `/categories/${category.slug}/`)}
+              class:list={["chip", `cat-${category.accent}`]}
+            >
+              {category.label}
+              <span class="opacity-60">{category.count}</span>
+            </a>
+          ))
+        }
+      </div>
+      <p class="text-subtle mt-6 font-mono text-[0.62rem]">
+        {LOCALE_META[locale].label} · /{locale}/ · {posts.length}
+        {t("common.articles")}
+      </p>
+    </div>
+  </section>
+</BaseLayout>
+
+<script>
+  type Data = { url: string; excerpt: string; meta: { title?: string } };
+  type Pagefind = {
+    options: (o: Record<string, unknown>) => void;
+    search: (
+      q: string,
+      o?: Record<string, unknown>
+    ) => Promise<{ results: Array<{ data: () => Promise<Data> }> }>;
+  };
+
+  const input = document.querySelector<HTMLInputElement>("[data-search-page-input]");
+  const results = document.querySelector<HTMLElement>("[data-search-page-results]");
+  const status = document.querySelector<HTMLElement>("[data-search-status]");
+  const scopeRoot = results?.closest("section") ?? document;
+  const scopeButtons = [...scopeRoot.querySelectorAll<HTMLButtonElement>("[data-scope]")];
+  const locale = results?.dataset.locale ?? "en";
+  const copy = {
+    none: results?.dataset.none ?? "",
+    short: results?.dataset.short ?? "",
+    missing: results?.dataset.missing ?? "",
+    results: results?.dataset.results ?? "{count} results",
+    one: results?.dataset.one ?? "1 result",
+  };
+
+  let pf: Pagefind | null = null;
+  let unavailable = false;
+  let scope: "locale" | "all" = "locale";
+
+  const load = async () => {
+    if (pf || unavailable) return pf;
+    try {
+      const pfUrl = "/pagefind/pagefind.js";
+      const mod = await import(/* @vite-ignore */ pfUrl);
+      pf = (mod.default ?? mod) as Pagefind;
+      pf.options({ excerptLength: 40 });
+    } catch {
+      unavailable = true;
+    }
+    return pf;
+  };
+
+  const setStatus = (text: string) => {
+    if (status) status.textContent = text;
+  };
+
+  const search = async (query: string) => {
+    if (!results) return;
+    if (query.trim().length < 2) {
+      results.innerHTML = "";
+      setStatus(copy.short);
+      return;
+    }
+    const engine = await load();
+    if (!engine) return setStatus(copy.missing);
+    const found = await engine.search(
+      query,
+      scope === "locale" ? { filters: { locale } } : undefined
+    );
+    const count = found.results.length;
+    setStatus(
+      count === 1
+        ? copy.one.replace("{query}", query)
+        : copy.results.replace("{count}", String(count)).replace("{query}", query)
+    );
+    const top = found.results.slice(0, 25);
+    if (!top.length) {
+      results.innerHTML = `<p class="text-subtle py-8 font-mono text-[0.75rem]">${copy.none}</p>`;
+      return;
+    }
+    const data = await Promise.all(top.map((r) => r.data()));
+    results.innerHTML = data
+      .map(
+        (item) => `
+        <a href="${item.url}" class="group border-line hover:bg-sunken/40 block border-t py-4 transition-colors">
+          <h2 class="font-display group-hover:text-primary text-[1.08rem] font-semibold tracking-[-0.01em] transition-colors">
+            ${item.meta.title ?? ""}
+          </h2>
+          <p class="text-muted mt-1.5 text-[0.86rem] leading-relaxed">${item.excerpt}</p>
+        </a>`
+      )
+      .join("");
+  };
+
+  for (const button of scopeButtons) {
+    button.addEventListener("click", () => {
+      scope = button.dataset.scope === "all" ? "all" : "locale";
+      for (const other of scopeButtons) {
+        other.setAttribute("aria-checked", String(other === button));
+      }
+      if (input?.value) void search(input.value);
+    });
+  }
+
+  let timer: number | undefined;
+  input?.addEventListener("input", () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => void search(input!.value), 200);
+  });
+
+  const initial = new URLSearchParams(window.location.search).get("q");
+  if (initial && input) {
+    input.value = initial;
+    void search(initial);
+  }
+</script>

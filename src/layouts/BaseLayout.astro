@@ -1,6 +1,9 @@
 ---
 import "@/styles/global.css";
 import { SITE } from "@/config";
+import { LOCALE_META, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { stripLocale } from "@/utils/i18n";
 import Seo from "@/components/common/Seo.astro";
 import Header from "@/components/layout/Header.astro";
 import Footer from "@/components/layout/Footer.astro";
@@ -9,43 +12,51 @@ import SearchDialog from "@/components/navigation/SearchDialog.astro";
 export interface Props {
   title?: string;
   description?: string;
+  locale: Locale;
   image?: string;
   type?: "website" | "article";
-  lang?: string;
   noindex?: boolean;
   publishedTime?: Date;
   modifiedTime?: Date;
   section?: string;
   tags?: string[];
   jsonLd?: Record<string, unknown> | Record<string, unknown>[];
+  /** Override the derived unprefixed route (used by the root redirect page). */
+  route?: string;
 }
 
 const {
   title = SITE.title,
-  description = SITE.description,
+  description,
+  locale,
   image,
   type = "website",
-  lang = SITE.locale,
   noindex = false,
   publishedTime,
   modifiedTime,
   section,
   tags,
   jsonLd,
+  route,
 } = Astro.props;
+
+const t = useTranslations(locale);
+const meta = LOCALE_META[locale];
+const path = stripLocale(Astro.url.pathname);
+const pageRoute = route ?? path;
 
 const website = {
   "@context": "https://schema.org",
   "@type": "WebSite",
   name: SITE.title,
-  url: SITE.url,
-  description: SITE.description,
-  inLanguage: ["vi", "en"],
+  url: new URL(SITE.url).href,
+  description: t("site.description"),
+  inLanguage: ["en", "vi"],
   author: {
     "@type": "Person",
     name: SITE.author.name,
     alternateName: SITE.author.handle,
-    url: SITE.url,
+    url: new URL(SITE.url).href,
   },
 };
 
@@ -53,7 +64,7 @@ const graph = type === "website" ? [website, ...(jsonLd ? [jsonLd].flat() : [])]
 ---
 
 <!doctype html>
-<html lang={lang}>
+<html lang={meta.htmlLang} dir={meta.dir}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -76,16 +87,17 @@ const graph = type === "website" ? [website, ...(jsonLd ? [jsonLd].flat() : [])]
 
     <Seo
       title={title}
-      description={description}
+      description={description ?? t("site.description")}
+      locale={locale}
       image={image}
       type={type}
-      lang={lang}
       noindex={noindex}
       publishedTime={publishedTime}
       modifiedTime={modifiedTime}
       section={section}
       tags={tags}
       jsonLd={graph}
+      route={pageRoute}
     />
 
     {/* Applies the stored theme before first paint, so no wrong-theme flash. */}
@@ -109,14 +121,14 @@ const graph = type === "website" ? [website, ...(jsonLd ? [jsonLd].flat() : [])]
       href="#main"
       class="focus:bg-elev focus:text-primary focus:border-primary sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[100] focus:rounded-md focus:border focus:px-4 focus:py-2 focus:font-mono focus:text-xs"
     >
-      Skip to content
+      {t("common.skip")}
     </a>
 
-    <Header />
+    <Header locale={locale} />
     <main id="main" class="flex-1">
       <slot />
     </main>
-    <Footer />
-    <SearchDialog />
+    <Footer locale={locale} />
+    <SearchDialog locale={locale} />
   </body>
 </html>

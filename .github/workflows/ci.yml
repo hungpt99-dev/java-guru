@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   verify:
-    name: Build, lint and verify migration
+    name: Build, lint and verify bilingual content
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -45,11 +45,14 @@ jobs:
       - name: Type check
         run: pnpm check
 
-      - name: Verify migrated articles are byte-identical to source
-        run: node scripts/migration/validate.mjs
+      - name: Validate bilingual content
+        run: pnpm validate
 
       - name: Build site + search index
         run: pnpm build
+
+      - name: Publication hygiene (no content-source disclosures)
+        run: pnpm check:disclosures
 
       - name: Upload build output
         uses: actions/upload-artifact@v4

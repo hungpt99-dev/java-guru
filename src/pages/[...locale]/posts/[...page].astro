@@ -1,0 +1,141 @@
+---
+import type { GetStaticPaths, Page } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import PostRow from "@/components/blog/PostRow.astro";
+import Pagination from "@/components/navigation/Pagination.astro";
+import { Search } from "@lucide/astro";
+import { SITE } from "@/config";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { getPosts, getCategories, getTags, type Post } from "@/utils/posts";
+import { localePath } from "@/utils/i18n";
+
+export const getStaticPaths = (async ({ paginate }) => {
+  const routes = [];
+  for (const locale of LOCALES) {
+    const posts = await getPosts(locale);
+    routes.push(
+      ...paginate(posts, {
+        params: { locale },
+        props: { locale },
+        pageSize: SITE.postsPerPage,
+      })
+    );
+  }
+  return routes;
+}) satisfies GetStaticPaths;
+
+const { locale, page } = Astro.props as { locale: Locale; page: Page<Post> };
+const t = useTranslations(locale);
+
+const posts = await getPosts(locale);
+const categories = getCategories(posts, locale);
+const tags = getTags(posts).slice(0, 14);
+const startHere = posts.filter((p) => p.data.featured)[0];
+const offset = (page.currentPage - 1) * SITE.postsPerPage;
+---
+
+<BaseLayout
+  title={t("posts.title")}
+  description={t("posts.lede")}
+  locale={locale}
+  route={page.currentPage === 1 ? "/posts/" : `/posts/${page.currentPage}/`}
+>
+  <section class="shell pt-12 pb-6 md:pt-16">
+    <div class="flex flex-wrap items-end justify-between gap-6">
+      <div>
+        <p class="eyebrow">{t("posts.title")}</p>
+        <h1 class="display-lg mt-4 max-w-[22ch]">
+          {posts.length}
+          {t("common.articles")},<br class="hidden sm:block" />
+          <span class="text-muted">
+            {locale === "vi" ? "phần lớn là về hệ thống." : "mostly about systems."}
+          </span>
+        </h1>
+        <p class="text-muted mt-4 max-w-[38rem] text-[0.95rem] leading-relaxed">
+          {t("posts.lede")}
+        </p>
+      </div>
+
+      <button type="button" class="btn" data-search-open>
+        <Search size={14} stroke-width={1.75} />
+        {t("posts.search")}
+        <span class="text-subtle ml-1 font-mono text-[0.6rem]">⌘K</span>
+      </button>
+    </div>
+
+    <div class="mt-8 space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="label-mono mr-1">{t("posts.filterTopic")}</span>
+        <a href={localePath(locale, "/posts/")} class="chip" aria-current="page">
+          {t("common.all")}
+        </a>
+        {
+          categories.map((category) => (
+            <a
+              href={localePath(locale, `/categories/${category.slug}/`)}
+              class:list={["chip", `cat-${category.accent}`]}
+            >
+              {category.label}
+              <span class="opacity-60">{category.count}</span>
+            </a>
+          ))
+        }
+      </div>
+
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <span class="label-mono mr-1">{t("posts.filterTag")}</span>
+        {
+          tags.map((tag) => (
+            <a
+              href={localePath(locale, `/tags/${tag.slug}/`)}
+              class="text-subtle hover:text-primary font-mono text-[0.68rem] transition-colors"
+            >
+              #{tag.label}
+            </a>
+          ))
+        }
+        <a
+          href={localePath(locale, "/tags/")}
+          class="text-primary/80 hover:text-primary font-mono text-[0.68rem]"
+        >
+          {t("posts.allTags")} →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="shell pb-16">
+    <div class="border-line mt-6 flex items-center justify-between border-b pb-2">
+      <p class="label-mono">
+        {
+          page.currentPage === 1
+            ? t("posts.latestCount", { count: page.data.length })
+            : t("posts.pageOf", { current: page.currentPage, total: page.lastPage })
+        }
+      </p>
+      <p class="label-mono">{t("posts.total", { count: posts.length })}</p>
+    </div>
+
+    <div class="border-line border-b">
+      {page.data.map((post, i) => <PostRow post={post} index={offset + i} />)}
+    </div>
+
+    <Pagination current={page.currentPage} total={page.lastPage} base="/posts" locale={locale} />
+
+    {
+      startHere && page.currentPage === 1 && (
+        <aside class="border-line bg-sunken/50 mt-10 rounded-xl border p-5">
+          <p class="label-mono mb-2">{t("posts.startHere")}</p>
+          <a
+            href={localePath(locale, `/posts/${startHere.data.slug}/`)}
+            class="font-display hover:text-primary text-lg font-semibold"
+          >
+            {startHere.data.title}
+          </a>
+          <p class="text-muted mt-1.5 line-clamp-2 text-sm">{startHere.data.description}</p>
+        </aside>
+      )
+    }
+  </section>
+</BaseLayout>

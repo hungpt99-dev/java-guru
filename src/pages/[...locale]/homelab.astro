@@ -1,0 +1,250 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import PlaceholderBox from "@/components/common/PlaceholderBox.astro";
+import {
+  ArrowUpRight,
+  Server,
+  Network,
+  Boxes,
+  ShieldCheck,
+  Activity,
+  DatabaseBackup,
+} from "@lucide/astro";
+import { getPosts } from "@/utils/posts";
+import { localePath } from "@/utils/i18n";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+
+const posts = await getPosts(locale);
+const buildLog = posts.find((p) => p.data.category === "DevOps & Infrastructure");
+
+const sections = {
+  en: [
+    {
+      id: "infrastructure",
+      icon: Server,
+      title: "Infrastructure",
+      body: "One Ubuntu VPS runs the whole lab. Everything below lives on it as containers or system services, and nothing is exposed that does not need to be.",
+      placeholder: {
+        label: "host & sizing",
+        note: "CPU, RAM, disk and provider are not documented yet.",
+      },
+    },
+    {
+      id: "networking",
+      icon: Network,
+      title: "Networking",
+      body: "A single public entry point in front of the internal services, with TLS terminated at the edge.",
+      placeholder: {
+        label: "proxy & DNS",
+        note: "Reverse proxy choice, domains and internal network layout to be documented.",
+      },
+    },
+    {
+      id: "services",
+      icon: Boxes,
+      title: "Services",
+      body: "Self-hosted tools for notes, files, dashboards and experiments — the reason the lab exists in the first place.",
+      placeholder: {
+        label: "service inventory",
+        note: "Each service, why it is there and how it is updated will be listed here.",
+      },
+    },
+    {
+      id: "security",
+      icon: ShieldCheck,
+      title: "Security",
+      body: "Least-privilege access, key-only SSH, a default-deny firewall and a deliberately small attack surface.",
+      placeholder: {
+        label: "hardening record",
+        note: "Firewall rules, fail2ban policy and audit results pending.",
+      },
+    },
+    {
+      id: "monitoring",
+      icon: Activity,
+      title: "Monitoring",
+      body: "Uptime and resource visibility so a failing container is noticed before a user reports it.",
+      placeholder: {
+        label: "metrics & alerts",
+        note: "Stack choice and alert routing not documented yet.",
+      },
+    },
+    {
+      id: "backups",
+      icon: DatabaseBackup,
+      title: "Backups",
+      body: "If it is worth self-hosting, it is worth restoring. Backups are only counted when a restore has been tested.",
+      placeholder: {
+        label: "backup matrix",
+        note: "What is backed up, where it goes and the last successful restore test.",
+      },
+    },
+  ],
+  vi: [
+    {
+      id: "infrastructure",
+      icon: Server,
+      title: "Hạ tầng",
+      body: "Toàn bộ lab chạy trên một VPS Ubuntu. Mọi thứ bên dưới sống trên đó dưới dạng container hoặc system service, và không có gì phơi ra ngoài nếu không cần.",
+      placeholder: {
+        label: "phần cứng & cấu hình",
+        note: "CPU, RAM, dung lượng và nhà cung cấp chưa được ghi lại.",
+      },
+    },
+    {
+      id: "networking",
+      icon: Network,
+      title: "Mạng",
+      body: "Một điểm vào công khai duy nhất đứng trước các service nội bộ, TLS kết thúc ở edge.",
+      placeholder: {
+        label: "proxy & DNS",
+        note: "Lựa chọn reverse proxy, tên miền và sơ đồ mạng nội bộ sẽ được ghi sau.",
+      },
+    },
+    {
+      id: "services",
+      icon: Boxes,
+      title: "Dịch vụ",
+      body: "Các công cụ self-host cho ghi chú, file, dashboard và thử nghiệm — lý do cái lab này tồn tại.",
+      placeholder: {
+        label: "danh mục dịch vụ",
+        note: "Từng service, vì sao có nó và cách cập nhật sẽ được liệt kê ở đây.",
+      },
+    },
+    {
+      id: "security",
+      icon: ShieldCheck,
+      title: "Bảo mật",
+      body: "Quyền tối thiểu, SSH chỉ dùng key, firewall mặc định chặn và bề mặt tấn công cố tình giữ nhỏ.",
+      placeholder: {
+        label: "hồ sơ hardening",
+        note: "Rule firewall, chính sách fail2ban và kết quả audit đang chờ.",
+      },
+    },
+    {
+      id: "monitoring",
+      icon: Activity,
+      title: "Giám sát",
+      body: "Theo dõi uptime và tài nguyên để một container chết được phát hiện trước khi người dùng báo.",
+      placeholder: {
+        label: "metrics & cảnh báo",
+        note: "Bộ công cụ và cách định tuyến cảnh báo chưa được ghi lại.",
+      },
+    },
+    {
+      id: "backups",
+      icon: DatabaseBackup,
+      title: "Backup",
+      body: "Đã đáng self-host thì cũng đáng khôi phục. Backup chỉ được tính khi đã test restore.",
+      placeholder: {
+        label: "ma trận backup",
+        note: "Cái gì được backup, lưu ở đâu và lần restore thành công gần nhất.",
+      },
+    },
+  ],
+}[locale];
+---
+
+<BaseLayout
+  title={t("homelab.title")}
+  description={t("homelab.lede")}
+  locale={locale}
+  route="/homelab/"
+>
+  <section class="shell pt-12 pb-8 md:pt-16">
+    <p class="eyebrow">{t("homelab.title")}</p>
+    <h1 class="display-lg mt-4 max-w-[28ch]">
+      {locale === "vi" ? "Một VPS nhỏ," : "A small VPS lab,"}<br />
+      <span class="text-muted">
+        {locale === "vi" ? "ghi chép thật thà." : "documented honestly."}
+      </span>
+    </h1>
+    <p class="text-muted mt-4 max-w-[42rem] text-[0.95rem] leading-relaxed">{t("homelab.lede")}</p>
+
+    <div class="mt-6 flex flex-wrap items-center gap-2">
+      <span class="chip chip--neutral">Ubuntu VPS</span>
+      <span class="chip chip--neutral">self-hosted</span>
+      <span class="chip chip--neutral">containers</span>
+      {
+        buildLog && (
+          <span class="chip cat-devops">
+            {locale === "vi" ? "có bài dựng lab" : "build log available"}
+          </span>
+        )
+      }
+    </div>
+  </section>
+
+  <section class="shell pb-12">
+    <div class="grid gap-4 md:grid-cols-2">
+      {
+        sections.map((section) => {
+          const Icon = section.icon;
+          return (
+            <article id={section.id} class="panel flex flex-col gap-3 p-5">
+              <div class="flex items-center gap-2.5">
+                <span class="border-line bg-sunken grid h-7 w-7 place-items-center rounded-md border">
+                  <Icon size={14} stroke-width={1.75} class="text-primary" />
+                </span>
+                <h2 class="font-display text-[1.08rem] font-semibold tracking-[-0.01em]">
+                  {section.title}
+                </h2>
+              </div>
+              <p class="text-muted text-[0.88rem] leading-relaxed">{section.body}</p>
+              <div class="mt-auto pt-1">
+                <PlaceholderBox label={section.placeholder.label} note={section.placeholder.note} />
+              </div>
+            </article>
+          );
+        })
+      }
+    </div>
+  </section>
+
+  <section class="shell pb-16">
+    <div class="panel overflow-hidden">
+      <div class="border-line flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
+        <p class="label-mono">{t("homelab.arch")}</p>
+        <p class="text-subtle font-mono text-[0.6rem]">{t("homelab.pending")}</p>
+      </div>
+      <div class="p-5">
+        <PlaceholderBox
+          label={locale === "vi" ? "sơ đồ hệ thống" : "topology diagram"}
+          note={locale === "vi"
+            ? "Sơ đồ thật (edge → proxy → services → data) sẽ được vẽ từ cấu hình thực tế. Pipeline bài viết đã hỗ trợ Mermaid."
+            : "The real diagram (edge → proxy → services → data) will be drawn from the actual setup. The article pipeline already renders Mermaid."}
+        />
+      </div>
+    </div>
+
+    {
+      buildLog && (
+        <div class="panel mt-6 flex flex-wrap items-center justify-between gap-4 p-5">
+          <div>
+            <p class="label-mono mb-1">{t("homelab.buildLog")}</p>
+            <a
+              href={localePath(locale, `/posts/${buildLog.data.slug}/`)}
+              class="font-display hover:text-primary text-lg font-semibold"
+            >
+              {buildLog.data.title}
+            </a>
+          </div>
+          <a href={localePath(locale, `/posts/${buildLog.data.slug}/`)} class="btn">
+            {t("homelab.openArticle")}
+            <ArrowUpRight size={12} stroke-width={2} />
+          </a>
+        </div>
+      )
+    }
+
+    <p class="text-subtle mt-6 font-mono text-[0.65rem] leading-relaxed">{t("homelab.note")}</p>
+  </section>
+</BaseLayout>

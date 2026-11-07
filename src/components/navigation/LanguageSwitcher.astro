@@ -1,0 +1,54 @@
+---
+import { LOCALE_META, LOCALES, type Locale } from "@/i18n/config";
+import { alternatePath } from "@/utils/i18n";
+import { useTranslations } from "@/i18n/ui";
+
+export interface Props {
+  locale: Locale;
+  /** Current pathname, so the switch keeps the reader on the same page. */
+  pathname: string;
+}
+
+const { locale, pathname } = Astro.props;
+const t = useTranslations(locale);
+
+const options = LOCALES.map((code) => ({
+  code,
+  short: LOCALE_META[code].short,
+  label: LOCALE_META[code].label,
+  href: alternatePath(pathname, code),
+  active: code === locale,
+}));
+---
+
+<div class="lang-switch" role="group" aria-label={t("nav.switchLanguage")}>
+  {
+    options.map((option) => (
+      <a
+        href={option.href}
+        class:list={["lang-switch__item", option.active && "lang-switch__item--active"]}
+        hreflang={option.code}
+        lang={option.code}
+        aria-current={option.active ? "true" : undefined}
+        aria-label={t("nav.switchTo", { language: option.label })}
+        data-locale={option.code}
+        title={option.label}
+      >
+        {option.short}
+      </a>
+    ))
+  }
+</div>
+
+<script>
+  // Remember the reader's explicit choice so the root URL can send them back.
+  document.querySelectorAll<HTMLAnchorElement>("[data-locale]").forEach((link) => {
+    link.addEventListener("click", () => {
+      try {
+        localStorage.setItem("jg-locale", link.dataset.locale ?? "en");
+      } catch {
+        /* private mode: the link still works for this visit */
+      }
+    });
+  });
+</script>

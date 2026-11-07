@@ -1,254 +1,78 @@
 ---
-import BaseLayout from "@/layouts/BaseLayout.astro";
-import PostCard from "@/components/blog/PostCard.astro";
-import PostRow from "@/components/blog/PostRow.astro";
-import SectionHeader from "@/components/common/SectionHeader.astro";
-import ProjectCard from "@/components/common/ProjectCard.astro";
-import { ArrowRight, ArrowUpRight, Terminal, Boxes } from "@lucide/astro";
+/**
+ * Root entry point. Sends first-time visitors to the default locale (English)
+ * and returning visitors to whichever language they last chose. Kept as a tiny
+ * static page so it works on any host, with canonical/hreflang signals pointing
+ * search engines at the real locale URLs.
+ */
+import { DEFAULT_LOCALE, LOCALE_META, LOCALES } from "@/i18n/config";
 import { SITE } from "@/config";
-import {
-  getPosts,
-  getCategories,
-  getTags,
-  featuredPosts,
-  totalReadingMinutes,
-} from "@/utils/posts";
-import { PROJECTS } from "@/data/projects";
-import { formatDate } from "@/utils/slug";
+import { useTranslations } from "@/i18n/ui";
 
-const posts = await getPosts();
-const categories = getCategories(posts);
-const tags = getTags(posts);
-const featured = featuredPosts(posts, SITE.featuredOnHome);
-const latest = posts.filter((post) => !featured.includes(post)).slice(0, 6);
-const hours = Math.round(totalReadingMinutes(posts) / 60);
-const featuredProjects = PROJECTS.filter((p) => p.featured).slice(0, 3);
-const homelabPost = posts.find((p) => p.data.category === "DevOps & Infrastructure");
-
-const intro = SITE.author.intro;
-const stats = [
-  { value: String(posts.length), label: "essays" },
-  { value: String(categories.length), label: "topics" },
-  { value: String(tags.length), label: "tags" },
-  { value: `${hours}h`, label: "of reading" },
-];
+const t = useTranslations(DEFAULT_LOCALE);
+const origin = Astro.site ?? new URL(SITE.url);
+const target = new URL(`/${DEFAULT_LOCALE}/`, origin).href;
 ---
 
-<BaseLayout title={SITE.title} description={SITE.description}>
-  <!-- ── hero ─────────────────────────────────────────────────────────── -->
-  <section class="hero-glow relative overflow-hidden">
-    <div class="dot-grid"></div>
-    <div class="shell relative z-10 pt-12 pb-10 md:pt-20 md:pb-14">
-      <div class="grid items-start gap-12 lg:grid-cols-[minmax(0,1fr)_17.5rem] lg:gap-16">
-        <div class="max-w-[46rem]">
-          <p class="eyebrow">{SITE.author.role} · {SITE.author.location}</p>
-
-          <h1 class="display-xl mt-6">
-            Hi, I'm <span class="text-primary">Hưng</span><span class="text-accent"> —</span>
-          </h1>
-
-          <p class="text-muted mt-5 max-w-[40rem] text-[1.12rem] leading-[1.65] md:text-[1.28rem]">
-            {intro}
-          </p>
-
-          <p class="text-subtle mt-4 max-w-[38rem] text-[0.95rem] leading-relaxed">
-            {SITE.author.bio}
-          </p>
-
-          <div class="mt-8 flex flex-wrap items-center gap-2.5">
-            <a href="/posts" class="btn btn--primary">
-              Read the journal
-              <ArrowRight size={14} stroke-width={2} />
-            </a>
-            <a href="/about" class="btn">About me</a>
-            <a
-              href={SITE.socials[0].href}
-              class="btn btn--ghost"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              GitHub
-              <ArrowUpRight size={13} stroke-width={2} />
-            </a>
-          </div>
-
-          <div class="text-subtle mt-9 flex items-center gap-3 font-mono text-[0.65rem]">
-            <span class="relative flex h-1.5 w-1.5">
-              <span
-                class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--cat-devops)] opacity-60"
-              ></span>
-              <span class="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--cat-devops)]"
-              ></span>
-            </span>
-            <span>writing since {formatDate(posts[posts.length - 1].data.pubDatetime)}</span>
-            <span class="opacity-40">/</span>
-            <span>{SITE.author.handle}</span>
-          </div>
-        </div>
-
-        <div class="order-first lg:order-none">
-          <div class="relative mx-auto w-full max-w-[15rem] lg:max-w-none">
-            <div class="absolute -inset-3 rounded-[1.4rem] bg-[var(--signal)] opacity-15 blur-xl">
-            </div>
-            <div class="panel relative overflow-hidden !rounded-2xl p-2">
-              <img
-                src={SITE.author.avatar}
-                alt={`${SITE.author.name} portrait`}
-                width="420"
-                height="420"
-                class="aspect-square w-full rounded-xl object-cover"
-                loading="eager"
-                fetchpriority="high"
-              />
-            </div>
-            <div
-              class="text-subtle mt-3 flex items-baseline justify-between font-mono text-[0.62rem]"
-            >
-              <span class="text-muted">{SITE.author.name}</span>
-              <span>{SITE.author.alias}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <dl
-        class="border-line bg-line mt-12 grid grid-cols-2 gap-px overflow-hidden rounded-xl border sm:grid-cols-4"
-      >
-        {
-          stats.map((stat) => (
-            <div class="bg-bg px-4 py-4">
-              <dt class="text-subtle font-mono text-[0.6rem] tracking-[0.14em] uppercase">
-                {stat.label}
-              </dt>
-              <dd class="font-display mt-1 text-2xl font-bold tracking-tight">{stat.value}</dd>
-            </div>
-          ))
+<!doctype html>
+<html lang={LOCALE_META[DEFAULT_LOCALE].htmlLang}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{SITE.title} — {t("site.tagline")}</title>
+    <meta name="description" content={t("site.description")} />
+    <link rel="canonical" href={target} />
+    {
+      LOCALES.map((code) => (
+        <link
+          rel="alternate"
+          hreflang={LOCALE_META[code].htmlLang}
+          href={new URL(`/${code}/`, origin).href}
+        />
+      ))
+    }
+    <link rel="alternate" hreflang="x-default" href={target} />
+    <meta http-equiv="refresh" content={`0; url=/${DEFAULT_LOCALE}/`} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <script is:inline>
+      (function () {
+        let stored = null;
+        try {
+          stored = localStorage.getItem("jg-locale");
+        } catch {
+          stored = null;
         }
-      </dl>
-    </div>
-  </section>
-
-  <!-- ── featured ─────────────────────────────────────────────────────── -->
-  <section class="shell py-14 md:py-16">
-    <SectionHeader
-      index="01"
-      label="Featured"
-      title="Worth starting with"
-      href="/posts"
-      linkLabel={`all ${posts.length}`}
-    />
-    <div class="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-      {featured.map((post, i) => <PostCard post={post} priority={i === 0} />)}
-    </div>
-  </section>
-
-  <!-- ── latest ───────────────────────────────────────────────────────── -->
-  <section class="shell py-10 md:py-12">
-    <SectionHeader
-      index="02"
-      label="Latest"
-      title="Fresh from the journal"
-      href="/posts"
-      linkLabel="browse all"
-    />
-    <div class="border-line border-b">
-      {latest.map((post, i) => <PostRow post={post} index={i} />)}
-    </div>
-  </section>
-
-  <!-- ── topics ───────────────────────────────────────────────────────── -->
-  <section class="shell py-14 md:py-16">
-    <SectionHeader
-      index="03"
-      label="Topics"
-      title="Follow a thread"
-      href="/categories"
-      linkLabel="all topics"
-    />
-    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {
-        categories.map((category) => (
-          <a
-            href={`/categories/${category.slug}`}
-            class:list={["topic-tile", `cat-${category.accent}`]}
-          >
-            <div class="flex items-baseline justify-between gap-3">
-              <h3 class="font-display text-fg text-[1.02rem] font-semibold tracking-[-0.01em]">
-                {category.name}
-              </h3>
-              <span class="text-subtle font-mono text-[0.62rem]">
-                {String(category.count).padStart(2, "0")}
-              </span>
-            </div>
-            <p class="text-subtle line-clamp-2 text-[0.82rem] leading-relaxed">{category.blurb}</p>
-          </a>
-        ))
+        const target = stored === "vi" ? "/vi/" : "/en/";
+        location.replace(target);
+      })();
+    </script>
+    <style>
+      :root {
+        color-scheme: dark;
       }
-    </div>
-  </section>
-
-  <!-- ── projects ─────────────────────────────────────────────────────── -->
-  <section class="shell py-10 md:py-12">
-    <SectionHeader
-      index="04"
-      label="Projects"
-      title="Things I build"
-      href="/projects"
-      linkLabel="all projects"
-    />
-    <div class="grid gap-4 md:grid-cols-3">
-      {featuredProjects.map((project) => <ProjectCard {...project} />)}
-    </div>
-  </section>
-
-  <!-- ── homelab ──────────────────────────────────────────────────────── -->
-  <section class="shell py-14 md:py-20">
-    <SectionHeader
-      index="05"
-      label="Homelab"
-      title="The lab at the end of the tunnel"
-      href="/homelab"
-      linkLabel="open the lab"
-    />
-    <div class="panel relative overflow-hidden">
-      <div class="grid gap-8 p-6 md:grid-cols-[1.2fr_1fr] md:p-8">
-        <div>
-          <p class="text-muted max-w-[34rem] text-[0.98rem] leading-relaxed">
-            A single Ubuntu box where I self-host services, break things on purpose and keep a
-            record of what actually survives contact with production habits: containers, a reverse
-            proxy, monitoring, backups and the security work that holds it together.
-          </p>
-          <div class="mt-5 flex flex-wrap gap-2">
-            <a href="/homelab" class="btn btn--primary">
-              <Boxes size={13} stroke-width={2} />
-              Lab notes
-            </a>
-            {
-              homelabPost && (
-                <a href={`/posts/${homelabPost.id}`} class="btn">
-                  Read the build log
-                  <ArrowUpRight size={12} stroke-width={2} />
-                </a>
-              )
-            }
-          </div>
-        </div>
-
-        <div
-          class="border-line bg-sunken/70 text-subtle rounded-lg border p-4 font-mono text-[0.68rem] leading-relaxed"
-        >
-          <p class="mb-3 flex items-center gap-2 text-[0.6rem] tracking-[0.14em] uppercase">
-            <Terminal size={12} stroke-width={2} class="text-primary" />
-            ~/homelab
-          </p>
-          <p><span class="text-primary">$</span> whoami</p>
-          <p class="text-muted">hung@selfhosted</p>
-          <p class="mt-2"><span class="text-primary">$</span> ls services/</p>
-          <p class="text-muted">reverse-proxy/ · monitoring/ · backups/ · …</p>
-          <p class="mt-2"><span class="text-primary">$</span> cat status</p>
-          <p class="text-muted">documented as it is built — see the lab page for what is real.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-</BaseLayout>
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        background: #1a1b26;
+        color: #c0caf5;
+        font-family: "Inter", system-ui, sans-serif;
+      }
+      a {
+        color: #7aa2f7;
+      }
+      p {
+        font-size: 0.9rem;
+        line-height: 1.6;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      <a href="/en/">English</a> · <a href="/vi/">Tiếng Việt</a>
+    </p>
+  </body>
+</html>

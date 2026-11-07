@@ -1,38 +1,57 @@
 ---
 import { Search, Menu, X } from "@lucide/astro";
 import { SITE, THEMES } from "@/config";
+import { type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { localePath, stripLocale } from "@/utils/i18n";
 import ThemePicker from "@/components/navigation/ThemePicker.astro";
+import LanguageSwitcher from "@/components/navigation/LanguageSwitcher.astro";
 
+export interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const t = useTranslations(locale);
 const path = Astro.url.pathname;
-const isActive = (href: string) => (href === "/" ? path === "/" : path.startsWith(href));
+const current = stripLocale(path);
+const home = localePath(locale, "/");
+
+const isActive = (route: string) => {
+  const stem = route.replace(/\/$/, "") || "/";
+  const here = current.replace(/\/$/, "") || "/";
+  return stem === "/" ? here === "/" : here.startsWith(stem);
+};
 ---
 
 <header
-  class="border-line sticky top-0 z-50 border-b bg-[color-mix(in_oklab,var(--bg)_86%,transparent)] backdrop-blur-md"
+  class="border-line sticky top-0 z-50 border-b backdrop-blur-md"
+  style="background-color: color-mix(in oklab, var(--bg) 86%, transparent)"
 >
-  <div class="shell flex h-16 items-center justify-between gap-4">
-    <a href="/" class="group flex items-baseline gap-2.5" aria-label={`${SITE.title} — home`}>
+  <div class="shell flex h-16 items-center justify-between gap-3">
+    <a
+      href={home}
+      class="group flex items-baseline gap-2.5"
+      aria-label={`${SITE.title} — ${t("nav.journal")}`}
+    >
       <span class="text-primary/70 group-hover:text-primary font-mono text-xs transition">~/</span>
       <span class="font-display text-[1.05rem] font-extrabold tracking-[-0.03em]">
         java<span class="text-primary">guru</span>
       </span>
-      <span class="text-subtle hidden font-mono text-[0.6rem] tracking-[0.16em] uppercase sm:inline"
-        >journal</span
-      >
     </a>
 
-    <nav class="hidden items-center gap-1 md:flex" aria-label="Primary">
+    <nav class="hidden items-center gap-1 md:flex" aria-label={t("nav.main")}>
       {
         SITE.nav.map((item) => (
           <a
-            href={item.href}
+            href={localePath(locale, item.path)}
             class:list={[
               "rounded-md px-2.5 py-1.5 font-mono text-[0.75rem] transition-colors",
-              isActive(item.href) ? "text-primary" : "text-muted hover:text-fg",
+              isActive(item.path) ? "text-primary" : "text-muted hover:text-fg",
             ]}
-            aria-current={isActive(item.href) ? "page" : undefined}
+            aria-current={isActive(item.path) ? "page" : undefined}
           >
-            {item.label}
+            {t(item.key)}
           </a>
         ))
       }
@@ -43,14 +62,16 @@ const isActive = (href: string) => (href === "/" ? path === "/" : path.startsWit
         type="button"
         class="btn btn--ghost !min-h-9 !px-2.5"
         data-search-open
-        aria-label="Search articles"
+        aria-label={t("common.searchArticles")}
         aria-keyshortcuts="k"
       >
         <Search size={15} stroke-width={1.75} />
         <span class="text-subtle hidden font-mono text-[0.65rem] lg:inline">⌘K</span>
       </button>
 
-      <ThemePicker themes={THEMES} />
+      <LanguageSwitcher locale={locale} pathname={path} />
+
+      <ThemePicker themes={THEMES} locale={locale} />
 
       <button
         type="button"
@@ -58,7 +79,7 @@ const isActive = (href: string) => (href === "/" ? path === "/" : path.startsWit
         data-menu-toggle
         aria-expanded="false"
         aria-controls="mobile-nav"
-        aria-label="Open menu"
+        aria-label={t("nav.openMenu")}
       >
         <Menu size={17} stroke-width={1.75} data-menu-icon="open" />
         <X size={17} stroke-width={1.75} data-menu-icon="close" class="hidden" />
@@ -66,17 +87,26 @@ const isActive = (href: string) => (href === "/" ? path === "/" : path.startsWit
     </div>
   </div>
 
-  <div id="mobile-nav" class="shell border-line hidden border-t pb-4 md:hidden" data-menu-panel>
-    <nav class="mobile-nav" aria-label="Mobile">
+  <div
+    id="mobile-nav"
+    class="shell border-line hidden border-t pb-4 md:hidden"
+    data-menu-panel
+    data-label-open={t("nav.openMenu")}
+    data-label-close={t("nav.closeMenu")}
+  >
+    <nav class="mobile-nav" aria-label={t("nav.mobile")}>
       {
         SITE.nav.map((item) => (
-          <a href={item.href} aria-current={isActive(item.href) ? "page" : undefined}>
-            {item.label}
+          <a
+            href={localePath(locale, item.path)}
+            aria-current={isActive(item.path) ? "page" : undefined}
+          >
+            {t(item.key)}
           </a>
         ))
       }
-      <a href="/archives">Archive</a>
-      <a href="/search">Search</a>
+      <a href={localePath(locale, "/archives/")}>{t("footer.archive")}</a>
+      <a href={localePath(locale, "/search/")}>{t("common.search")}</a>
     </nav>
   </div>
 </header>
@@ -85,9 +115,14 @@ const isActive = (href: string) => (href === "/" ? path === "/" : path.startsWit
   const toggle = document.querySelector<HTMLButtonElement>("[data-menu-toggle]");
   const panel = document.querySelector<HTMLElement>("[data-menu-panel]");
   if (toggle && panel) {
+    const setLabel = (open: boolean) => {
+      const label = open ? panel.dataset.labelClose : panel.dataset.labelOpen;
+      if (label) toggle.setAttribute("aria-label", label);
+    };
     toggle.addEventListener("click", () => {
       const open = panel.classList.toggle("hidden") === false;
       toggle.setAttribute("aria-expanded", String(open));
+      setLabel(open);
       toggle.querySelector('[data-menu-icon="open"]')?.classList.toggle("hidden", open);
       toggle.querySelector('[data-menu-icon="close"]')?.classList.toggle("hidden", !open);
     });

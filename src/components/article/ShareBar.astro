@@ -1,12 +1,16 @@
 ---
 import { Link2, Check } from "@lucide/astro";
+import { type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
 
 export interface Props {
   title: string;
   url: string;
+  locale: Locale;
 }
 
-const { title, url } = Astro.props;
+const { title, url, locale } = Astro.props;
+const t = useTranslations(locale);
 const encodedUrl = encodeURIComponent(url);
 const encodedTitle = encodeURIComponent(title);
 
@@ -18,7 +22,7 @@ const targets = [
 ---
 
 <div class="flex flex-wrap items-center gap-2">
-  <span class="label-mono mr-1">Share</span>
+  <span class="label-mono mr-1">{t("article.share")}</span>
   {
     targets.map((target) => (
       <a
@@ -31,7 +35,14 @@ const targets = [
       </a>
     ))
   }
-  <button type="button" class="btn !min-h-8 !px-2.5 !text-[0.65rem]" data-copy-link data-url={url}>
+  <button
+    type="button"
+    class="btn !min-h-8 !px-2.5 !text-[0.65rem]"
+    data-copy-link
+    data-url={url}
+    data-copied-label={t("article.copied")}
+    data-default-label={t("article.copyLink")}
+  >
     <Link2 size={12} stroke-width={2} data-copy-icon="link" />
     <Check
       size={12}
@@ -39,7 +50,7 @@ const targets = [
       class="hidden text-[var(--cat-devops)]"
       data-copy-icon="done"
     />
-    <span data-copy-label>Copy link</span>
+    <span data-copy-label>{t("article.copyLink")}</span>
   </button>
 </div>
 
@@ -47,18 +58,21 @@ const targets = [
   const button = document.querySelector<HTMLButtonElement>("[data-copy-link]");
   button?.addEventListener("click", async () => {
     const url = button.dataset.url ?? window.location.href;
+    const label = button.querySelector("[data-copy-label]");
+    const copied = button.dataset.copiedLabel ?? "Copied";
+    const original = button.dataset.defaultLabel ?? "Copy link";
     try {
       await navigator.clipboard.writeText(url);
-      button.querySelector("[data-copy-label]")!.textContent = "Copied";
+      if (label) label.textContent = copied;
       button.querySelector('[data-copy-icon="link"]')?.classList.add("hidden");
       button.querySelector('[data-copy-icon="done"]')?.classList.remove("hidden");
       setTimeout(() => {
-        button.querySelector("[data-copy-label]")!.textContent = "Copy link";
+        if (label) label.textContent = original;
         button.querySelector('[data-copy-icon="link"]')?.classList.remove("hidden");
         button.querySelector('[data-copy-icon="done"]')?.classList.add("hidden");
       }, 1800);
     } catch {
-      button.querySelector("[data-copy-label]")!.textContent = "Press ⌘C";
+      if (label) label.textContent = "⌘C";
     }
   });
 </script>

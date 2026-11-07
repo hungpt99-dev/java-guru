@@ -1,12 +1,12 @@
 {
   "name": "java-guru",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "type": "module",
   "private": false,
   "description": "Personal engineering journal — backend, distributed systems, Java/JVM, security and AI.",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build && pagefind --site dist",
+    "build": "astro build && pagefind --site dist --force-language en",
     "preview": "astro preview",
     "sync": "astro sync",
     "astro": "astro",
@@ -15,11 +15,12 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "migrate": "node scripts/migration/fetch.mjs && node scripts/migration/migrate.mjs && node scripts/migration/validate.mjs",
-    "migrate:build": "node scripts/migration/migrate.mjs && node scripts/migration/validate.mjs",
     "fonts": "node scripts/fonts.mjs",
     "assets": "node scripts/prepare-assets.mjs",
-    "prepare": "husky"
+    "prepare": "husky",
+    "validate": "node scripts/validate-content.mjs",
+    "check:disclosures": "node scripts/check-disclosures.mjs dist",
+    "verify": "node scripts/validate-content.mjs && node scripts/check-disclosures.mjs dist"
   },
   "engines": {
     "node": ">=20.19.0"

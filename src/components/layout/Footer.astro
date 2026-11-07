@@ -1,9 +1,19 @@
 ---
 import { SITE } from "@/config";
-import { getPosts, getCategories } from "@/utils/posts";
+import { type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { localePath, formatDate } from "@/utils/i18n";
+import { getPosts, getCategories, articleCount } from "@/utils/posts";
 
-const posts = await getPosts();
-const categories = getCategories(posts);
+export interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const t = useTranslations(locale);
+const posts = await getPosts(locale);
+const categories = getCategories(posts, locale);
+const count = await articleCount();
 const year = new Date().getFullYear();
 const latest = posts[0];
 ---
@@ -11,57 +21,65 @@ const latest = posts[0];
 <footer class="border-line bg-sunken/40 mt-24 border-t">
   <div class="shell grid gap-10 py-14 md:grid-cols-[1.5fr_1fr_1fr] md:gap-8">
     <div class="max-w-sm">
-      <a href="/" class="flex items-baseline gap-2.5">
+      <a href={localePath(locale, "/")} class="flex items-baseline gap-2.5">
         <span class="text-primary/70 font-mono text-xs">~/</span>
         <span class="font-display text-base font-extrabold tracking-[-0.03em]">
           java<span class="text-primary">guru</span>
         </span>
       </a>
       <p class="text-muted mt-3 text-sm leading-relaxed">
-        A personal engineering journal by {SITE.author.name} — {posts.length} essays on backend systems,
-        the JVM, infrastructure and the occasional production incident.
+        {t("footer.blurb", { name: SITE.author.name, count })}
       </p>
       <p class="text-subtle mt-4 font-mono text-[0.65rem]">
         {
           latest
-            ? `Last entry ${latest.data.pubDatetime.toISOString().slice(0, 10)}`
-            : "No entries yet"
+            ? (locale === "vi" ? "Bài mới nhất " : "Last entry ") +
+              formatDate(latest.data.pubDate, locale)
+            : ""
         }
       </p>
     </div>
 
-    <nav aria-label="Footer">
-      <p class="label-mono mb-3">Journal</p>
+    <nav aria-label={t("nav.footer")}>
+      <p class="label-mono mb-3">{t("footer.journal")}</p>
       <ul class="space-y-2 text-sm">
         {
           SITE.nav.map((item) => (
             <li>
-              <a href={item.href} class="text-muted hover:text-primary transition-colors">
-                {item.label}
+              <a
+                href={localePath(locale, item.path)}
+                class="text-muted hover:text-primary transition-colors"
+              >
+                {t(item.key)}
               </a>
             </li>
           ))
         }
         <li>
-          <a href="/archives" class="text-muted hover:text-primary transition-colors">Archive</a>
+          <a
+            href={localePath(locale, "/archives/")}
+            class="text-muted hover:text-primary transition-colors"
+          >
+            {t("footer.archive")}
+          </a>
         </li>
       </ul>
     </nav>
 
     <div>
-      <p class="label-mono mb-3">Elsewhere</p>
+      <p class="label-mono mb-3">{t("footer.elsewhere")}</p>
       <ul class="space-y-2 text-sm">
         {
           SITE.socials.map((social) => (
             <li>
               <a
-                href={social.href}
+                href={social.local ? localePath(locale, social.href) : social.href}
                 class="group text-muted hover:text-primary inline-flex items-center gap-2 transition-colors"
-                rel={social.href.startsWith("http") ? "me noopener" : undefined}
+                rel={social.local ? undefined : "me noopener"}
               >
                 {social.label}
                 <span class="text-subtle group-hover:text-primary/70 font-mono text-[0.6rem]">
-                  {social.note}
+                  {social.note[locale]}
                 </span>
               </a>
             </li>
@@ -69,7 +87,7 @@ const latest = posts[0];
         }
       </ul>
       <p class="text-subtle mt-5 font-mono text-[0.65rem] leading-relaxed">
-        {categories.length} topics · {posts.length} posts
+        {t("footer.counts", { topics: categories.length, posts: count })}
       </p>
     </div>
   </div>
@@ -77,15 +95,15 @@ const latest = posts[0];
   <div
     class="shell border-line text-subtle flex flex-col gap-3 border-t py-5 font-mono text-[0.65rem] sm:flex-row sm:items-center sm:justify-between"
   >
-    <p>© {year} {SITE.author.name}. Words are mine; code is MIT.</p>
+    <p>{t("footer.rights", { year, name: SITE.author.name })}</p>
     <p class="flex items-center gap-4">
-      <a href="/rss.xml" class="hover:text-primary transition-colors">rss</a>
-      <a
-        href="https://github.com/hungpt99-dev/java-guru"
-        class="hover:text-primary transition-colors"
-        rel="noopener">source</a
-      >
-      <a href="#top" class="hover:text-primary transition-colors">top ↑</a>
+      <a href={localePath(locale, "/rss.xml")} class="hover:text-primary transition-colors">
+        {t("footer.rss")}
+      </a>
+      <a href={SITE.repo} class="hover:text-primary transition-colors" rel="noopener">
+        {t("footer.source")}
+      </a>
+      <a href="#top" class="hover:text-primary transition-colors">{t("common.top")}</a>
     </p>
   </div>
 </footer>

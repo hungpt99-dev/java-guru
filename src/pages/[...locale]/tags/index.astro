@@ -1,0 +1,70 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import { getPosts, getTags } from "@/utils/posts";
+import { localePath } from "@/utils/i18n";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+
+const posts = await getPosts(locale);
+const tags = getTags(posts);
+const max = tags[0]?.count ?? 1;
+
+/** Weight → type scale, so recurring tags read louder than one-offs. */
+const weight = (count: number) => {
+  const ratio = count / max;
+  if (ratio > 0.6) return "text-[1.35rem] text-fg";
+  if (ratio > 0.3) return "text-[1.1rem] text-fg/90";
+  if (ratio > 0.15) return "text-[0.95rem] text-muted";
+  return "text-[0.85rem] text-subtle";
+};
+---
+
+<BaseLayout title={t("tags.title")} description={t("tags.lede")} locale={locale} route="/tags/">
+  <section class="shell pt-12 pb-8 md:pt-16">
+    <p class="eyebrow">{t("tags.title")}</p>
+    <h1 class="display-lg mt-4 max-w-[26ch]">
+      {tags.length}
+      {locale === "vi" ? " thẻ," : " tags,"}<br />
+      <span class="text-muted">
+        {locale === "vi" ? "nhãn ngắn mình gắn khi viết." : "short labels, honestly kept."}
+      </span>
+    </h1>
+    <p class="text-muted mt-4 max-w-[40rem] text-[0.95rem] leading-relaxed">{t("tags.lede")}</p>
+  </section>
+
+  <section class="shell pb-16">
+    <div class="panel p-6 md:p-8">
+      <div class="flex flex-wrap items-baseline gap-x-5 gap-y-3">
+        {
+          tags.map((tag) => (
+            <a
+              href={localePath(locale, `/tags/${tag.slug}/`)}
+              class:list={[
+                "group hover:text-primary font-display inline-flex items-baseline gap-1.5 font-medium tracking-[-0.01em] transition-colors",
+                weight(tag.count),
+              ]}
+            >
+              <span>#{tag.label}</span>
+              <span class="text-subtle group-hover:text-primary/70 font-mono text-[0.6rem]">
+                {tag.count}
+              </span>
+            </a>
+          ))
+        }
+      </div>
+    </div>
+
+    <div class="text-subtle mt-8 flex flex-wrap items-center gap-3 font-mono text-[0.68rem]">
+      <a href={localePath(locale, "/categories/")} class="link">{t("tags.browseTopics")}</a>
+      <span class="opacity-40">/</span>
+      <a href={localePath(locale, "/posts/")} class="link">{t("tags.allArticles")}</a>
+    </div>
+  </section>
+</BaseLayout>

@@ -1,0 +1,81 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import { getPosts } from "@/utils/posts";
+import { formatDate, localePath } from "@/utils/i18n";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+
+const posts = await getPosts(locale);
+const years = new Map<number, typeof posts>();
+for (const post of posts) {
+  const year = post.data.pubDate.getFullYear();
+  years.set(year, [...(years.get(year) ?? []), post]);
+}
+const ordered = [...years.entries()].sort((a, b) => b[0] - a[0]);
+---
+
+<BaseLayout
+  title={t("archives.title")}
+  description={t("archives.lede", { count: posts.length, years: ordered.length })}
+  locale={locale}
+  route="/archives/"
+>
+  <section class="shell pt-12 pb-8 md:pt-16">
+    <p class="eyebrow">{t("archives.title")}</p>
+    <h1 class="display-lg mt-4">
+      {locale === "vi" ? "Tất cả, theo từng năm." : "Everything, by year."}
+    </h1>
+    <p class="text-muted mt-4 max-w-[36rem] text-[0.95rem] leading-relaxed">
+      {t("archives.lede", { count: posts.length, years: ordered.length })}
+    </p>
+  </section>
+
+  <section class="shell pb-20">
+    {
+      ordered.map(([year, entries]) => (
+        <div class="mb-12">
+          <div class="mb-3 flex items-baseline gap-4">
+            <h2 class="font-display text-primary/90 text-3xl font-bold tracking-[-0.03em]">
+              {year}
+            </h2>
+            <span class="bg-line h-px flex-1" />
+            <span class="text-subtle font-mono text-[0.62rem]">
+              {entries.length} {t("common.posts")}
+            </span>
+          </div>
+
+          <ul class="border-line border-b">
+            {entries.map((post) => (
+              <li>
+                <a
+                  href={localePath(locale, `/posts/${post.data.slug}/`)}
+                  class="group hover:bg-sunken/40 border-line grid grid-cols-[4.2rem_1fr] items-baseline gap-3 border-t py-2.5 transition-colors sm:grid-cols-[5rem_1fr_9rem]"
+                >
+                  <time
+                    datetime={post.data.pubDate.toISOString()}
+                    class="text-subtle font-mono text-[0.65rem]"
+                  >
+                    {formatDate(post.data.pubDate, locale).slice(0, 6)}
+                  </time>
+                  <span class="font-display group-hover:text-primary text-[0.98rem] leading-snug font-medium tracking-[-0.01em] transition-colors">
+                    {post.data.title}
+                  </span>
+                  <span class="text-subtle hidden justify-self-end font-mono text-[0.62rem] sm:block">
+                    {post.data.category}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))
+    }
+  </section>
+</BaseLayout>

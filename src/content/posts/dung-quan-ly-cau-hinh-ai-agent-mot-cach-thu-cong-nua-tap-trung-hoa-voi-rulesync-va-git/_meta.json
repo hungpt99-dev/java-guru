@@ -1,0 +1,8 @@
+{
+  "title": "Stop Managing AI Agent Configuration by Hand: Centralize It with Rulesync and Git",
+  "description": "A single repository to manage Skills, Hooks, MCP, Rules and the entire AI Agent configuration.",
+  "flags": [
+    "'Generate cấu hình' rendered as 'Generate the configuration' / 'generate' — kept as-is because it names the Rulesync CLI action, not a generic verb",
+    "Table header 'Chức năng' rendered as 'Function' (column label only)"
+  ]
+}

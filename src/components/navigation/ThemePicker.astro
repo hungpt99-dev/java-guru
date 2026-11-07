@@ -1,11 +1,15 @@
 ---
 import { Palette } from "@lucide/astro";
+import { type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
 
 export interface Props {
   themes: ReadonlyArray<{ id: string; label: string; mode: string }>;
+  locale: Locale;
 }
 
-const { themes } = Astro.props;
+const { themes, locale } = Astro.props;
+const t = useTranslations(locale);
 
 const swatches: Record<string, string[]> = {
   "tokyo-night": ["#7AA2F7", "#7DCFFF", "#BB9AF7"],
@@ -23,7 +27,7 @@ const swatches: Record<string, string[]> = {
     data-theme-toggle
     aria-haspopup="true"
     aria-expanded="false"
-    aria-label="Change colour theme"
+    aria-label={t("common.changeTheme")}
   >
     <Palette size={15} stroke-width={1.75} />
     <span class="hidden items-center gap-[3px] sm:flex" aria-hidden="true">
@@ -33,8 +37,8 @@ const swatches: Record<string, string[]> = {
     </span>
   </button>
 
-  <div class="theme-pop" role="radiogroup" aria-label="Colour theme" data-theme-pop hidden>
-    <p class="label-mono px-2 pt-1.5 pb-2">Theme</p>
+  <div class="theme-pop" role="radiogroup" aria-label={t("common.theme")} data-theme-pop hidden>
+    <p class="label-mono px-2 pt-1.5 pb-2">{t("common.theme")}</p>
     {
       themes.map((theme) => (
         <button
@@ -50,7 +54,9 @@ const swatches: Record<string, string[]> = {
             ))}
           </span>
           <span class="flex-1">{theme.label}</span>
-          <span class="text-subtle font-mono text-[0.6rem]">{theme.mode}</span>
+          <span class="text-subtle font-mono text-[0.6rem]">
+            {theme.mode === "light" ? t("common.light") : t("common.dark")}
+          </span>
         </button>
       ))
     }

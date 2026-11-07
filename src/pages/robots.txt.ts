@@ -3,14 +3,9 @@ import { SITE } from "@/config";
 
 export function GET(context: APIContext) {
   const site = (context.site ?? SITE.url).toString().replace(/\/$/, "");
-  const body = [
-    "User-agent: *",
-    "Allow: /",
-    "",
-    "# Generated sitemap (index + per-page files)",
-    `Sitemap: ${site}/sitemap-index.xml`,
-    "",
-  ].join("\n");
+  const body = ["User-agent: *", "Allow: /", "", `Sitemap: ${site}/sitemap-index.xml`, ""].join(
+    "\n"
+  );
 
   return new Response(body, {
     headers: {

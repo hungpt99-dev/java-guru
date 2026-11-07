@@ -1,0 +1,110 @@
+---
+import type { GetStaticPaths, Page } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import PostRow from "@/components/blog/PostRow.astro";
+import Pagination from "@/components/navigation/Pagination.astro";
+import { getPosts, getCategories, postsByCategory, getTags, type Post } from "@/utils/posts";
+import { SITE } from "@/config";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { localePath } from "@/utils/i18n";
+
+export const getStaticPaths = (async ({ paginate }) => {
+  const routes = [];
+  for (const locale of LOCALES) {
+    const posts = await getPosts(locale);
+    for (const category of getCategories(posts, locale)) {
+      routes.push(
+        ...paginate(postsByCategory(posts, category.slug), {
+          params: { locale, category: category.slug },
+          props: { locale, category },
+          pageSize: SITE.postsPerPage,
+        })
+      );
+    }
+  }
+  return routes;
+}) satisfies GetStaticPaths;
+
+const { locale, category, page } = Astro.props as {
+  locale: Locale;
+  category: {
+    name: string;
+    label: string;
+    slug: string;
+    count: number;
+    accent: string;
+    blurb: string;
+  };
+  page: Page<Post>;
+};
+const t = useTranslations(locale);
+
+const posts = await getPosts(locale);
+const tags = getTags(posts).slice(0, 10);
+const offset = (page.currentPage - 1) * SITE.postsPerPage;
+---
+
+<BaseLayout
+  title={category.label}
+  description={`${t("categories.count", { count: category.count })} — ${category.blurb}`}
+  locale={locale}
+  route={`/categories/${category.slug}/`}
+>
+  <section class:list={["shell pt-12 pb-8 md:pt-16", `cat-${category.accent}`]}>
+    <nav
+      class="text-subtle mb-6 flex items-center gap-2 font-mono text-[0.65rem]"
+      aria-label="Breadcrumb"
+    >
+      <a href={localePath(locale, "/")} class="hover:text-primary">{t("nav.journal")}</a>
+      <span aria-hidden="true">/</span>
+      <a href={localePath(locale, "/categories/")} class="hover:text-primary">{t("nav.topics")}</a>
+    </nav>
+
+    <p class="eyebrow">
+      {t("nav.topics")} · {t("categories.count", { count: category.count })}
+    </p>
+    <h1 class="display-lg mt-4">{category.label}</h1>
+    <p class="text-muted mt-3 max-w-[36rem] text-[0.95rem] leading-relaxed">{category.blurb}</p>
+
+    <div class="mt-6 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <span class="label-mono mr-1">{t("posts.filterTag")}</span>
+      {
+        tags.map((tag) => (
+          <a
+            href={localePath(locale, `/tags/${tag.slug}/`)}
+            class="text-subtle hover:text-primary font-mono text-[0.68rem]"
+          >
+            #{tag.label}
+          </a>
+        ))
+      }
+    </div>
+  </section>
+
+  <section class="shell pb-16">
+    <div class="border-line flex items-center justify-between border-b pb-2">
+      <p class="label-mono">
+        {
+          page.currentPage === 1
+            ? t("common.latest")
+            : t("posts.pageOf", { current: page.currentPage, total: page.lastPage })
+        }
+      </p>
+      <a href={localePath(locale, "/posts/")} class="label-mono hover:text-primary">
+        {t("tags.allArticles")} →
+      </a>
+    </div>
+
+    <div class="border-line border-b">
+      {page.data.map((post, i) => <PostRow post={post} index={offset + i} />)}
+    </div>
+
+    <Pagination
+      current={page.currentPage}
+      total={page.lastPage}
+      base={`/categories/${category.slug}`}
+      locale={locale}
+    />
+  </section>
+</BaseLayout>

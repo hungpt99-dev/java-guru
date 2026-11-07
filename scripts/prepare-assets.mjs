@@ -3,7 +3,7 @@
  * Build the site's own raster assets: avatar, favicons, default OG image and
  * the web manifest. Run with `pnpm assets`. Safe to re-run (idempotent).
  */
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -12,8 +12,6 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PUB = join(ROOT, "public");
 const FAV = join(PUB, "favicon");
 const IMG = join(PUB, "images");
-
-const AVATAR_SOURCE = "https://images.viblo.asia/3cda0532-772d-4648-a7aa-f46669f4e811.jpg";
 
 const MARK = `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -59,14 +57,20 @@ async function main() {
   await mkdir(IMG, { recursive: true });
 
   // --- avatar -------------------------------------------------------------
-  const res = await fetch(AVATAR_SOURCE, { headers: { "user-agent": "java-guru/build" } });
-  if (!res.ok) throw new Error(`avatar download failed: ${res.status}`);
-  const raw = Buffer.from(await res.arrayBuffer());
-  await sharp(raw)
-    .resize(480, 480, { fit: "cover", position: "attention" })
-    .jpeg({ quality: 88, progressive: true, mozjpeg: true })
-    .toFile(join(IMG, "avatar.jpg"));
-  console.log("avatar.jpg");
+  // The portrait is committed; re-encode it in place so the file stays small
+  // and square without depending on an external host at build time.
+  const avatarPath = join(IMG, "avatar.jpg");
+  try {
+    const source = await readFile(avatarPath);
+    await sharp(source)
+      .resize(480, 480, { fit: "cover", position: "attention" })
+      .jpeg({ quality: 88, progressive: true, mozjpeg: true })
+      .toFile(join(IMG, "avatar.tmp.jpg"));
+    await rename(join(IMG, "avatar.tmp.jpg"), avatarPath);
+    console.log("avatar.jpg");
+  } catch {
+    console.warn("avatar.jpg missing — add public/images/avatar.jpg first");
+  }
 
   // --- favicons -----------------------------------------------------------
   await writeFile(join(PUB, "favicon.svg"), MARK.trim());

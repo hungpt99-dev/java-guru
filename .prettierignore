@@ -15,12 +15,10 @@
 !Caddyfile
 !scripts
 
-# Migrated article bodies and source snapshots are never reformatted: they must
-# stay byte-identical to what was published on Viblo.
-/src/content/blog
-/src/assets/articles
-/scripts/migration/source
-/migration-report
+# Article bodies are content, not code: never reformatted by tooling.
+/src/content/posts
 /dist
 /.astro
 /public/fonts
+
+pnpm-lock.yaml

@@ -1,75 +1,111 @@
 ---
 import { Search } from "@lucide/astro";
+import { type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const t = useTranslations(locale);
 ---
 
-<div class="search-panel" data-search-root hidden>
-  <div class="search-box" role="dialog" aria-modal="true" aria-label="Search the journal">
+<div
+  class="search-panel"
+  data-search-root
+  data-hint={t("search.hint")}
+  data-none={t("search.none")}
+  data-missing={t("search.indexMissing")}
+  hidden
+>
+  <div class="search-box" role="dialog" aria-modal="true" aria-label={t("common.searchArticles")}>
     <div class="border-line flex items-center gap-2 border-b px-3">
       <Search size={15} stroke-width={1.75} class="text-subtle shrink-0" />
       <input
         type="search"
         class="search-input !border-0"
-        placeholder="Search articles, topics, tags…"
-        aria-label="Search articles"
+        placeholder={t("search.placeholder")}
+        aria-label={t("common.searchArticles")}
         autocomplete="off"
         spellcheck="false"
         data-search-input
       />
-      <button type="button" class="btn btn--ghost !min-h-7 !px-2 !text-[0.6rem]" data-search-close
-        >esc</button
-      >
+      <button type="button" class="btn btn--ghost !min-h-7 !px-2 !text-[0.6rem]" data-search-close>
+        esc
+      </button>
     </div>
-    <div class="search-results" data-search-results role="listbox" aria-label="Results">
-      <p class="text-subtle px-3 py-6 text-center font-mono text-[0.7rem]">
-        Search runs on a static index built at deploy time.
-      </p>
+
+    <div class="border-line flex items-center gap-2 border-b px-3 py-1.5">
+      <span class="label-mono">{t("search.scope")}</span>
+      <div class="flex gap-1" role="radiogroup" aria-label={t("search.scope")}>
+        <button
+          type="button"
+          class="scope-pill"
+          role="radio"
+          aria-checked="true"
+          data-scope="locale"
+          data-locale={locale}
+        >
+          {t("search.scopeCurrent")}
+        </button>
+        <button type="button" class="scope-pill" role="radio" aria-checked="false" data-scope="all">
+          {t("search.scopeAll")}
+        </button>
+      </div>
     </div>
+
+    <div class="search-results" data-search-results role="listbox" aria-label={t("search.scope")}>
+      <p class="text-subtle px-3 py-6 text-center font-mono text-[0.7rem]">{t("search.hint")}</p>
+    </div>
+
     <div
       class="border-line text-subtle flex items-center justify-between border-t px-3 py-2 font-mono text-[0.6rem]"
     >
-      <span>↑↓ to navigate · ↵ to open</span>
-      <a href="/search" class="hover:text-primary">all results →</a>
+      <span>↑↓ · ↵</span>
+      <a href={`/${locale}/search/`} class="hover:text-primary">{t("search.title")} →</a>
     </div>
   </div>
 </div>
 
 <script>
-  type PagefindResult = {
-    data: () => Promise<{
-      url: string;
-      excerpt: string;
-      meta: { title?: string };
-      raw_url?: string;
-    }>;
+  type Hit = {
+    data: () => Promise<{ url: string; excerpt: string; meta: { title?: string } }>;
   };
   type Pagefind = {
-    options: (opts: Record<string, unknown>) => void;
-    search: (query: string) => Promise<{ results: PagefindResult[] }>;
+    options: (o: Record<string, unknown>) => void;
+    search: (q: string, o?: Record<string, unknown>) => Promise<{ results: Hit[] }>;
   };
 
-  const panel = document.querySelector<HTMLElement>("[data-search-root]");
+  const root = document.querySelector<HTMLElement>("[data-search-root]");
   const input = document.querySelector<HTMLInputElement>("[data-search-input]");
   const results = document.querySelector<HTMLElement>("[data-search-results]");
+  const scopeButtons = [...(root?.querySelectorAll<HTMLButtonElement>("[data-scope]") ?? [])];
   const openers = [...document.querySelectorAll<HTMLElement>("[data-search-open]")];
   const closers = [...document.querySelectorAll<HTMLElement>("[data-search-close]")];
+  const locale = scopeButtons[0]?.dataset.locale ?? "en";
+
+  const strings = {
+    hint: root?.dataset.hint ?? "",
+    none: root?.dataset.none ?? "",
+    missing: root?.dataset.missing ?? "",
+  };
 
   let pagefind: Pagefind | null = null;
-  let loadError: string | null = null;
+  let loadError = false;
   let selected = -1;
   let hits: HTMLElement[] = [];
+  let scope: "locale" | "all" = "locale";
 
   const load = async () => {
     if (pagefind || loadError) return pagefind;
     try {
-      // Pagefind writes this bundle into dist/ at build time; it is not part of
-      // the dev server, where the catch below shows a friendly hint instead.
       const pfUrl = "/pagefind/pagefind.js";
       const mod = await import(/* @vite-ignore */ pfUrl);
       pagefind = (mod.default ?? mod) as Pagefind;
       pagefind.options({ excerptLength: 22 });
     } catch {
-      loadError =
-        "The search index is generated by `pnpm build`. Run a production build to search locally.";
+      loadError = true;
     }
     return pagefind;
   };
@@ -81,22 +117,22 @@ import { Search } from "@lucide/astro";
     selected = -1;
   };
 
-  const render = async (query: string) => {
-    const pf = await load();
-    if (!pf) return message(loadError ?? "Search is unavailable.");
-    if (query.trim().length < 2) return message("Type at least two characters.");
-    const search = await pf.search(query);
-    const top = search.results.slice(0, 8);
-    if (!top.length) return message(`No results for “${query}”.`);
-    const data = await Promise.all(top.map((r) => r.data()));
+  const run = async (query: string) => {
     if (!results) return;
+    if (query.trim().length < 2) return message(strings.hint);
+    const pf = await load();
+    if (!pf) return message(strings.missing);
+    const search = await pf.search(query, scope === "locale" ? { filters: { locale } } : undefined);
+    const top = search.results.slice(0, 8);
+    if (!top.length) return message(strings.none);
+    const data = await Promise.all(top.map((r) => r.data()));
     results.innerHTML = "";
     hits = data.map((item) => {
       const a = document.createElement("a");
       a.className = "search-hit";
       a.href = item.url;
       a.setAttribute("role", "option");
-      a.innerHTML = `<h4>${item.meta.title ?? "Untitled"}</h4><p>${item.excerpt}</p>`;
+      a.innerHTML = `<h4>${item.meta.title ?? ""}</h4><p>${item.excerpt}</p>`;
       return a;
     });
     for (const hit of hits) results.appendChild(hit);
@@ -104,16 +140,16 @@ import { Search } from "@lucide/astro";
   };
 
   const open = () => {
-    if (!panel) return;
-    panel.hidden = false;
+    if (!root) return;
+    root.hidden = false;
     document.body.style.overflow = "hidden";
     input?.focus();
     input?.select();
   };
 
   const close = () => {
-    if (!panel) return;
-    panel.hidden = true;
+    if (!root) return;
+    root.hidden = true;
     document.body.style.overflow = "";
   };
 
@@ -126,28 +162,38 @@ import { Search } from "@lucide/astro";
 
   for (const opener of openers) opener.addEventListener("click", open);
   for (const closer of closers) closer.addEventListener("click", close);
-  panel?.addEventListener("click", (event) => {
-    if (event.target === panel) close();
+  root?.addEventListener("click", (event) => {
+    if (event.target === root) close();
   });
+
+  for (const button of scopeButtons) {
+    button.addEventListener("click", () => {
+      scope = button.dataset.scope === "all" ? "all" : "locale";
+      for (const other of scopeButtons) {
+        other.setAttribute("aria-checked", String(other === button));
+      }
+      if (input?.value) void run(input.value);
+    });
+  }
 
   let timer: number | undefined;
   input?.addEventListener("input", () => {
     window.clearTimeout(timer);
-    timer = window.setTimeout(() => void render(input.value), 180);
+    timer = window.setTimeout(() => void run(input.value), 180);
   });
 
   document.addEventListener("keydown", (event) => {
-    const isTypingTarget =
+    const typing =
       event.target instanceof HTMLElement &&
       ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName);
 
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
-      if (panel?.hidden) open();
+      if (root?.hidden) open();
       else close();
       return;
     }
-    if (panel?.hidden) return;
+    if (root?.hidden) return;
     if (event.key === "Escape") {
       event.preventDefault();
       close();
@@ -164,7 +210,7 @@ import { Search } from "@lucide/astro";
       event.preventDefault();
       hits[selected]?.click();
     }
-    if (event.key === "/" && !isTypingTarget) {
+    if (event.key === "/" && !typing) {
       event.preventDefault();
       open();
     }

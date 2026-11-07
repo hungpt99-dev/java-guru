@@ -1,0 +1,32 @@
+# Cloudflare Pages redirects.
+#
+# The site moved from single-language routes to /en/… and /vi/…, so every legacy
+# URL keeps working and points at the English edition.
+
+# Articles and listings
+/posts            /en/posts/            301
+/posts/           /en/posts/            301
+/posts/*          /en/posts/:splat      301
+
+# Topic and tag indexes
+/categories       /en/categories/       301
+/categories/      /en/categories/       301
+/categories/*     /en/categories/:splat 301
+/tags             /en/tags/             301
+/tags/            /en/tags/             301
+/tags/*           /en/tags/:splat       301
+
+# Standalone pages
+/archives         /en/archives/         301
+/archives/        /en/archives/         301
+/about            /en/about/            301
+/about/           /en/about/            301
+/projects         /en/projects/         301
+/projects/        /en/projects/         301
+/homelab          /en/homelab/          301
+/homelab/         /en/homelab/          301
+/search           /en/search/           301
+/search/          /en/search/           301
+
+# Feeds
+/rss.xml          /en/rss.xml           301

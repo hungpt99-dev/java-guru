@@ -18,6 +18,12 @@
 	root * /srv
 	encode zstd gzip
 
+	# Legacy single-language URLs (pre /en/) keep working and point at English.
+	@legacy path /posts /posts/* /categories /categories/* /tags /tags/* \
+		/archives /archives/* /about /about/* /projects /projects/* \
+		/homelab /homelab/* /search /search/* /rss.xml
+	redir @legacy /en{uri} permanent
+
 	# Static build: directories carry an index.html, clean URLs have no extension.
 	try_files {path} {path}/ {path}/index.html
 

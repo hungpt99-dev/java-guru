@@ -1,0 +1,5 @@
+{
+  "title": "Ralph Loop: Turning AI Agents Into Long-Running Agents",
+  "description": "Ralph Loop, also known as the Ralph Wiggum technique, is essentially a loop that runs an AI agent many times against the same goal, letting each iteration start with a fresh context and read the project's real state instead of relying on a long conversation. The article explains fresh context, why Ralph is really a feedback loop, when it works and when it doesn't, and why a production-ready loop still needs iteration limits, completion criteria and verification.",
+  "flags": []
+}
