@@ -96,6 +96,9 @@ java-guru/
 /en/posts/<slug>/                  same slug in both locales
 /en/categories/  /en/categories/<slug>/
 /en/tags/        /en/tags/<slug>/
+/en/collection/                    curated reading library
+/en/collection/blogs/              the Blogs shelf
+/en/collection/blogs/<id>/         one curated article
 /en/archives/  /en/about/  /en/projects/  /en/homelab/  /en/search/
 /en/rss.xml      /vi/rss.xml
 ```
@@ -216,6 +219,58 @@ container). Each page carries a `locale` filter, so the UI can offer:
 - **All languages** — both editions, clearly separated by URL.
 
 Available from the header dialog (⌘K / Ctrl-K) and `/en/search/` · `/vi/search/`.
+
+## Engineering Collection
+
+`/en/collection/` is a curated library of **external** engineering writing — system
+design, distributed systems, databases, infrastructure, reliability and security.
+It is not a publishing surface: every entry links out, and the site never stores
+the full article.
+
+Only **Blogs** is implemented. Books, Videos, Courses, Papers and Repositories are
+listed as planned shelves without routes, so there are no empty pages to land on.
+
+### Adding an article
+
+Everything lives in one file: [`src/data/engineering-blogs.json`](src/data/engineering-blogs.json).
+
+```json
+{
+  "id": "canva-session-revocations",
+  "title": "Session revocations at scale",
+  "company": "Canva",
+  "url": "https://www.canva.dev/blog/engineering/session-revocations-at-scale/",
+  "publishedAt": "2026-07-22",
+  "description": "One or two sentences, editorial.",
+  "descriptionVi": "Bản tiếng Việt của mô tả.",
+  "topics": ["Distributed Systems", "Security", "System Design"],
+  "readingTime": 12,
+  "featured": true,
+  "editorNote": "Why this one is worth the reader's time.",
+  "editorNoteVi": "Vì sao bài này đáng thời gian của người đọc.",
+  "takeaways": ["Optional, three short lines."],
+  "takeawaysVi": ["Không bắt buộc, ba dòng ngắn."]
+}
+```
+
+`src/data/engineering-collection.ts` validates every entry **at build time** and
+fails loudly on a duplicate id, unknown company/topic, non-https URL, malformed
+date, or mismatched EN/VI takeaway count. Counts, filters and sorting are derived;
+no component edits are needed to add an article.
+
+Rules the data follows:
+
+- `company` is one of the keys in `COMPANY_KEYS`; use `"Other"` plus
+  `"companyName": "Figma"` for a brand outside the named list.
+- `topics` must come from `TOPIC_KEYS` (the ten topics the filters expose).
+- `publishedAt` is the date shown on the source page, `YYYY-MM-DD`.
+- `readingTime` is included only when the source publishes one — never estimated.
+- Descriptions and notes are written for this collection; titles, dates and links
+  belong to the original publisher.
+
+Filtering, search and sorting run entirely in the browser over server-rendered
+cards, so the page works without JavaScript (all entries stay visible) and needs
+no API.
 
 ## Deployment
 

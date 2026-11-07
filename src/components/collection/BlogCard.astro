@@ -1,0 +1,74 @@
+---
+import { ArrowUpRight } from "@lucide/astro";
+import {
+  COMPANIES,
+  articleCompanyName,
+  articleCopy,
+  topicLabel,
+  type EngineeringArticle,
+} from "@/data/engineering-collection";
+import { formatDate, localePath } from "@/utils/i18n";
+import { useTranslations } from "@/i18n/ui";
+import type { Locale } from "@/i18n/config";
+
+export interface Props {
+  article: EngineeringArticle;
+  locale: Locale;
+  /** Adds the data attributes the collection browser filters on. */
+  filterable?: boolean;
+}
+
+const { article, locale, filterable = false } = Astro.props;
+const t = useTranslations(locale);
+const { description } = articleCopy(article, locale);
+const company = articleCompanyName(article);
+const href = localePath(locale, `/collection/blogs/${article.id}/`);
+const brand = `oklch(var(--cat-l) var(--cat-c) ${COMPANIES[article.company].hue})`;
+const searchBlob = [article.title, description, company, ...article.topics].join(" ").toLowerCase();
+---
+
+<article
+  class:list={["ec-card", article.featured && "ec-card--featured"]}
+  data-ec-item={filterable ? "" : undefined}
+  data-company={filterable ? article.company : undefined}
+  data-topics={filterable ? article.topics.join("|") : undefined}
+  data-date={filterable ? article.publishedAt : undefined}
+  data-featured={filterable ? String(article.featured) : undefined}
+  data-search={filterable ? searchBlob : undefined}
+>
+  <a href={href} class="absolute inset-0 z-10" aria-label={article.title}></a>
+
+  <div class="ec-card__head">
+    <span class="ec-monogram" style={`--brand: ${brand}`} aria-hidden="true">
+      {company.slice(0, 1)}
+    </span>
+    <span class="ec-card__company">{company}</span>
+    {article.featured && <span class="ec-badge ml-auto">{t("collection.featured.label")}</span>}
+  </div>
+
+  <h3 class="ec-card__title">{article.title}</h3>
+  <p class="ec-card__desc">{description}</p>
+
+  <div class="ec-card__topics">
+    {
+      article.topics
+        .slice(0, 3)
+        .map((topic) => (
+          <span class="chip chip--neutral chip--sm">{topicLabel(topic, locale)}</span>
+        ))
+    }
+  </div>
+
+  <div class="ec-card__foot">
+    <time datetime={article.publishedAt}
+      >{formatDate(new Date(`${article.publishedAt}T00:00:00Z`), locale)}</time
+    >
+    {
+      article.readingTime ? (
+        <span>{t("common.readingTime", { minutes: article.readingTime })}</span>
+      ) : (
+        <ArrowUpRight size={13} stroke-width={1.75} aria-hidden="true" />
+      )
+    }
+  </div>
+</article>

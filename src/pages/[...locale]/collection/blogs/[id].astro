@@ -1,0 +1,234 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import BlogCard from "@/components/collection/BlogCard.astro";
+import CollectionNav from "@/components/collection/CollectionNav.astro";
+import { ArrowLeft, ArrowUpRight } from "@lucide/astro";
+import {
+  ARTICLES,
+  COMPANIES,
+  articleCompanyName,
+  articleCopy,
+  articleDate,
+  getArticle,
+  relatedArticles,
+  topicLabel,
+} from "@/data/engineering-collection";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { formatLongDate, localePath } from "@/utils/i18n";
+import { SITE } from "@/config";
+
+export const getStaticPaths = (() =>
+  LOCALES.flatMap((locale) =>
+    ARTICLES.map((article) => ({ params: { locale, id: article.id } }))
+  )) satisfies GetStaticPaths;
+
+const { locale, id } = Astro.params as { locale: Locale; id: string };
+const article = getArticle(id);
+
+if (!article) {
+  throw new Error(`Unknown collection article: ${id}`);
+}
+
+const t = useTranslations(locale);
+const { description, editorNote, takeaways } = articleCopy(article, locale);
+const company = articleCompanyName(article);
+const brand = `oklch(var(--cat-l) var(--cat-c) ${COMPANIES[article.company].hue})`;
+const published = articleDate(article);
+const route = `/collection/blogs/${article.id}/`;
+const domain = new URL(article.url).hostname.replace(/^www\./, "");
+const related = relatedArticles(article);
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "Article",
+  headline: article.title,
+  datePublished: article.publishedAt,
+  inLanguage: locale,
+  url: new URL(localePath(locale, route), Astro.site ?? SITE.url).href,
+  isBasedOn: article.url,
+  about: article.topics.map((topic) => topicLabel(topic, locale)),
+  publisher: { "@type": "Organization", name: company },
+  isPartOf: {
+    "@type": "CollectionPage",
+    name: t("collection.blogs.title"),
+    url: new URL(localePath(locale, "/collection/blogs/"), Astro.site ?? SITE.url).href,
+  },
+};
+---
+
+<BaseLayout
+  title={article.title}
+  description={description}
+  locale={locale}
+  type="website"
+  route={route}
+  section={t("collection.blogs.title")}
+  tags={article.topics}
+  jsonLd={jsonLd}
+>
+  <section class="shell pt-6">
+    <CollectionNav locale={locale} active="blogs" />
+  </section>
+
+  <article class="shell pt-8 pb-14 md:pt-10">
+    <a href={localePath(locale, "/collection/blogs/")} class="arrow-link inline-flex">
+      <ArrowLeft size={13} stroke-width={2} />
+      {t("collection.detail.back")}
+    </a>
+
+    <header class="mt-8 max-w-[54rem]">
+      <p class="text-subtle flex flex-wrap items-center gap-2 font-mono text-[0.65rem]">
+        <span class="ec-monogram ec-monogram--lg" style={`--brand: ${brand}`} aria-hidden="true"
+          >{company.slice(0, 1)}</span
+        >
+        <span class="text-fg-muted">{company}</span>
+        <span aria-hidden="true" class="opacity-40">/</span>
+        <time datetime={article.publishedAt}>{formatLongDate(published, locale)}</time>
+        {
+          article.featured && (
+            <>
+              <span aria-hidden="true" class="opacity-40">
+                /
+              </span>
+              <span class="ec-badge">{t("collection.featured.label")}</span>
+            </>
+          )
+        }
+      </p>
+
+      <h1 class="display-lg mt-5 text-balance">{article.title}</h1>
+
+      <p class="text-muted mt-5 max-w-[46rem] text-[1rem] leading-relaxed">{description}</p>
+
+      <div class="mt-6 flex flex-wrap gap-2">
+        {
+          article.topics.map((topic) => (
+            <span class="chip chip--neutral">{topicLabel(topic, locale)}</span>
+          ))
+        }
+      </div>
+
+      <div class="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <a href={article.url} target="_blank" rel="noopener noreferrer" class="btn btn--primary">
+          {t("collection.detail.readOriginal")}
+          <ArrowUpRight size={13} stroke-width={2} />
+        </a>
+        <span class="text-subtle font-mono text-[0.65rem]">
+          {t("collection.detail.sourceNote", { domain })}
+        </span>
+      </div>
+    </header>
+  </article>
+
+  <section class="shell pb-14">
+    <div class="grid gap-8 lg:grid-cols-[minmax(0,1fr)_17rem]">
+      <div class="space-y-8">
+        <div class="panel p-6 md:p-7">
+          <p class="label-mono">{t("collection.detail.why")}</p>
+          <p class="text-fg mt-3 font-serif text-[1.08rem] leading-[1.7] italic">
+            {editorNote}
+          </p>
+        </div>
+
+        {
+          takeaways.length > 0 && (
+            <div class="panel p-6 md:p-7">
+              <p class="label-mono">{t("collection.detail.takeaways")}</p>
+              <ol class="mt-4 space-y-3">
+                {takeaways.map((takeaway, index) => (
+                  <li class="flex gap-3">
+                    <span class="text-primary shrink-0 pt-[0.15rem] font-mono text-[0.66rem]">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
+                    <span class="text-muted text-[0.93rem] leading-relaxed">{takeaway}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )
+        }
+      </div>
+
+      <aside>
+        <div class="panel p-5">
+          <p class="label-mono">{t("collection.detail.details")}</p>
+          <dl class="mt-3 space-y-3 text-[0.82rem]">
+            <div>
+              <dt class="text-subtle font-mono text-[0.6rem] tracking-[0.12em] uppercase">
+                {t("collection.detail.company")}
+              </dt>
+              <dd class="text-muted mt-0.5">{company}</dd>
+            </div>
+            <div>
+              <dt class="text-subtle font-mono text-[0.6rem] tracking-[0.12em] uppercase">
+                {t("collection.detail.published")}
+              </dt>
+              <dd class="text-muted mt-0.5">
+                <time datetime={article.publishedAt}>{formatLongDate(published, locale)}</time>
+              </dd>
+            </div>
+            {
+              article.readingTime && (
+                <div>
+                  <dt class="text-subtle font-mono text-[0.6rem] tracking-[0.12em] uppercase">
+                    {t("collection.detail.readingTime")}
+                  </dt>
+                  <dd class="text-muted mt-0.5">
+                    {t("common.readingTime", { minutes: article.readingTime })}
+                  </dd>
+                </div>
+              )
+            }
+            <div>
+              <dt class="text-subtle font-mono text-[0.6rem] tracking-[0.12em] uppercase">
+                {t("collection.detail.topics")}
+              </dt>
+              <dd class="text-muted mt-1 space-y-1">
+                {article.topics.map((topic) => <p>{topicLabel(topic, locale)}</p>)}
+              </dd>
+            </div>
+            <div class="border-line border-t pt-3">
+              <dt class="text-subtle font-mono text-[0.6rem] tracking-[0.12em] uppercase">
+                {t("collection.detail.original")}
+              </dt>
+              <dd class="mt-1">
+                <a
+                  href={article.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="link font-mono text-[0.66rem] break-all"
+                >
+                  {article.url.replace(/^https:\/\//, "")}
+                </a>
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  {
+    related.length > 0 && (
+      <section class="shell pb-20">
+        <div class="border-line border-t pt-8">
+          <div class="mb-5 flex items-end justify-between gap-3">
+            <div>
+              <p class="eyebrow">{t("collection.detail.related")}</p>
+            </div>
+            <a href={localePath(locale, "/collection/blogs/")} class="arrow-link">
+              {t("collection.detail.back")}
+            </a>
+          </div>
+          <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {related.map((item) => (
+              <BlogCard article={item} locale={locale} />
+            ))}
+          </div>
+        </div>
+      </section>
+    )
+  }
+</BaseLayout>

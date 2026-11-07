@@ -1,0 +1,347 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import BlogCard from "@/components/collection/BlogCard.astro";
+import CollectionNav from "@/components/collection/CollectionNav.astro";
+import { Search } from "@lucide/astro";
+import {
+  ARTICLES,
+  FEATURED_ARTICLES,
+  SORTED_ARTICLES,
+  collectionStats,
+  companiesWithCounts,
+  topicLabel,
+  topicsWithCounts,
+} from "@/data/engineering-collection";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+const stats = collectionStats(ARTICLES);
+const companies = companiesWithCounts(ARTICLES);
+const topics = topicsWithCounts(ARTICLES);
+
+const statsRows = [
+  { value: String(stats.articles).padStart(2, "0"), label: t("collection.stats.articles") },
+  { value: String(stats.companies).padStart(2, "0"), label: t("collection.stats.companies") },
+  { value: String(stats.topics).padStart(2, "0"), label: t("collection.stats.topics") },
+];
+---
+
+<BaseLayout
+  title={t("collection.blogs.title")}
+  description={t("collection.blogs.subtitle")}
+  locale={locale}
+  route="/collection/blogs/"
+>
+  <section class="shell pt-6">
+    <CollectionNav locale={locale} active="blogs" />
+  </section>
+
+  <section class="shell pt-12 pb-10 md:pt-16">
+    <p class="eyebrow">{t("collection.title")} / {t("collection.blogs.eyebrow")}</p>
+    <h1 class="display-lg mt-4 max-w-[20ch]">{t("collection.blogs.title")}</h1>
+    <p class="text-muted mt-4 max-w-[44rem] text-[0.98rem] leading-relaxed">
+      {t("collection.blogs.subtitle")}
+    </p>
+
+    <dl
+      class="border-line bg-line mt-8 grid max-w-[36rem] grid-cols-3 gap-px overflow-hidden rounded-xl border"
+    >
+      {
+        statsRows.map((stat) => (
+          <div class="bg-bg px-4 py-4">
+            <dt class="text-subtle font-mono text-[0.6rem] tracking-[0.14em] uppercase">
+              {stat.label}
+            </dt>
+            <dd class="font-display mt-1 text-2xl font-bold tracking-tight">{stat.value}</dd>
+          </div>
+        ))
+      }
+    </dl>
+  </section>
+
+  {
+    FEATURED_ARTICLES.length > 0 && (
+      <section class="shell pb-14">
+        <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p class="eyebrow">{t("collection.featured.label")}</p>
+            <h2 class="font-display mt-2 text-[1.6rem] leading-tight font-bold tracking-[-0.025em]">
+              {t("collection.featured.title")}
+            </h2>
+          </div>
+          <span class="text-subtle font-mono text-[0.62rem]">
+            {String(FEATURED_ARTICLES.length).padStart(2, "0")} /{" "}
+            {String(ARTICLES.length).padStart(2, "0")}
+          </span>
+        </div>
+        <div class="grid gap-4 md:grid-cols-2">
+          {FEATURED_ARTICLES.map((article) => (
+            <BlogCard article={article} locale={locale} />
+          ))}
+        </div>
+      </section>
+    )
+  }
+
+  <section
+    class="shell pb-20"
+    data-ec-browser
+    data-results={t("collection.results")}
+    data-result-one={t("collection.resultsOne")}
+    data-error={t("collection.error")}
+  >
+    <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <p class="eyebrow">{t("collection.browse.title")}</p>
+        <h2 class="font-display mt-2 text-[1.6rem] leading-tight font-bold tracking-[-0.025em]">
+          {t("collection.browse.title")}
+        </h2>
+      </div>
+    </div>
+
+    {
+      ARTICLES.length === 0 ? (
+        <div class="ec-empty">
+          <p class="font-display text-lg font-semibold">{t("collection.empty.title")}</p>
+          <p class="text-muted max-w-[34rem] text-[0.9rem]">{t("collection.empty.collection")}</p>
+        </div>
+      ) : (
+        <>
+          <div class="ec-toolbar">
+            <label class="ec-search">
+              <Search
+                size={15}
+                stroke-width={1.75}
+                class="text-subtle shrink-0"
+                aria-hidden="true"
+              />
+              <input
+                type="search"
+                data-ec-search
+                placeholder={t("collection.search.placeholder")}
+                aria-label={t("collection.search.label")}
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+
+            <div class="ec-filters">
+              <select class="ec-select" data-ec-company aria-label={t("collection.filter.company")}>
+                <option value="">{t("collection.filter.allCompanies")}</option>
+                {companies.map((company) => (
+                  <option value={company.key}>
+                    {company.label} ({company.count})
+                  </option>
+                ))}
+              </select>
+
+              <select class="ec-select" data-ec-topic aria-label={t("collection.filter.topic")}>
+                <option value="">{t("collection.filter.allTopics")}</option>
+                {topics.map((topic) => (
+                  <option value={topic.key}>
+                    {topicLabel(topic.key, locale)} ({topic.count})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div class="ec-seg" role="radiogroup" aria-label={t("collection.sort.label")}>
+              <button type="button" role="radio" aria-checked="true" data-ec-sort="newest">
+                {t("collection.sort.newest")}
+              </button>
+              <button type="button" role="radio" aria-checked="false" data-ec-sort="oldest">
+                {t("collection.sort.oldest")}
+              </button>
+              <button type="button" role="radio" aria-checked="false" data-ec-sort="featured">
+                {t("collection.sort.featured")}
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-4 flex items-center justify-between gap-3">
+            <p class="text-subtle font-mono text-[0.65rem]" data-ec-count aria-live="polite">
+              {t("collection.results", { count: ARTICLES.length })}
+            </p>
+            <button type="button" class="btn btn--ghost !min-h-8 !px-2.5" data-ec-reset hidden>
+              {t("collection.reset")}
+            </button>
+          </div>
+
+          <noscript>
+            <p class="ec-note mt-3">{t("collection.noscript")}</p>
+          </noscript>
+
+          <div class="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3" data-ec-grid>
+            {SORTED_ARTICLES.map((article) => (
+              <BlogCard article={article} locale={locale} filterable />
+            ))}
+          </div>
+
+          <div class="ec-empty mt-4" data-ec-empty hidden>
+            <p class="font-display text-lg font-semibold">{t("collection.empty.title")}</p>
+            <p class="text-muted max-w-[34rem] text-[0.9rem]">{t("collection.empty.body")}</p>
+            <button type="button" class="btn mt-2" data-ec-reset>
+              {t("collection.reset")}
+            </button>
+          </div>
+
+          <p class="ec-note mt-4" data-ec-error hidden>
+            {t("collection.error")}
+          </p>
+        </>
+      )
+    }
+  </section>
+</BaseLayout>
+
+<script>
+  type SortKey = "newest" | "oldest" | "featured";
+
+  const root = document.querySelector<HTMLElement>("[data-ec-browser]");
+  const grid = root?.querySelector<HTMLElement>("[data-ec-grid]");
+  const input = root?.querySelector<HTMLInputElement>("[data-ec-search]");
+  const companySelect = root?.querySelector<HTMLSelectElement>("[data-ec-company]");
+  const topicSelect = root?.querySelector<HTMLSelectElement>("[data-ec-topic]");
+  const sortButtons = [...(root?.querySelectorAll<HTMLButtonElement>("[data-ec-sort]") ?? [])];
+  const count = root?.querySelector<HTMLElement>("[data-ec-count]");
+  const empty = root?.querySelector<HTMLElement>("[data-ec-empty]");
+  const error = root?.querySelector<HTMLElement>("[data-ec-error]");
+  const resetButtons = [...(root?.querySelectorAll<HTMLButtonElement>("[data-ec-reset]") ?? [])];
+
+  if (root && grid && input && companySelect && topicSelect && sortButtons.length) {
+    const items = [...grid.querySelectorAll<HTMLElement>("[data-ec-item]")];
+    const resultTemplate = root.dataset.results ?? "{count}";
+    const oneTemplate = root.dataset.resultOne ?? resultTemplate;
+    let sort: SortKey = "newest";
+
+    const byDate = (a: HTMLElement, b: HTMLElement) =>
+      (a.dataset.date ?? "").localeCompare(b.dataset.date ?? "");
+
+    const compare = (a: HTMLElement, b: HTMLElement): number => {
+      if (sort === "oldest") return byDate(a, b);
+      if (sort === "featured") {
+        const featured =
+          Number(b.dataset.featured === "true") - Number(a.dataset.featured === "true");
+        if (featured !== 0) return featured;
+      }
+      return byDate(b, a);
+    };
+
+    const showError = () => {
+      if (error) error.hidden = false;
+      for (const item of items) item.hidden = false;
+      if (empty) empty.hidden = true;
+    };
+
+    const syncUrl = (query: string) => {
+      const params = new URLSearchParams();
+      if (query) params.set("q", query);
+      if (companySelect.value) params.set("company", companySelect.value);
+      if (topicSelect.value) params.set("topic", topicSelect.value);
+      if (sort !== "newest") params.set("sort", sort);
+      const next = params.toString();
+      const url = `${window.location.pathname}${next ? `?${next}` : ""}`;
+      window.history.replaceState(null, "", url);
+    };
+
+    const apply = () => {
+      try {
+        const query = input.value.trim().toLowerCase();
+        const company = companySelect.value;
+        const topic = topicSelect.value;
+        const matching: HTMLElement[] = [];
+
+        for (const item of items) {
+          const topics = (item.dataset.topics ?? "").split("|");
+          const matches =
+            (!query || (item.dataset.search ?? "").includes(query)) &&
+            (!company || item.dataset.company === company) &&
+            (!topic || topics.includes(topic));
+          item.hidden = !matches;
+          if (matches) matching.push(item);
+        }
+
+        matching.sort(compare);
+        for (const item of matching) grid.append(item);
+
+        if (count) {
+          count.textContent =
+            matching.length === 1
+              ? oneTemplate
+              : resultTemplate.replace("{count}", String(matching.length));
+        }
+        if (empty) empty.hidden = matching.length > 0;
+        for (const button of resetButtons) {
+          button.hidden = !(query || company || topic || sort !== "newest");
+        }
+        if (error) error.hidden = true;
+        syncUrl(query);
+      } catch {
+        showError();
+      }
+    };
+
+    let timer: number | undefined;
+    input.addEventListener("input", () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(apply, 120);
+    });
+    companySelect.addEventListener("change", apply);
+    topicSelect.addEventListener("change", apply);
+
+    for (const button of sortButtons) {
+      button.addEventListener("click", () => {
+        sort = (button.dataset.ecSort as SortKey) ?? "newest";
+        for (const other of sortButtons) {
+          other.setAttribute("aria-checked", String(other === button));
+        }
+        apply();
+      });
+    }
+
+    const reset = () => {
+      input.value = "";
+      companySelect.value = "";
+      topicSelect.value = "";
+      sort = "newest";
+      for (const button of sortButtons) {
+        button.setAttribute("aria-checked", String(button.dataset.ecSort === "newest"));
+      }
+      apply();
+    };
+    for (const button of resetButtons) {
+      button.addEventListener("click", reset);
+    }
+
+    try {
+      const params = new URLSearchParams(window.location.search);
+      input.value = params.get("q") ?? "";
+
+      const company = params.get("company");
+      if (company && [...companySelect.options].some((option) => option.value === company)) {
+        companySelect.value = company;
+      }
+      const topic = params.get("topic");
+      if (topic && [...topicSelect.options].some((option) => option.value === topic)) {
+        topicSelect.value = topic;
+      }
+      const initialSort = params.get("sort") as SortKey | null;
+      if (initialSort && ["newest", "oldest", "featured"].includes(initialSort)) {
+        sort = initialSort;
+        for (const button of sortButtons) {
+          button.setAttribute("aria-checked", String(button.dataset.ecSort === sort));
+        }
+      }
+
+      apply();
+    } catch {
+      showError();
+    }
+  }
+</script>

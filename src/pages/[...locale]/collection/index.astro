@@ -1,0 +1,84 @@
+---
+import type { GetStaticPaths } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import CollectionNav from "@/components/collection/CollectionNav.astro";
+import { ArrowRight } from "@lucide/astro";
+import { ARTICLES, SHELVES, collectionStats } from "@/data/engineering-collection";
+import { LOCALES, type Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { localePath } from "@/utils/i18n";
+
+export const getStaticPaths = (() =>
+  LOCALES.map((locale) => ({ params: { locale } }))) satisfies GetStaticPaths;
+
+const { locale } = Astro.params as { locale: Locale };
+const t = useTranslations(locale);
+const stats = collectionStats(ARTICLES);
+---
+
+<BaseLayout
+  title={t("collection.title")}
+  description={t("collection.lede")}
+  locale={locale}
+  route="/collection/"
+>
+  <section class="shell pt-6">
+    <CollectionNav locale={locale} />
+  </section>
+
+  <section class="shell pt-12 pb-10 md:pt-16">
+    <p class="eyebrow">{t("collection.title")}</p>
+    <h1 class="display-lg mt-4 max-w-[24ch]">{t("collection.title")}</h1>
+    <p class="text-muted mt-4 max-w-[44rem] text-[0.98rem] leading-relaxed">
+      {t("collection.lede")}
+    </p>
+    <p class="text-subtle mt-5 font-mono text-[0.66rem]">
+      {stats.articles}
+      {t("collection.stats.articles")} · {stats.companies}
+      {t("collection.stats.companies")} · {stats.topics}
+      {t("collection.stats.topics")}
+    </p>
+  </section>
+
+  <section class="shell pb-14">
+    <p class="label-mono mb-4">{t("collection.shelves")}</p>
+    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {
+        SHELVES.map((shelf, index) =>
+          shelf.available ? (
+            <a href={localePath(locale, `/collection/${shelf.slug}/`)} class="ec-shelf group">
+              <div class="ec-shelf__top">
+                <h2 class="ec-shelf__title group-hover:text-primary transition-colors">
+                  {shelf.label[locale]}
+                </h2>
+                <span class="ec-shelf__index">
+                  {String(index + 1).padStart(2, "0")} · {stats.articles}
+                </span>
+              </div>
+              <p class="text-muted text-[0.86rem] leading-relaxed">{shelf.blurb[locale]}</p>
+              <span class="text-primary mt-3 inline-flex items-center gap-1.5 font-mono text-[0.66rem]">
+                {t("collection.open")}
+                <ArrowRight size={12} stroke-width={2} />
+              </span>
+            </a>
+          ) : (
+            <div class="ec-shelf ec-shelf--soon">
+              <div class="ec-shelf__top">
+                <h2 class="ec-shelf__title">{shelf.label[locale]}</h2>
+                <span class="ec-shelf__index">{t("collection.soon")}</span>
+              </div>
+              <p class="text-subtle text-[0.86rem] leading-relaxed">{shelf.blurb[locale]}</p>
+            </div>
+          )
+        )
+      }
+    </div>
+  </section>
+
+  <section class="shell pb-20">
+    <div class="panel max-w-[52rem] p-6 md:p-8">
+      <p class="label-mono">{t("collection.about.title")}</p>
+      <p class="text-muted mt-3 text-[0.95rem] leading-relaxed">{t("collection.about.body")}</p>
+    </div>
+  </section>
+</BaseLayout>

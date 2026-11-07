@@ -639,6 +639,329 @@ html[data-theme="daylight"] {
     opacity: 1;
   }
 
+  /* --- engineering collection ------------------------------------------- */
+  .ec-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .ec-tab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+    color: var(--fg-subtle);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition:
+      color 150ms ease,
+      border-color 150ms ease;
+  }
+  a.ec-tab:hover {
+    color: var(--fg);
+  }
+  .ec-tab[aria-current="page"] {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+  }
+  .ec-tab--soon {
+    color: var(--fg-subtle);
+    opacity: 0.65;
+    cursor: default;
+  }
+  .ec-tab--soon span {
+    font-size: 0.55rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.05rem 0.35rem;
+  }
+
+  .ec-shelf {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 1.15rem 1.2rem 1.25rem;
+    border: 1px solid var(--border);
+    border-radius: 0.85rem;
+    background: var(--bg-elev);
+    transition:
+      border-color 180ms ease,
+      transform 180ms ease;
+  }
+  a.ec-shelf:hover {
+    border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+    transform: translateY(-2px);
+  }
+  .ec-shelf--soon {
+    background: color-mix(in oklab, var(--bg-elev) 55%, transparent);
+    border-style: dashed;
+  }
+  .ec-shelf__top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .ec-shelf__title {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .ec-shelf__index {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    color: var(--fg-subtle);
+  }
+
+  .ec-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    padding: 1.15rem 1.2rem 1.05rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 0.9rem;
+    transition:
+      border-color 200ms ease,
+      transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 220ms ease;
+  }
+  .ec-card:hover {
+    border-color: color-mix(in oklab, var(--primary) 42%, var(--border));
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+  }
+  .ec-card--featured {
+    border-color: color-mix(in oklab, var(--primary) 28%, var(--border));
+  }
+  .ec-card--featured::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 2px;
+    border-radius: 2px 0 0 2px;
+    background: var(--signal);
+    opacity: 0.85;
+  }
+  .ec-card__head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+  .ec-monogram {
+    --brand: var(--primary);
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.5rem;
+    border: 1px solid color-mix(in oklab, var(--brand) 32%, var(--border));
+    background: color-mix(in oklab, var(--brand) 12%, transparent);
+    color: var(--brand);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+  }
+  .ec-monogram--lg {
+    width: 2.4rem;
+    height: 2.4rem;
+    font-size: 0.78rem;
+    border-radius: 0.6rem;
+  }
+  .ec-card__company {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ec-card__title {
+    font-family: var(--font-display);
+    font-size: 1.06rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.015em;
+    text-wrap: pretty;
+    transition: color 160ms ease;
+  }
+  .ec-card:hover .ec-card__title {
+    color: var(--primary);
+  }
+  .ec-card__desc {
+    color: var(--fg-muted);
+    font-size: 0.865rem;
+    line-height: 1.6;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+  }
+  .ec-card__topics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: auto;
+  }
+  .ec-card__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    color: var(--fg-subtle);
+  }
+  .ec-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.12rem 0.45rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--primary) 40%, transparent);
+    background: color-mix(in oklab, var(--primary) 14%, transparent);
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .ec-toolbar {
+    display: grid;
+    gap: 0.75rem;
+    padding: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 0.85rem;
+    background: var(--bg-elev);
+  }
+  @media (min-width: 768px) {
+    .ec-toolbar {
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      align-items: center;
+    }
+  }
+  .ec-search {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 0.55rem;
+    background: var(--bg-sunken);
+    transition: border-color 150ms ease;
+  }
+  .ec-search:focus-within {
+    border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
+  }
+  .ec-search input {
+    width: 100%;
+    min-width: 0;
+    padding: 0.55rem 0;
+    background: transparent;
+    border: 0;
+    outline: none;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+  }
+  .ec-search input::placeholder {
+    color: var(--fg-subtle);
+  }
+  .ec-filters {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+  .ec-select {
+    width: 100%;
+    min-height: 2.35rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 0.55rem;
+    background: var(--bg-sunken);
+    color: var(--fg-muted);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    outline: none;
+    transition:
+      border-color 150ms ease,
+      color 150ms ease;
+  }
+  .ec-select:hover,
+  .ec-select:focus-visible {
+    border-color: var(--border-strong);
+    color: var(--fg);
+  }
+  .ec-seg {
+    display: inline-flex;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 0.55rem;
+    background: var(--bg-sunken);
+  }
+  .ec-seg button {
+    padding: 0.32rem 0.6rem;
+    border-radius: 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.03em;
+    color: var(--fg-subtle);
+    transition:
+      background 140ms ease,
+      color 140ms ease;
+  }
+  .ec-seg button:hover {
+    color: var(--fg);
+  }
+  .ec-seg button[aria-checked="true"] {
+    background: color-mix(in oklab, var(--primary) 16%, transparent);
+    color: var(--primary);
+  }
+
+  .ec-empty {
+    display: grid;
+    place-items: center;
+    gap: 0.5rem;
+    padding: 4rem 1.5rem;
+    border: 1px dashed var(--border-strong);
+    border-radius: 0.9rem;
+    text-align: center;
+  }
+  .ec-card[hidden],
+  .ec-empty[hidden],
+  .ec-note[hidden] {
+    display: none;
+  }
+  .ec-note {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid color-mix(in oklab, var(--cat-security) 30%, var(--border));
+    border-radius: 0.6rem;
+    background: color-mix(in oklab, var(--cat-security) 8%, transparent);
+    color: var(--fg-muted);
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+
   /* --- theme picker ------------------------------------------------------ */
   .theme-pop {
     position: absolute;

@@ -30,6 +30,7 @@ export const SITE = {
   /** Route stems; the locale prefix is added at render time. */
   nav: [
     { key: "nav.journal" as const, path: "/posts/" },
+    { key: "nav.collection" as const, path: "/collection/" },
     { key: "nav.topics" as const, path: "/categories/" },
     { key: "nav.projects" as const, path: "/projects/" },
     { key: "nav.homelab" as const, path: "/homelab/" },

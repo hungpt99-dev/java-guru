@@ -1,0 +1,242 @@
+[
+  {
+    "id": "amazon-orderserv-multitenant-ecs",
+    "title": "How OrderServ achieved up to 64% cost savings with multi-tenant ECS",
+    "company": "Amazon",
+    "url": "https://aws.amazon.com/blogs/architecture/how-orderserv-achieved-up-to-64-cost-savings-with-multi-tenant-ecs/",
+    "publishedAt": "2026-11-06",
+    "description": "Cognizant and AWS moved a food-ordering platform from per-brand ECS clusters to a multi-tenant model, cutting compute cost by up to 64% and scaling in seconds instead of minutes.",
+    "descriptionVi": "Cognizant và AWS đưa nền tảng đặt món từ cụm ECS riêng cho từng brand sang mô hình multi-tenant, giảm tới 64% chi phí compute và scale trong vài giây thay vì vài phút.",
+    "topics": ["Infrastructure", "Scalability", "Software Architecture"],
+    "featured": false,
+    "editorNote": "Multi-tenancy is usually discussed as an isolation problem; this post walks through the cost model and the operational changes together.",
+    "editorNoteVi": "Multi-tenancy thường được bàn như bài toán cô lập; bài này đi qua cả mô hình chi phí lẫn những thay đổi vận hành."
+  },
+  {
+    "id": "airbnb-database-replay",
+    "title": "Beyond synthetic testing: Capturing and replaying real database workloads at Airbnb",
+    "company": "Airbnb",
+    "url": "https://airbnb.tech/infrastructure/beyond-synthetic-testing-capturing-and-replaying-real-database-workloads-at-airbnb/",
+    "publishedAt": "2026-10-06",
+    "description": "How Airbnb captures production MySQL traffic and replays it offline to load-test clusters, plan capacity and de-risk version upgrades.",
+    "descriptionVi": "Cách Airbnb ghi lại lưu lượng MySQL production rồi replay ngoài môi trường thật để load-test cluster, tính capacity và giảm rủi ro khi nâng cấp phiên bản.",
+    "topics": ["Database & Storage", "Performance", "Reliability"],
+    "featured": false,
+    "editorNote": "Worth reading if you have ever sized a database from a benchmark that looked nothing like production.",
+    "editorNoteVi": "Đáng đọc nếu bạn từng sizing database bằng một benchmark chẳng giống gì production."
+  },
+  {
+    "id": "uber-retry-storms",
+    "title": "How Uber Protects Against Retry Storms",
+    "company": "Uber",
+    "url": "https://www.uber.com/blog/protecting-against-retry-storms/",
+    "publishedAt": "2026-09-17",
+    "description": "Uber's error-ownership model lets each service decide whether a failure should be retried at all, containing retry storms before cross-service amplification.",
+    "descriptionVi": "Mô hình error ownership của Uber cho từng service biết lỗi nào nên retry, nhờ đó chặn retry storm trước khi nó khuếch đại qua cả chuỗi gọi.",
+    "topics": ["Reliability", "Distributed Systems", "Backend Engineering"],
+    "featured": true,
+    "editorNote": "Retries are usually tuned one service at a time. This is one of the few write-ups that treats amplification across a call chain as the design problem.",
+    "editorNoteVi": "Retry thường được chỉnh riêng từng service. Đây là một trong số ít bài coi sự khuếch đại trên cả call chain là bài toán thiết kế.",
+    "takeaways": [
+      "Retry budgets configured per service miss the amplification that happens across a deep call chain.",
+      "Error ownership tags a failure so the decision to retry is made once, at the hop that understands it.",
+      "A policy change at the edge stopped millions of spurious requests before they reached the dependency."
+    ],
+    "takeawaysVi": [
+      "Retry budget đặt riêng từng service bỏ sót sự khuếch đại xảy ra trên một chuỗi gọi sâu.",
+      "Error ownership gắn nhãn lỗi để quyết định retry chỉ được đưa ra một lần, tại đúng chặng hiểu rõ nhất.",
+      "Một thay đổi chính sách ở phía ngoài đã chặn hàng triệu request thừa trước khi chúng tới dependency."
+    ]
+  },
+  {
+    "id": "canva-worker-backpressure",
+    "title": "Worker Backpressure (Part 1)",
+    "company": "Canva",
+    "url": "https://www.canva.dev/blog/engineering/worker-backpressure-part-1-how-we-taught-our-queue-workers-to-slow-down/",
+    "publishedAt": "2026-09-17",
+    "description": "Canva's queue workers now slow themselves down when downstream dependencies fail, then ramp back up on their own instead of flooding a dead letter queue.",
+    "descriptionVi": "Worker xử lý queue của Canva tự giảm tốc khi dependency phía sau lỗi rồi tự tăng lại, thay vì dồn message vào dead letter queue.",
+    "topics": ["Reliability", "Backend Engineering", "Distributed Systems"],
+    "featured": false,
+    "editorNote": "Backpressure described from the failure it prevented, not from a diagram — including a real cloud-provider outage two weeks after rollout.",
+    "editorNoteVi": "Backpressure được kể từ sự cố nó đã ngăn, không phải từ sơ đồ — gồm cả một lần nhà cung cấp cloud gặp sự cố thật, hai tuần sau khi triển khai."
+  },
+  {
+    "id": "airbnb-flexible-authentication",
+    "title": "Flexible Authentication: Reimagining authentication for millions of users at Airbnb",
+    "company": "Airbnb",
+    "url": "https://airbnb.tech/uncategorized/flexible-authentication-reimagining-authentication-for-millions-of-users-at-airbnb/",
+    "publishedAt": "2026-08-12",
+    "description": "How Airbnb rebuilt authentication around “identify first, then challenge”, choosing the easiest verification method for each guest, host and market.",
+    "descriptionVi": "Cách Airbnb xây lại xác thực theo hướng “xác định danh tính trước, thách thức sau”, chọn cách xác minh dễ nhất cho từng người dùng và thị trường.",
+    "topics": ["Security", "System Design", "Backend Engineering"],
+    "featured": false,
+    "editorNote": "Authentication is usually treated as a security boundary only; this shows the architecture of the decision, not just the mechanism.",
+    "editorNoteVi": "Xác thực thường chỉ được xem là ranh giới bảo mật; bài này cho thấy kiến trúc của quyết định, không chỉ cơ chế."
+  },
+  {
+    "id": "canva-session-revocations",
+    "title": "Session revocations at scale",
+    "company": "Canva",
+    "url": "https://www.canva.dev/blog/engineering/session-revocations-at-scale/",
+    "publishedAt": "2026-07-22",
+    "description": "How Canva keeps hundreds of millions of sessions fast and secure: in-memory revocation checks, refreshed from 30-minute objects in Amazon S3 instead of MySQL on every gateway start.",
+    "descriptionVi": "Cách Canva giữ hàng trăm triệu session vừa nhanh vừa an toàn: kiểm tra thu hồi ngay trong bộ nhớ, nạp từ các object S3 chia theo 30 phút thay vì truy vấn MySQL mỗi lần gateway khởi động.",
+    "topics": ["Distributed Systems", "Security", "System Design"],
+    "featured": true,
+    "editorNote": "A concrete look at the cache warm-up stampede every large gateway fleet eventually hits — and a distribution design that takes MySQL off the startup path.",
+    "editorNoteVi": "Một case study cụ thể về cú dồn toa khi hàng trăm pod cùng nạp cache lúc khởi động — và cách thiết kế phân phối loại MySQL khỏi đường khởi động.",
+    "takeaways": [
+      "An in-memory revocation check avoids a network round-trip to the database on every authenticated request.",
+      "Partitioning revocations into 30-minute S3 objects turns a deployment stampede into a cheap file download.",
+      "A compact binary encoding matters when hundreds of pods each pull tens of megabytes at once."
+    ],
+    "takeawaysVi": [
+      "Kiểm tra thu hồi trong bộ nhớ tránh được một vòng mạng tới database cho mỗi request đã xác thực.",
+      "Chia dữ liệu thu hồi thành các object S3 30 phút biến cú dồn toa lúc deploy thành một lần tải file rẻ hơn nhiều.",
+      "Định dạng nhị phân gọn nhẹ có ý nghĩa khi hàng trăm pod cùng tải vài chục MB một lúc."
+    ]
+  },
+  {
+    "id": "atlassian-forge-billing",
+    "title": "Engineering the Forge Billing Platform for Reliability and Scale",
+    "company": "Atlassian",
+    "url": "https://www.atlassian.com/blog/how-we-build/engineering-the-forge-billing-platform-for-reliability-and-scale",
+    "publishedAt": "2026-04-12",
+    "description": "The architecture behind Forge's usage-based billing: roughly 300 million events a day, exactly-once accounting, and the difference between counter and gauge metrics.",
+    "descriptionVi": "Kiến trúc đằng sau billing theo mức sử dụng của Forge: khoảng 300 triệu event mỗi ngày, đảm bảo exactly-once, và khác biệt giữa counter với gauge.",
+    "topics": ["Distributed Systems", "Software Architecture", "Reliability"],
+    "featured": false,
+    "editorNote": "Billing is a good stress test for distributed correctness: you cannot lose an event, and you cannot count it twice.",
+    "editorNoteVi": "Billing là phép thử tốt cho tính đúng đắn phân tán: không được mất event, cũng không được đếm hai lần."
+  },
+  {
+    "id": "netflix-java-21-virtual-threads",
+    "title": "Java 21 Virtual Threads - Dude, Where’s My Lock?",
+    "company": "Netflix",
+    "url": "https://netflixtechblog.com/java-21-virtual-threads-dude-wheres-my-lock-3052540e231d",
+    "publishedAt": "2024-07-29",
+    "description": "Why some Java 21 services stopped serving traffic after switching to virtual threads, and how Netflix traced it to threads pinned inside synchronized blocks.",
+    "descriptionVi": "Vì sao một số service Java 21 ngừng phục vụ sau khi chuyển sang virtual thread, và cách Netflix lần ra việc thread bị pin trong khối synchronized.",
+    "topics": ["Backend Engineering", "Performance", "Reliability"],
+    "readingTime": 10,
+    "featured": false,
+    "editorNote": "The rare production postmortem that makes a JVM feature concrete: a thread dump, a lock, and a pool that could not grow.",
+    "editorNoteVi": "Một bài postmortem hiếm hoi biến tính năng JVM thành câu chuyện cụ thể: thread dump, một lock, và một pool không thể lớn thêm."
+  },
+  {
+    "id": "shopify-vitess-rails",
+    "title": "Horizontally scaling the Rails backend of Shop app with Vitess",
+    "company": "Shopify",
+    "url": "https://shopify.engineering/horizontally-scaling-the-rails-backend-of-shop-app-with-vitess",
+    "publishedAt": "2024-01-17",
+    "description": "A detailed account of putting Vitess in front of a Rails/MySQL backend so Shop app could scale horizontally without a rewrite.",
+    "descriptionVi": "Bài viết chi tiết về việc đưa Vitess vào trước backend Rails/MySQL để Shop app mở rộng ngang mà không phải viết lại.",
+    "topics": ["Database & Storage", "Scalability", "Infrastructure"],
+    "readingTime": 30,
+    "featured": false,
+    "editorNote": "The unglamorous half of scaling: connection management, query routing and a migration path for an application that assumes a single database.",
+    "editorNoteVi": "Nửa kém hào nhoáng của việc scale: quản lý connection, định tuyến query và đường migrate cho ứng dụng vốn giả định chỉ có một database."
+  },
+  {
+    "id": "figma-postgres-sharding",
+    "title": "How Figma’s databases team lived to tell the scale",
+    "company": "Other",
+    "companyName": "Figma",
+    "url": "https://www.figma.com/blog/how-figmas-databases-team-lived-to-tell-the-scale/",
+    "publishedAt": "2024-03-14",
+    "description": "Figma's nine-month project to horizontally shard its Postgres stack, after vertical partitioning, caching and read replicas ran out of headroom.",
+    "descriptionVi": "Dự án chín tháng của Figma để shard ngang stack Postgres, sau khi vertical partitioning, cache và read replica không còn đủ dư địa.",
+    "topics": ["Database & Storage", "Scalability", "System Design"],
+    "featured": false,
+    "editorNote": "A patient account of the unglamorous work: choosing shard keys, moving tables and keeping the product online while the schema changes underneath.",
+    "editorNoteVi": "Một bài kể chậm rãi về phần việc kém hào nhoáng: chọn shard key, chuyển bảng và giữ sản phẩm chạy trong khi schema thay đổi bên dưới."
+  },
+  {
+    "id": "meta-threads-infrastructure",
+    "title": "How Meta built the infrastructure for Threads",
+    "company": "Meta",
+    "url": "https://engineering.fb.com/2023/12/19/core-infra/how-meta-built-the-infrastructure-for-threads/",
+    "publishedAt": "2023-12-19",
+    "description": "How Meta's existing infrastructure absorbed Threads' 100 million sign-ups in five days, with two days of advance notice.",
+    "descriptionVi": "Cách hạ tầng sẵn có của Meta hấp thụ 100 triệu lượt đăng ký Threads trong năm ngày, dù chỉ được báo trước hai ngày.",
+    "topics": ["Scalability", "Infrastructure", "System Design"],
+    "featured": false,
+    "editorNote": "A useful counterpoint to greenfield architecture writing: the launch was served by a decade of shared infrastructure, not a new stack.",
+    "editorNoteVi": "Một đối trọng hữu ích cho các bài thiết kế từ số 0: buổi launch được gánh bởi mười năm hạ tầng dùng chung, không phải một stack mới."
+  },
+  {
+    "id": "discord-trillions-of-messages",
+    "title": "How Discord Stores Trillions of Messages",
+    "company": "Discord",
+    "url": "https://discord.com/blog/how-discord-stores-trillions-of-messages",
+    "publishedAt": "2023-03-06",
+    "description": "Discord moved trillions of messages from Cassandra to ScyllaDB, cutting operational pain and latency while migrating at millions of messages per second.",
+    "descriptionVi": "Discord chuyển hàng nghìn tỷ message từ Cassandra sang ScyllaDB, giảm gánh nặng vận hành và độ trễ, migrate với tốc độ hàng triệu message mỗi giây.",
+    "topics": ["Database & Storage", "Scalability", "System Design"],
+    "featured": true,
+    "editorNote": "The sequel to “billions of messages” is more interesting than the original: it is about the cost of a database that technically still works.",
+    "editorNoteVi": "Phần tiếp theo của “hàng tỷ message” còn hay hơn bản gốc: nó nói về cái giá của một database vẫn chạy được nhưng đã quá đắt để vận hành.",
+    "takeaways": [
+      "A database that scales writes can still fail on operational toil and unpredictable read latency.",
+      "Migration speed comes from working with the storage layout: partition-aware copying hit millions of rows per second.",
+      "Dual-reading production traffic against both clusters made the cutover a measurement rather than a hope."
+    ],
+    "takeawaysVi": [
+      "Một database mở rộng write tốt vẫn có thể thất bại vì gánh nặng vận hành và độ trễ đọc khó đoán.",
+      "Tốc độ migrate đến từ việc bám theo cách dữ liệu được phân vùng: copy theo partition đạt hàng triệu dòng mỗi giây.",
+      "Đọc song song trên cả hai cluster biến việc cắt chuyển thành một phép đo thay vì một niềm tin."
+    ]
+  },
+  {
+    "id": "cloudflare-pingora",
+    "title": "How we built Pingora, the proxy that connects Cloudflare to the Internet",
+    "company": "Cloudflare",
+    "url": "https://blog.cloudflare.com/how-we-built-pingora-the-proxy-that-connects-cloudflare-to-the-internet/",
+    "publishedAt": "2022-09-14",
+    "description": "Why Cloudflare replaced NGINX with a Rust proxy it wrote itself, serving over a trillion requests a day on a third of the CPU and memory.",
+    "descriptionVi": "Vì sao Cloudflare thay NGINX bằng proxy Rust tự viết, phục vụ hơn một nghìn tỷ request mỗi ngày với một phần ba CPU và bộ nhớ.",
+    "topics": ["Infrastructure", "Performance", "Software Architecture"],
+    "readingTime": 12,
+    "featured": true,
+    "editorNote": "A rare case study where the build-versus-buy decision, the architectural limits and the measured result all appear in the same post.",
+    "editorNoteVi": "Hiếm có case study nào gom đủ quyết định build hay buy, giới hạn kiến trúc và kết quả đo được vào cùng một bài.",
+    "takeaways": [
+      "A process-per-request proxy model leaves CPU cores unevenly loaded under real traffic.",
+      "Replacing it with a Rust implementation cut CPU and memory to roughly a third at the same volume.",
+      "Owning the data plane removed the upstream constraints that blocked new routing features."
+    ],
+    "takeawaysVi": [
+      "Mô hình proxy mỗi request một process khiến các core CPU lệch tải dưới lưu lượng thật.",
+      "Bản viết lại bằng Rust giảm CPU và bộ nhớ xuống khoảng một phần ba ở cùng lưu lượng.",
+      "Tự sở hữu data plane gỡ bỏ những giới hạn từ upstream vốn chặn các tính năng định tuyến mới."
+    ]
+  },
+  {
+    "id": "google-menger",
+    "title": "Massively Large-Scale Distributed Reinforcement Learning with Menger",
+    "company": "Google",
+    "url": "https://research.google/blog/massively-large-scale-distributed-reinforcement-learning-with-menger/",
+    "publishedAt": "2020-10-02",
+    "description": "Google's Menger shows how a distributed reinforcement-learning pipeline splits actors and learners to scale training across machines.",
+    "descriptionVi": "Menger của Google cho thấy cách tách actor và learner trong pipeline reinforcement learning phân tán để huấn luyện vượt qua nhiều máy.",
+    "topics": ["Distributed Systems", "Infrastructure", "Performance"],
+    "featured": false,
+    "editorNote": "Read it for the scheduling and data-flow shape, even if you never train a model.",
+    "editorNoteVi": "Đọc vì cách sắp xếp scheduling và luồng dữ liệu, kể cả khi bạn không huấn luyện model nào."
+  },
+  {
+    "id": "shopify-pods-architecture",
+    "title": "A Pods Architecture To Allow Shopify To Scale",
+    "company": "Shopify",
+    "url": "https://shopify.engineering/a-pods-architecture-to-allow-shopify-to-scale",
+    "publishedAt": "2018-03-02",
+    "description": "How sharding Shopify's database exposed a resilience problem, and why the fix was reorganising the runtime into isolated pods rather than adding more shards.",
+    "descriptionVi": "Việc shard database của Shopify làm lộ ra vấn đề về độ bền, và vì sao cách sửa là tổ chức lại runtime thành các pod cô lập thay vì thêm shard.",
+    "topics": ["Software Architecture", "Scalability", "Reliability"],
+    "readingTime": 3,
+    "featured": false,
+    "editorNote": "Short, old and still relevant: horizontal scaling changes your failure domain, not just your throughput.",
+    "editorNoteVi": "Ngắn, cũ mà vẫn đúng: mở rộng ngang thay đổi failure domain của bạn, không chỉ throughput."
+  }
+]

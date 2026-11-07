@@ -1,0 +1,35 @@
+---
+import { SHELVES, type ShelfKey } from "@/data/engineering-collection";
+import { localePath } from "@/utils/i18n";
+import { useTranslations } from "@/i18n/ui";
+import type { Locale } from "@/i18n/config";
+
+export interface Props {
+  locale: Locale;
+  active?: ShelfKey;
+}
+
+const { locale, active } = Astro.props;
+const t = useTranslations(locale);
+---
+
+<nav class="ec-tabs" aria-label={t("collection.title")}>
+  {
+    SHELVES.map((shelf) =>
+      shelf.available ? (
+        <a
+          href={localePath(locale, `/collection/${shelf.slug}/`)}
+          class="ec-tab"
+          aria-current={shelf.key === active ? "page" : undefined}
+        >
+          {shelf.label[locale]}
+        </a>
+      ) : (
+        <span class="ec-tab ec-tab--soon" aria-disabled="true" title={t("collection.soon")}>
+          {shelf.label[locale]}
+          <span>{t("collection.soon")}</span>
+        </span>
+      )
+    )
+  }
+</nav>

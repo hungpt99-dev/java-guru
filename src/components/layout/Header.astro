@@ -40,7 +40,7 @@ const isActive = (route: string) => {
       </span>
     </a>
 
-    <nav class="hidden items-center gap-1 md:flex" aria-label={t("nav.main")}>
+    <nav class="hidden items-center gap-1 lg:flex" aria-label={t("nav.main")}>
       {
         SITE.nav.map((item) => (
           <a
@@ -75,7 +75,7 @@ const isActive = (route: string) => {
 
       <button
         type="button"
-        class="btn btn--ghost !min-h-9 !px-2.5 md:hidden"
+        class="btn btn--ghost !min-h-9 !px-2.5 lg:hidden"
         data-menu-toggle
         aria-expanded="false"
         aria-controls="mobile-nav"
@@ -89,7 +89,7 @@ const isActive = (route: string) => {
 
   <div
     id="mobile-nav"
-    class="shell border-line hidden border-t pb-4 md:hidden"
+    class="shell border-line hidden border-t pb-4 lg:hidden"
     data-menu-panel
     data-label-open={t("nav.openMenu")}
     data-label-close={t("nav.closeMenu")}
