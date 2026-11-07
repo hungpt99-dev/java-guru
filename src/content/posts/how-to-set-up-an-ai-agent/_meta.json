@@ -1,5 +1,0 @@
-{
-  "title": "How to Set Up an AI Agent",
-  "description": "When starting a new project and wanting to use an AI Agent to support coding, many people immediately jump to installing an agent and asking it to implement a feature. Before handing over the first task, it is worth preparing a few basic components: a runtime, model configuration, AGENTS.md, Skills, MCP, project knowledge, Git, build and test commands, task management and permissions.",
-  "flags": []
-}

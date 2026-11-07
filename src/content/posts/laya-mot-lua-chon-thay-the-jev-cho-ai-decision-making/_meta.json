@@ -1,8 +1,0 @@
-{
-  "title": "Laya – An Alternative to Jev for AI Decision Making",
-  "description": "When building an application that uses AI, the popular choice these days is almost always an LLM.",
-  "flags": [
-    "§4: 'một phương án để cân nhắc' rendered as 'an option to consider'; 'thay thế' in the title kept as 'alternative' since the body explicitly rejects drop-in replacement",
-    "§8: 'bài toán' rendered as 'problems' throughout (not 'problems/use cases')"
-  ]
-}

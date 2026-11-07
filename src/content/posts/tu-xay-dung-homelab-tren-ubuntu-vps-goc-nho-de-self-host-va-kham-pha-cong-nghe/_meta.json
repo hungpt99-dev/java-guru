@@ -1,5 +1,0 @@
-{
-  "title": "Building My Own Homelab on an Ubuntu VPS – A Small Corner to Self-Host and Explore Technology",
-  "description": "A personal Homelab on an Ubuntu VPS for self-hosting services and learning about Linux, networking and infrastructure: Ansible for infrastructure as code, Docker Compose, Tailscale for private networking, UFW, Fail2ban and CrowdSec for security, Hermes Agent, Prometheus/Grafana and Loki for monitoring and logging, Restic for backup, all kept in Git.",
-  "flags": []
-}

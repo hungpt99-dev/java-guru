@@ -1,5 +1,0 @@
-{
-  "title": "Tomcat, Jetty or Undertow? A Guide to Choosing a High-Performance Java Web Server",
-  "description": "When developing Java applications, choosing the right web server is a key factor in ensuring performance, scalability and maintainability.",
-  "flags": []
-}

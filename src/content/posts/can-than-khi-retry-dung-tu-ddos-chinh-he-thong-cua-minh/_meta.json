@@ -1,9 +1,0 @@
-{
-  "title": "Be Careful with Retry – Don't DDoS Your Own System",
-  "description": "Retry isn't bad. But used the wrong way, you can unintentionally become the “DDoS hacker”... of your own system.",
-  "flags": [
-    "§3.5–3.7: the source jumps from section 2 straight to 3.5 (there are no 3.0–3.4); the author's numbering is kept unchanged.",
-    "§3.7: 'API chuẩn' rendered as 'standards-compliant APIs'.",
-    "§5: 'Cách xử lý' rendered as 'How it was handled' to fit the past-tense case study."
-  ]
-}

@@ -1,7 +1,0 @@
-{
-  "title": "A Hundred Orders Vanished in 3 Minutes – All Because of One Forgotten Config Line",
-  "description": "A Friday evening deploy of order-service caused nearly a hundred orders to disappear in minutes: the old pods received SIGTERM while requests were still in flight, and Spring Boot had no graceful shutdown configured. The article covers what went wrong, the four fixes – graceful shutdown, closing the Kafka producer, waiting on the thread pool and flipping the readiness probe – and the lessons that followed.",
-  "flags": [
-    "Code-block comment '# readiness = false => K8s không gửi thêm request mới' left in Vietnamese to keep the fenced block byte-identical"
-  ]
-}

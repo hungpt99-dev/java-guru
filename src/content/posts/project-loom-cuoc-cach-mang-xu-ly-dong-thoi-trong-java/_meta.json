@@ -1,8 +1,0 @@
-{
-  "title": "Project Loom: The Concurrency Revolution in Java",
-  "description": "For decades, Java has been famous for its multithreading. From desktop applications to distributed systems, from web applications to big data, Java relies on threads to handle…",
-  "flags": [
-    "Frontmatter description in the source is truncated mid-sentence with '…'; the truncation is preserved in the translation",
-    "§1: 'hàng chục nghìn' rendered as 'tens of thousands' throughout"
-  ]
-}

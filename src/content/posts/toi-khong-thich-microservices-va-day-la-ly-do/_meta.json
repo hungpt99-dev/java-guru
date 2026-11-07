@@ -1,9 +1,0 @@
-{
-  "title": "I Don't Like Microservices, and Here's Why",
-  "description": "Hi everyone! I'm Hưng Phạm, a backend developer who used to think microservices were the standard for every system – until I deployed and maintained them myself.",
-  "flags": [
-    "§7: 'đu trend' rendered as 'trend chasing'",
-    "§6: 'chơi sang' (literally 'living large / splurging') kept as the quoted phrase \"live large\"",
-    "Heading numbering preserved exactly as in the source, including the U+FE0F variation selector after each digit (e.g. '1️.')"
-  ]
-}

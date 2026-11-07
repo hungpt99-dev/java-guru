@@ -1,7 +1,0 @@
-{
-  "title": "When an AI Agent Becomes a Security Hole",
-  "description": "You hand an AI Coding Agent a very familiar task: “Fix this bug, update the tests and open a Pull Request.” The Agent starts working like any other day.",
-  "flags": [
-    "\"lỗ hổng bảo mật\" in the title rendered as \"security hole\" to keep the metaphor literal; \"security vulnerability\" would be the conventional phrasing"
-  ]
-}

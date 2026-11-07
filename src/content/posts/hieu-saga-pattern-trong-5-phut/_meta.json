@@ -1,1 +1,0 @@
-{"title": "Understanding Saga Pattern in 5 Minutes", "description": "If you are just getting into microservices, you have probably heard of Saga Pattern – a design pattern for managing distributed transactions in microservices.", "flags": ["§3.1 heading: the parenthetical gloss '(Dựa trên sự kiện)' was omitted because it repeats the English term 'Event-Driven'."]}
