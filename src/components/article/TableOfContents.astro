@@ -1,0 +1,52 @@
+---
+import type { MarkdownHeading } from "astro";
+
+export interface Props {
+  headings: MarkdownHeading[];
+}
+
+const { headings } = Astro.props;
+// Drop the deepest level to keep the rail readable on a 68ch article.
+const items = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
+---
+
+{
+  items.length > 2 && (
+    <nav class="toc" aria-label="On this page" data-toc>
+      <p class="label-mono mb-2.5">On this page</p>
+      {items.map((h) => (
+        <a href={`#${h.slug}`} data-depth={h.depth} data-toc-link={h.slug}>
+          {h.text}
+        </a>
+      ))}
+    </nav>
+  )
+}
+
+<script>
+  const links = [...document.querySelectorAll<HTMLAnchorElement>("[data-toc-link]")];
+  if (links.length) {
+    const targets = links
+      .map((link) => document.getElementById(link.dataset.tocLink ?? ""))
+      .filter((el): el is HTMLElement => Boolean(el));
+
+    const setActive = (id: string) => {
+      for (const link of links) {
+        link.setAttribute("aria-current", String(link.dataset.tocLink === id));
+      }
+    };
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]?.target.id) setActive(visible[0].target.id);
+      },
+      { rootMargin: "-84px 0px -68% 0px", threshold: [0, 1] }
+    );
+
+    for (const target of targets) observer.observe(target);
+    if (targets[0]) setActive(targets[0].id);
+  }
+</script>

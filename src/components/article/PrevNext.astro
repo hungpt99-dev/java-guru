@@ -1,0 +1,50 @@
+---
+import { ArrowLeft, ArrowRight } from "@lucide/astro";
+import type { Post } from "@/utils/posts";
+import { postHref } from "@/utils/posts";
+
+export interface Props {
+  newer?: Post;
+  older?: Post;
+}
+
+const { newer, older } = Astro.props;
+---
+
+{
+  (newer || older) && (
+    <nav
+      class="border-line mt-14 grid gap-3 border-t pt-8 sm:grid-cols-2"
+      aria-label="More articles"
+    >
+      {older ? (
+        <a
+          href={postHref(older)}
+          class="panel group hover:border-primary/50 flex flex-col gap-2 p-4 transition-colors"
+        >
+          <span class="label-mono flex items-center gap-1.5">
+            <ArrowLeft size={11} stroke-width={2} /> Older
+          </span>
+          <span class="font-display group-hover:text-primary text-[0.98rem] leading-snug font-semibold transition-colors">
+            {older.data.title}
+          </span>
+        </a>
+      ) : (
+        <span />
+      )}
+      {newer && (
+        <a
+          href={postHref(newer)}
+          class="panel group hover:border-primary/50 flex flex-col items-end gap-2 p-4 text-right transition-colors sm:col-start-2"
+        >
+          <span class="label-mono flex items-center gap-1.5">
+            Newer <ArrowRight size={11} stroke-width={2} />
+          </span>
+          <span class="font-display group-hover:text-primary text-[0.98rem] leading-snug font-semibold transition-colors">
+            {newer.data.title}
+          </span>
+        </a>
+      )}
+    </nav>
+  )
+}

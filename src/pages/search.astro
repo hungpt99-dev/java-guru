@@ -1,0 +1,154 @@
+---
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import { Search } from "@lucide/astro";
+import { getPosts, getCategories } from "@/utils/posts";
+import { SITE } from "@/config";
+
+const posts = await getPosts();
+const categories = getCategories(posts);
+---
+
+<BaseLayout
+  title="Search"
+  description={`Full-text search across ${posts.length} articles on ${SITE.title}.`}
+  noindex
+>
+  <section class="shell pt-12 pb-8 md:pt-16">
+    <p class="eyebrow">Search</p>
+    <h1 class="display-lg mt-4 max-w-[24ch]">
+      Find the note<br /><span class="text-muted">you half remember.</span>
+    </h1>
+    <p class="text-muted mt-4 max-w-[38rem] text-[0.95rem] leading-relaxed">
+      Full-text search runs against a static index built at deploy time — no server, no query
+      leaving your browser.
+    </p>
+  </section>
+
+  <section class="shell pb-20">
+    <div class="panel p-1.5">
+      <div class="flex items-center gap-2 px-2">
+        <Search size={16} stroke-width={1.75} class="text-subtle shrink-0" />
+        <input
+          type="search"
+          class="text-fg placeholder:text-subtle w-full bg-transparent py-3 font-mono text-[0.9rem] outline-none"
+          placeholder="kafka, saga, virtual threads, zero trust…"
+          aria-label="Search articles"
+          autocomplete="off"
+          spellcheck="false"
+          data-search-page-input
+          autofocus
+        />
+      </div>
+    </div>
+
+    <p class="text-subtle mt-3 font-mono text-[0.62rem]" data-search-status>
+      Type at least two characters. Results are ranked by relevance.
+    </p>
+
+    <div class="mt-6 space-y-px" data-search-page-results></div>
+
+    <div class="border-line mt-12 border-t pt-8">
+      <p class="label-mono mb-3">Or jump to a topic</p>
+      <div class="flex flex-wrap gap-2">
+        {
+          categories.map((category) => (
+            <a
+              href={`/categories/${category.slug}`}
+              class:list={["chip", `cat-${category.accent}`]}
+            >
+              {category.name}
+              <span class="opacity-60">{category.count}</span>
+            </a>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+</BaseLayout>
+
+<script>
+  type Data = {
+    url: string;
+    excerpt: string;
+    meta: { title?: string };
+    filters?: Record<string, string[]>;
+  };
+  type Pagefind = {
+    options: (o: Record<string, unknown>) => void;
+    search: (q: string) => Promise<{ results: Array<{ data: () => Promise<Data> }> }>;
+  };
+
+  const input = document.querySelector<HTMLInputElement>("[data-search-page-input]");
+  const results = document.querySelector<HTMLElement>("[data-search-page-results]");
+  const status = document.querySelector<HTMLElement>("[data-search-status]");
+
+  let pf: Pagefind | null = null;
+  let unavailable = false;
+
+  const load = async () => {
+    if (pf || unavailable) return pf;
+    try {
+      const pfUrl = "/pagefind/pagefind.js";
+      const mod = await import(/* @vite-ignore */ pfUrl);
+      pf = (mod.default ?? mod) as Pagefind;
+      pf.options({ excerptLength: 40 });
+    } catch {
+      unavailable = true;
+    }
+    return pf;
+  };
+
+  const setStatus = (text: string) => {
+    if (status) status.textContent = text;
+  };
+
+  const search = async (query: string) => {
+    if (!results) return;
+    if (query.trim().length < 2) {
+      results.innerHTML = "";
+      setStatus("Type at least two characters. Results are ranked by relevance.");
+      return;
+    }
+    const engine = await load();
+    if (!engine) {
+      setStatus(
+        "The search index is produced by `pnpm build`. Run a production build to search locally."
+      );
+      return;
+    }
+    const found = await engine.search(query);
+    const top = found.results.slice(0, 25);
+    setStatus(
+      `${found.results.length} result${found.results.length === 1 ? "" : "s"} for “${query}”`
+    );
+    if (!top.length) {
+      results.innerHTML = `<p class="py-8 font-mono text-[0.75rem] text-subtle">Nothing matched. Try a broader term.</p>`;
+      return;
+    }
+    const data = await Promise.all(top.map((r) => r.data()));
+    results.innerHTML = data
+      .map(
+        (item) => `
+        <a href="${item.url}" class="group block border-t border-line py-4 transition-colors hover:bg-sunken/40">
+          <h2 class="font-display text-[1.08rem] font-semibold tracking-[-0.01em] transition-colors group-hover:text-primary">
+            ${item.meta.title ?? "Untitled"}
+          </h2>
+          <p class="mt-1.5 text-[0.86rem] leading-relaxed text-muted">${item.excerpt}</p>
+        </a>`
+      )
+      .join("");
+  };
+
+  let timer: number | undefined;
+  input?.addEventListener("input", () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => void search(input.value), 200);
+  });
+
+  const params = new URLSearchParams(window.location.search);
+  const initial = params.get("q");
+  if (initial && input) {
+    input.value = initial;
+    void search(initial);
+  }
+</script>

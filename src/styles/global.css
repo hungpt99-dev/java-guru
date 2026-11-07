@@ -1,80 +1,1196 @@
 @import "tailwindcss";
-@import "./typography.css";
+@import "./fonts.css";
 
-@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+/* ============================================================================
+   Theme tokens
+   Every theme defines the same contract, so components never hardcode a colour.
+   `--cat-l` / `--cat-c` give the nine topic accents a per-theme lightness and
+   chroma while keeping their hue identity stable across palettes.
+   ========================================================================= */
 
 :root,
-html[data-theme="light"] {
-  --background: #fdfdfd;
-  --foreground: #282728;
-  --accent: #006cac;
-  --muted: #e6e6e6;
-  --border: #ece9e9;
+html[data-theme="tokyo-night"] {
+  color-scheme: dark;
+  --bg: #1a1b26;
+  --bg-elev: #24283b;
+  --bg-sunken: #16161e;
+  --fg: #c0caf5;
+  --fg-muted: #9aa5ce;
+  --fg-subtle: #868daf;
+  --border: #2f3549;
+  --border-strong: #3b4261;
+  --primary: #7aa2f7;
+  --secondary: #7dcfff;
+  --accent: #bb9af7;
+  --code-bg: #16161e;
+  --code-border: #2a2e42;
+  --selection: #33467c;
+  --cat-l: 0.8;
+  --cat-c: 0.13;
+  --shadow: 0 24px 60px -32px rgb(0 0 0 / 0.85);
 }
 
-html[data-theme="dark"] {
-  --background: #212737;
-  --foreground: #eaedf3;
-  --accent: #ff6b01;
-  --muted: #343f60bf;
-  --border: #ab4b08;
+html[data-theme="catppuccin-mocha"] {
+  color-scheme: dark;
+  --bg: #1e1e2e;
+  --bg-elev: #313244;
+  --bg-sunken: #181825;
+  --fg: #cdd6f4;
+  --fg-muted: #a6adc8;
+  --fg-subtle: #858aa6;
+  --border: #313244;
+  --border-strong: #45475a;
+  --primary: #89b4fa;
+  --secondary: #cba6f7;
+  --accent: #f5c2e7;
+  --code-bg: #181825;
+  --code-border: #313244;
+  --selection: #45475a;
+  --cat-l: 0.82;
+  --cat-c: 0.12;
+  --shadow: 0 24px 60px -32px rgb(0 0 0 / 0.8);
+}
+
+html[data-theme="nord"] {
+  color-scheme: dark;
+  --bg: #2e3440;
+  --bg-elev: #3b4252;
+  --bg-sunken: #292e39;
+  --fg: #eceff4;
+  --fg-muted: #c3cbd9;
+  --fg-subtle: #98a6ba;
+  --border: #3b4252;
+  --border-strong: #4c566a;
+  --primary: #81a1c1;
+  --secondary: #88c0d0;
+  --accent: #a3be8c;
+  --code-bg: #292e39;
+  --code-border: #3b4252;
+  --selection: #434c5e;
+  --cat-l: 0.82;
+  --cat-c: 0.1;
+  --shadow: 0 24px 60px -32px rgb(0 0 0 / 0.7);
+}
+
+html[data-theme="gruvbox"] {
+  color-scheme: dark;
+  --bg: #282828;
+  --bg-elev: #3c3836;
+  --bg-sunken: #1d2021;
+  --fg: #ebdbb2;
+  --fg-muted: #bdae93;
+  --fg-subtle: #a89984;
+  --border: #3c3836;
+  --border-strong: #504945;
+  --primary: #fabd2f;
+  --secondary: #fe8019;
+  --accent: #b8bb26;
+  --code-bg: #1d2021;
+  --code-border: #3c3836;
+  --selection: #504945;
+  --cat-l: 0.8;
+  --cat-c: 0.12;
+  --shadow: 0 24px 60px -32px rgb(0 0 0 / 0.85);
+}
+
+html[data-theme="daylight"] {
+  color-scheme: light;
+  --bg: #faf9f6;
+  --bg-elev: #ffffff;
+  --bg-sunken: #f2f0e9;
+  --fg: #1a1b22;
+  --fg-muted: #4e515b;
+  --fg-subtle: #6b6e79;
+  --border: #e4e1d7;
+  --border-strong: #cbc7ba;
+  --primary: #2b5fd9;
+  --secondary: #0b7285;
+  --accent: #7b3fe4;
+  --code-bg: #f4f2ec;
+  --code-border: #e4e1d7;
+  --selection: #dce4fb;
+  --cat-l: 0.47;
+  --cat-c: 0.14;
+  --shadow: 0 24px 50px -34px rgb(26 27 34 / 0.35);
+}
+
+/* Topic accents: stable hue, theme-aware lightness/chroma. */
+:root {
+  --cat-java: oklch(var(--cat-l) var(--cat-c) 72);
+  --cat-system: oklch(var(--cat-l) var(--cat-c) 258);
+  --cat-micro: oklch(var(--cat-l) var(--cat-c) 305);
+  --cat-distributed: oklch(var(--cat-l) var(--cat-c) 212);
+  --cat-ai: oklch(var(--cat-l) var(--cat-c) 342);
+  --cat-security: oklch(var(--cat-l) var(--cat-c) 27);
+  --cat-devops: oklch(var(--cat-l) var(--cat-c) 152);
+  --cat-practices: oklch(var(--cat-l) var(--cat-c) 186);
+  --cat-backend: oklch(var(--cat-l) var(--cat-c) 45);
+  --signal: linear-gradient(90deg, var(--primary), var(--secondary) 52%, var(--accent));
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-bg: var(--bg);
+  --color-elev: var(--bg-elev);
+  --color-sunken: var(--bg-sunken);
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-subtle: var(--fg-subtle);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-secondary: var(--secondary);
   --color-accent: var(--accent);
-  --color-muted: var(--muted);
-  --color-border: var(--border);
 
-  /* Typography: define real font stacks so the site never falls back to the
-     bare Tailwind default (which renders body text in raw monospace).
-     Code blocks keep a monospace stack; body/headings use a clean sans. */
-  --font-sans:
-    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji",
-    "Segoe UI Emoji";
-  --font-mono:
-    ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Monaco, Consolas,
-    "Liberation Mono", "Courier New", monospace;
+  --font-display: "Bricolage Grotesque", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-serif: "Fraunces", Georgia, "Times New Roman", serif;
 }
+
+/* ============================================================================
+   Base
+   ========================================================================= */
 
 @layer base {
-  * {
-    @apply border-border outline-accent/75;
-    scrollbar-width: auto;
-    scrollbar-color: var(--color-muted) transparent;
+  *,
+  *::before,
+  *::after {
+    border-color: var(--border);
   }
+
   html {
-    @apply overflow-y-scroll scroll-smooth;
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+    scroll-padding-top: 6rem;
   }
+
   body {
-    @apply flex min-h-svh flex-col bg-background font-sans text-foreground selection:bg-accent/75 selection:text-background;
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "cv11", "ss01";
+    overflow-x: hidden;
   }
-  a,
-  button {
-    @apply outline-offset-1 outline-accent focus-visible:no-underline focus-visible:outline-2 focus-visible:outline-dashed;
+
+  ::selection {
+    background: var(--selection);
+    color: var(--fg);
   }
-  button:not(:disabled),
-  [role="button"]:not(:disabled) {
-    cursor: pointer;
+
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 3px;
+    border-radius: 3px;
   }
-  section,
-  footer {
-    @apply mx-auto max-w-app px-4;
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    line-height: 1.14;
+    text-wrap: balance;
+    color: var(--fg);
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+  }
+
+  ::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--bg-sunken);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border: 3px solid var(--bg-sunken);
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--fg-subtle);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
 
-@utility max-w-app {
-  @apply max-w-5xl;
+/* ============================================================================
+   Primitives
+   ========================================================================= */
+
+@layer components {
+  .shell {
+    width: 100%;
+    max-width: 78rem;
+    margin-inline: auto;
+    padding-inline: 1.25rem;
+  }
+  @media (min-width: 640px) {
+    .shell {
+      padding-inline: 2rem;
+    }
+  }
+  @media (min-width: 1024px) {
+    .shell {
+      padding-inline: 2.5rem;
+    }
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--fg-subtle);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 1.5rem;
+    height: 1px;
+    background: var(--border-strong);
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.02em;
+  }
+
+  .signal-rule {
+    height: 1px;
+    background: var(--signal);
+    opacity: 0.55;
+    border: 0;
+  }
+
+  .display-xl {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(2.35rem, 6.2vw, 4.5rem);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
+  }
+
+  .display-lg {
+    font-family: var(--font-display);
+    font-weight: 680;
+    font-size: clamp(1.9rem, 4vw, 3rem);
+    line-height: 1.06;
+    letter-spacing: -0.03em;
+  }
+
+  .label-mono {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--fg-subtle);
+  }
+
+  /* --- chips ------------------------------------------------------------- */
+  .chip {
+    --chip-color: var(--primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--chip-color) 32%, transparent);
+    background: color-mix(in oklab, var(--chip-color) 12%, transparent);
+    color: var(--chip-color);
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    transition:
+      background 160ms ease,
+      border-color 160ms ease,
+      color 160ms ease;
+  }
+  a.chip:hover {
+    background: color-mix(in oklab, var(--chip-color) 22%, transparent);
+    border-color: color-mix(in oklab, var(--chip-color) 55%, transparent);
+  }
+  .chip--neutral {
+    --chip-color: var(--fg-muted);
+    border-color: var(--border);
+    background: var(--bg-sunken);
+  }
+  .chip--sm {
+    font-size: 0.625rem;
+    padding: 0.1rem 0.45rem;
+  }
+
+  .cat-java {
+    --chip-color: var(--cat-java);
+  }
+  .cat-system {
+    --chip-color: var(--cat-system);
+  }
+  .cat-micro {
+    --chip-color: var(--cat-micro);
+  }
+  .cat-distributed {
+    --chip-color: var(--cat-distributed);
+  }
+  .cat-ai {
+    --chip-color: var(--cat-ai);
+  }
+  .cat-security {
+    --chip-color: var(--cat-security);
+  }
+  .cat-devops {
+    --chip-color: var(--cat-devops);
+  }
+  .cat-practices {
+    --chip-color: var(--cat-practices);
+  }
+  .cat-backend {
+    --chip-color: var(--cat-backend);
+  }
+
+  /* --- buttons ----------------------------------------------------------- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    min-height: 2.5rem;
+    padding: 0.45rem 0.9rem;
+    border-radius: 0.6rem;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elev);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.02em;
+    transition:
+      transform 160ms ease,
+      border-color 160ms ease,
+      background 160ms ease,
+      color 160ms ease;
+  }
+  .btn:hover {
+    border-color: color-mix(in oklab, var(--primary) 60%, var(--border-strong));
+    color: var(--primary);
+  }
+  .btn--primary {
+    background: color-mix(in oklab, var(--primary) 16%, transparent);
+    border-color: color-mix(in oklab, var(--primary) 45%, transparent);
+    color: var(--primary);
+  }
+  .btn--ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--fg-muted);
+  }
+  .btn--ghost:hover {
+    background: var(--bg-elev);
+    color: var(--fg);
+  }
+
+  .link {
+    color: var(--primary);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in oklab, var(--primary) 40%, transparent);
+    text-underline-offset: 0.22em;
+    text-decoration-thickness: 1px;
+    transition:
+      color 140ms ease,
+      text-decoration-color 140ms ease;
+  }
+  .link:hover {
+    color: var(--secondary);
+    text-decoration-color: currentColor;
+  }
+
+  .arrow-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+    transition: color 150ms ease;
+  }
+  .arrow-link:hover {
+    color: var(--primary);
+  }
+  .arrow-link svg {
+    transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .arrow-link:hover svg {
+    transform: translate(2px, -2px);
+  }
+
+  /* --- surfaces ---------------------------------------------------------- */
+  .panel {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+  }
+
+  .hairline {
+    border-top: 1px solid var(--border);
+  }
+
+  .hero-glow::before {
+    content: "";
+    position: absolute;
+    inset: -20% 30% auto -10%;
+    height: 34rem;
+    background:
+      radial-gradient(
+        60% 60% at 30% 40%,
+        color-mix(in oklab, var(--primary) 16%, transparent),
+        transparent 70%
+      ),
+      radial-gradient(
+        50% 50% at 70% 60%,
+        color-mix(in oklab, var(--accent) 12%, transparent),
+        transparent 72%
+      );
+    pointer-events: none;
+    z-index: 0;
+    filter: blur(10px);
+  }
+
+  .dot-grid {
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(
+      color-mix(in oklab, var(--fg-subtle) 28%, transparent) 1px,
+      transparent 1px
+    );
+    background-size: 22px 22px;
+    mask-image: radial-gradient(70% 60% at 50% 30%, #000 20%, transparent 80%);
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  /* --- post rows --------------------------------------------------------- */
+  .post-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+    padding: 1.35rem 0.25rem 1.35rem 0;
+    border-top: 1px solid var(--border);
+    transition: background 180ms ease;
+  }
+  @media (min-width: 768px) {
+    .post-row {
+      grid-template-columns: 3.25rem minmax(0, 1fr) 13rem;
+      align-items: baseline;
+      gap: 1.25rem;
+    }
+  }
+  .post-row__index {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    color: var(--fg-subtle);
+    transition: color 180ms ease;
+  }
+  .post-row__title {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    line-height: 1.32;
+    transition:
+      color 160ms ease,
+      transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  @media (min-width: 768px) {
+    .post-row__title {
+      font-size: 1.3rem;
+    }
+  }
+  .post-row:hover .post-row__title {
+    color: var(--primary);
+    transform: translateX(3px);
+  }
+  .post-row:hover .post-row__index {
+    color: var(--primary);
+  }
+  .post-row__meta {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    color: var(--fg-subtle);
+  }
+  @media (min-width: 768px) {
+    .post-row__meta {
+      justify-content: flex-end;
+      text-align: right;
+    }
+  }
+
+  /* --- cards ------------------------------------------------------------- */
+  .card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 0.9rem;
+    overflow: hidden;
+    transition:
+      border-color 200ms ease,
+      transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 260ms ease;
+  }
+  .card:hover {
+    border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+    transform: translateY(-3px);
+    box-shadow: var(--shadow);
+  }
+  .card__media {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: var(--bg-sunken);
+  }
+  .card__media img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 600ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .card:hover .card__media img {
+    transform: scale(1.035);
+  }
+
+  .topic-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 1.1rem 1.15rem;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    background: var(--bg-elev);
+    transition:
+      border-color 180ms ease,
+      transform 180ms ease;
+  }
+  .topic-tile::after {
+    content: "";
+    position: absolute;
+    left: 1.15rem;
+    right: 1.15rem;
+    bottom: 0;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--chip-color, var(--primary));
+    opacity: 0.5;
+    transform: scaleX(0.25);
+    transform-origin: left;
+    transition:
+      transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      opacity 200ms ease;
+  }
+  .topic-tile:hover {
+    border-color: color-mix(in oklab, var(--chip-color, var(--primary)) 45%, var(--border));
+    transform: translateY(-2px);
+  }
+  .topic-tile:hover::after {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+
+  /* --- theme picker ------------------------------------------------------ */
+  .theme-pop {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.6rem);
+    width: 15rem;
+    padding: 0.4rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow);
+    z-index: 60;
+  }
+  .theme-pop[hidden] {
+    display: none;
+  }
+  .theme-option {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    border-radius: 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+    text-align: left;
+    transition:
+      background 140ms ease,
+      color 140ms ease;
+  }
+  .theme-option:hover {
+    background: var(--bg-sunken);
+    color: var(--fg);
+  }
+  .theme-option[aria-checked="true"] {
+    color: var(--fg);
+    background: color-mix(in oklab, var(--primary) 12%, transparent);
+  }
+  .theme-dots {
+    display: inline-flex;
+    gap: 2px;
+  }
+  .theme-dots i {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 99px;
+    display: block;
+  }
+
+  /* --- search ------------------------------------------------------------ */
+  .search-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: grid;
+    place-items: start center;
+    padding: 8vh 1rem 2rem;
+    background: color-mix(in oklab, var(--bg) 72%, transparent);
+    backdrop-filter: blur(6px);
+  }
+  .search-panel[hidden] {
+    display: none;
+  }
+  .search-box {
+    width: min(44rem, 100%);
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    border-radius: 0.9rem;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .search-input {
+    width: 100%;
+    padding: 0.95rem 1.1rem;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    outline: none;
+  }
+  .search-results {
+    max-height: min(60vh, 32rem);
+    overflow-y: auto;
+    padding: 0.4rem;
+  }
+  .search-hit {
+    display: block;
+    padding: 0.7rem 0.8rem;
+    border-radius: 0.55rem;
+    transition: background 130ms ease;
+  }
+  .search-hit:hover,
+  .search-hit[aria-selected="true"] {
+    background: var(--bg-sunken);
+  }
+  .search-hit h4 {
+    font-family: var(--font-display);
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.15rem;
+  }
+  .search-hit p {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    line-height: 1.5;
+  }
+  .search-hit mark {
+    background: color-mix(in oklab, var(--primary) 26%, transparent);
+    color: var(--fg);
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  /* --- mobile nav -------------------------------------------------------- */
+  .mobile-nav {
+    display: grid;
+    gap: 0.15rem;
+    padding: 0.6rem 0 1rem;
+    border-top: 1px solid var(--border);
+  }
+  .mobile-nav a {
+    padding: 0.7rem 0.25rem;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .mobile-nav a:hover {
+    color: var(--primary);
+  }
+
+  /* --- reading progress -------------------------------------------------- */
+  .progress {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 2px;
+    width: 100%;
+    transform-origin: 0 50%;
+    transform: scaleX(0);
+    background: var(--signal);
+    z-index: 70;
+    pointer-events: none;
+  }
+
+  /* --- table of contents ------------------------------------------------- */
+  .toc a {
+    display: block;
+    padding: 0.22rem 0 0.22rem 0.75rem;
+    border-left: 1px solid var(--border);
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--fg-subtle);
+    transition:
+      color 140ms ease,
+      border-color 140ms ease;
+  }
+  .toc a:hover {
+    color: var(--fg);
+    border-color: var(--border-strong);
+  }
+  .toc a[data-depth="3"] {
+    padding-left: 1.5rem;
+    font-size: 0.74rem;
+  }
+  .toc a[aria-current="true"] {
+    color: var(--primary);
+    border-color: var(--primary);
+  }
 }
 
-.active-nav {
-  @apply underline decoration-wavy decoration-2 underline-offset-4;
+/* ============================================================================
+   Article prose — hand-tuned for long technical reading
+   ========================================================================= */
+
+.prose-jg {
+  font-size: 1.0625rem;
+  line-height: 1.78;
+  color: var(--fg);
+  overflow-wrap: break-word;
+  min-width: 0;
+  max-width: 100%;
 }
 
-/* Source: https://piccalil.li/blog/a-more-modern-css-reset/ */
-/* Anything that has been anchored to should have extra scroll margin */
-:target {
-  scroll-margin-block: 1rem;
+.prose-jg > * + * {
+  margin-top: 1.15em;
+}
+
+.prose-jg p {
+  margin-block: 1.15em;
+}
+
+.prose-jg h2 {
+  position: relative;
+  margin-top: 2.9em;
+  margin-bottom: 0.9em;
+  font-size: clamp(1.4rem, 2.6vw, 1.72rem);
+  font-weight: 680;
+  padding-top: 1.1rem;
+}
+.prose-jg h2::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2.75rem;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--signal);
+}
+.prose-jg h2:first-child {
+  margin-top: 0;
+}
+
+.prose-jg h3 {
+  margin-top: 2.2em;
+  margin-bottom: 0.6em;
+  font-size: 1.24rem;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+}
+.prose-jg h4 {
+  margin-top: 1.9em;
+  margin-bottom: 0.5em;
+  font-size: 1.06rem;
+  font-weight: 650;
+}
+.prose-jg h2 + h3 {
+  margin-top: 0.8em;
+}
+
+.prose-jg a:not(.code-copy) {
+  color: var(--primary);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in oklab, var(--primary) 45%, transparent);
+  text-underline-offset: 0.2em;
+}
+.prose-jg a:hover {
+  color: var(--secondary);
+  text-decoration-color: currentColor;
+}
+
+.prose-jg strong {
+  font-weight: 650;
+  color: color-mix(in oklab, var(--fg) 92%, var(--primary));
+}
+
+.prose-jg em {
+  font-style: italic;
+}
+
+.prose-jg ul,
+.prose-jg ol {
+  padding-left: 1.3rem;
+  margin-block: 1.15em;
+}
+.prose-jg ul {
+  list-style: none;
+  padding-left: 1.15rem;
+}
+.prose-jg ul > li {
+  position: relative;
+  padding-left: 0.35rem;
+}
+.prose-jg ul > li::before {
+  content: "";
+  position: absolute;
+  left: -0.85rem;
+  top: 0.72em;
+  width: 5px;
+  height: 5px;
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--primary) 75%, transparent);
+  transform: rotate(45deg);
+}
+.prose-jg ol {
+  list-style: decimal;
+}
+.prose-jg ol > li::marker {
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+.prose-jg li {
+  margin-block: 0.4em;
+}
+.prose-jg li > ul,
+.prose-jg li > ol {
+  margin-block: 0.35em;
+}
+.prose-jg li::marker {
+  color: color-mix(in oklab, var(--primary) 80%, var(--fg-muted));
+}
+
+.prose-jg blockquote {
+  position: relative;
+  margin-block: 1.9em;
+  padding: 0.35em 0 0.35em 1.4em;
+  color: var(--fg-muted);
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.1rem;
+  line-height: 1.7;
+}
+.prose-jg blockquote::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.15em;
+  bottom: 0.15em;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--signal);
+}
+.prose-jg blockquote p {
+  margin-block: 0.5em;
+}
+.prose-jg blockquote strong {
+  color: var(--fg);
+}
+
+.prose-jg img {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-block: 2em;
+  border-radius: 0.7rem;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.prose-jg hr {
+  margin-block: 3em;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.prose-jg :not(pre) > code {
+  font-size: 0.86em;
+  padding: 0.14em 0.4em;
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--primary) 10%, var(--bg-sunken));
+  border: 1px solid color-mix(in oklab, var(--primary) 18%, var(--border));
+  color: var(--secondary);
+  white-space: break-spaces;
+}
+
+.prose-jg kbd {
+  font-size: 0.8em;
+  padding: 0.15em 0.45em;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+}
+
+/* tables */
+.table-scroll {
+  max-width: 100%;
+  margin-block: 1.9em;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--bg-elev);
+  -webkit-overflow-scrolling: touch;
+}
+.table-scroll:focus-visible {
+  outline: 2px solid var(--primary);
+}
+.prose-jg table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  min-width: 32rem;
+}
+.prose-jg thead th {
+  position: sticky;
+  top: 0;
+  background: color-mix(in oklab, var(--bg-elev) 92%, var(--primary));
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  text-align: left;
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+.prose-jg tbody td {
+  padding: 0.65rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.prose-jg tbody tr:last-child td {
+  border-bottom: 0;
+}
+.prose-jg tbody tr:hover td {
+  background: color-mix(in oklab, var(--primary) 5%, transparent);
+}
+
+/* ============================================================================
+   Code blocks (produced by scripts/rehype-code.mjs, highlighted by shiki)
+   ========================================================================= */
+
+.code-block {
+  position: relative;
+  max-width: 100%;
+  margin-block: 1.9em;
+  border: 1px solid var(--code-border);
+  border-radius: 0.7rem;
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+
+.code-block__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.4rem 0.55rem 0.4rem 0.85rem;
+  border-bottom: 1px solid var(--code-border);
+  background: color-mix(in oklab, var(--bg-elev) 55%, var(--bg-sunken));
+}
+
+.code-block__lang {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+
+.code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+  background: transparent;
+  transition:
+    color 140ms ease,
+    background 140ms ease,
+    border-color 140ms ease;
+}
+.code-copy:hover {
+  color: var(--fg);
+  background: var(--bg-sunken);
+  border-color: var(--border-strong);
+}
+.code-copy[data-copied="true"] {
+  color: var(--cat-devops);
+  border-color: color-mix(in oklab, var(--cat-devops) 40%, transparent);
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 0.95rem 1rem;
+  overflow-x: auto;
+  background: transparent;
+  font-size: 0.845rem;
+  line-height: 1.7;
+  tab-size: 2;
+  -webkit-overflow-scrolling: touch;
+}
+.code-block pre code {
+  display: block;
+  min-width: max-content;
+  font-family: var(--font-mono);
+  color: var(--fg);
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+/* Shiki emits one `--shiki-<theme>` variable per token. Each theme picks its
+   own variable, so syntax colours are correct for every palette. */
+.code-block pre code span[style*="--shiki-"] {
+  color: var(--shiki-tokyo-night);
+}
+html[data-theme="catppuccin-mocha"] .code-block pre code span[style*="--shiki-"] {
+  color: var(--shiki-catppuccin-mocha);
+}
+html[data-theme="nord"] .code-block pre code span[style*="--shiki-"] {
+  color: var(--shiki-nord);
+}
+html[data-theme="gruvbox"] .code-block pre code span[style*="--shiki-"] {
+  color: var(--shiki-gruvbox);
+}
+html[data-theme="daylight"] .code-block pre code span[style*="--shiki-"] {
+  color: var(--shiki-daylight);
+}
+/* tokens without an explicit colour keep the readable body colour */
+.code-block pre code > span.line > span:not([style*="--shiki-"]) {
+  color: inherit;
+}
+
+/* line numbers: opt-in from the article toolbar */
+[data-line-numbers="on"] .code-block pre code {
+  counter-reset: line;
+}
+[data-line-numbers="on"] .code-block pre code .line::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 2.1rem;
+  margin-right: 1rem;
+  text-align: right;
+  color: var(--fg-subtle);
+  opacity: 0.55;
+  user-select: none;
+}
+
+/* mermaid diagrams */
+.mermaid-block {
+  margin-block: 1.9em;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--bg-elev);
+  overflow-x: auto;
+  text-align: center;
+}
+.mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+  margin-inline: auto;
+}
+.mermaid-block[data-rendered="false"] {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  text-align: left;
+  white-space: pre;
+  color: var(--fg-muted);
+}
+
+/* KaTeX math */
+.prose-jg .katex-display {
+  margin-block: 1.6em;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.2rem;
 }

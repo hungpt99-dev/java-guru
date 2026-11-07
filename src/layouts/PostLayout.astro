@@ -1,0 +1,325 @@
+---
+import { Image } from "astro:assets";
+import type { MarkdownHeading } from "astro";
+import { ArrowUpRight, ListOrdered, ExternalLink } from "@lucide/astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import TableOfContents from "@/components/article/TableOfContents.astro";
+import ShareBar from "@/components/article/ShareBar.astro";
+import PrevNext from "@/components/article/PrevNext.astro";
+import PostCard from "@/components/blog/PostCard.astro";
+import SectionHeader from "@/components/common/SectionHeader.astro";
+import type { Post } from "@/utils/posts";
+import { postHref, postTags, adjacentPosts, relatedPosts } from "@/utils/posts";
+import { categorySlug, formatLongDate, readingLabel, isoDate } from "@/utils/slug";
+import { CATEGORY_ACCENTS, SITE } from "@/config";
+
+export interface Props {
+  post: Post;
+  headings: MarkdownHeading[];
+  allPosts: Post[];
+}
+
+const { post, headings, allPosts } = Astro.props;
+const { data } = post;
+const accent = CATEGORY_ACCENTS[data.category] ?? "practices";
+const tags = postTags(post);
+const href = postHref(post);
+const canonical = new URL(href, SITE.url).href;
+const { newer, older } = adjacentPosts(post, allPosts);
+const related = relatedPosts(post, allPosts, 3);
+const coverUrl = data.coverImage ? new URL(data.coverImage.src, SITE.url).href : undefined;
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  headline: data.title,
+  description: data.description,
+  datePublished: data.pubDatetime.toISOString(),
+  ...(data.modDatetime ? { dateModified: data.modDatetime.toISOString() } : {}),
+  author: {
+    "@type": "Person",
+    name: SITE.author.name,
+    alternateName: SITE.author.handle,
+    url: SITE.url,
+  },
+  publisher: { "@type": "Organization", name: SITE.title, url: SITE.url },
+  ...(coverUrl ? { image: [coverUrl] } : {}),
+  mainEntityOfPage: { "@type": "WebPage", "@id": canonical },
+  url: canonical,
+  inLanguage: data.lang,
+  articleSection: data.category,
+  ...(data.tags.length ? { keywords: data.tags.join(", ") } : {}),
+  ...(data.sourceUrl ? { isBasedOn: data.sourceUrl } : {}),
+  ...(data.readingTime ? { timeRequired: `PT${data.readingTime}M` } : {}),
+};
+---
+
+<BaseLayout
+  title={data.title}
+  description={data.description}
+  image={coverUrl}
+  type="article"
+  lang={data.lang}
+  publishedTime={data.pubDatetime}
+  modifiedTime={data.modDatetime ?? undefined}
+  section={data.category}
+  tags={data.tags}
+  jsonLd={jsonLd}
+>
+  <div class="progress" data-progress aria-hidden="true"></div>
+
+  <article class="shell pt-8 pb-16" data-article data-line-numbers="off">
+    <div class="mx-auto max-w-[62.5rem]">
+      <nav
+        class="text-subtle mb-8 flex flex-wrap items-center gap-2 font-mono text-[0.65rem]"
+        aria-label="Breadcrumb"
+      >
+        <a href="/" class="hover:text-primary">home</a>
+        <span aria-hidden="true">/</span>
+        <a href="/posts" class="hover:text-primary">journal</a>
+        <span aria-hidden="true">/</span>
+        <a
+          href={`/categories/${categorySlug(data.category)}`}
+          class="text-primary/80 hover:text-primary"
+        >
+          {data.category.toLowerCase()}
+        </a>
+      </nav>
+
+      <header>
+        <div class="sr-only" aria-hidden="true">
+          <span data-pagefind-filter="category">{data.category}</span>
+          <span data-pagefind-meta="category">{data.category}</span>
+          <span data-pagefind-meta="date">{isoDate(data.pubDatetime)}</span>
+          <span data-pagefind-meta="lang">{data.lang}</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <a
+            href={`/categories/${categorySlug(data.category)}`}
+            class:list={["chip", `cat-${accent}`]}
+          >
+            {data.category}
+          </a>
+          {data.series && <span class="chip chip--neutral">{data.series}</span>}
+        </div>
+
+        <h1
+          class="font-display mt-5 text-[clamp(1.85rem,4.6vw,2.9rem)] leading-[1.08] font-bold tracking-[-0.03em] text-balance"
+          lang={data.lang}
+          data-pagefind-meta="title"
+        >
+          {data.title}
+        </h1>
+
+        <div
+          class="text-subtle mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-[0.68rem]"
+        >
+          <time datetime={isoDate(data.pubDatetime)} class="text-muted"
+            >{formatLongDate(data.pubDatetime)}</time
+          >
+          <span aria-hidden="true" class="opacity-40">·</span>
+          <span>{readingLabel(data.readingTime ?? 5)}</span>
+          <span aria-hidden="true" class="opacity-40">·</span>
+          <span>{SITE.author.name}</span>
+          {
+            data.sourceUrl && (
+              <>
+                <span aria-hidden="true" class="opacity-40">
+                  ·
+                </span>
+                <a
+                  href={data.sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="text-subtle hover:text-primary inline-flex items-center gap-1 transition-colors"
+                >
+                  originally on Viblo
+                  <ArrowUpRight size={11} stroke-width={2} />
+                </a>
+              </>
+            )
+          }
+        </div>
+      </header>
+
+      {
+        data.coverImage && (
+          <figure class="mt-9">
+            <Image
+              src={data.coverImage}
+              alt=""
+              widths={[640, 960, 1280, 1600]}
+              sizes="(min-width: 1024px) 704px, 92vw"
+              loading="eager"
+              fetchpriority="high"
+              class="border-line w-full rounded-xl border"
+            />
+          </figure>
+        )
+      }
+
+      <div class="mt-12 grid gap-12 lg:grid-cols-[minmax(0,1fr)_15rem] lg:gap-14">
+        <div class="min-w-0">
+          <div class="prose-jg" data-article-body lang={data.lang} data-pagefind-body>
+            <slot />
+          </div>
+
+          {
+            tags.length > 0 && (
+              <div class="border-line mt-10 flex flex-wrap items-center gap-2 border-t pt-6">
+                <span class="label-mono mr-1">Tags</span>
+                {tags.map((tag) => (
+                  <a href={`/tags/${tag.slug}`} class="chip chip--neutral chip--sm">
+                    #{tag.name}
+                  </a>
+                ))}
+              </div>
+            )
+          }
+
+          <div class="mt-6 flex flex-wrap items-center justify-between gap-4">
+            <ShareBar title={data.title} url={canonical} />
+            <button
+              type="button"
+              class="btn !min-h-8 !px-2.5 !text-[0.65rem]"
+              data-line-toggle
+              aria-pressed="false"
+            >
+              <ListOrdered size={12} stroke-width={2} />
+              <span data-line-label>line numbers</span>
+            </button>
+          </div>
+
+          {
+            data.sourceUrl && (
+              <p class="border-line bg-sunken/50 text-subtle mt-8 flex items-start gap-2 rounded-lg border p-3.5 font-mono text-[0.65rem] leading-relaxed">
+                <ExternalLink size={13} stroke-width={1.75} class="mt-0.5 shrink-0" />
+                <span>
+                  This text is the original Vietnamese article, migrated unchanged from
+                  <a href={data.sourceUrl} target="_blank" rel="noopener noreferrer" class="link">
+                    {" "}
+                    the author's Viblo profile
+                  </a>
+                  .
+                </span>
+              </p>
+            )
+          }
+
+          <PrevNext newer={newer} older={older} />
+        </div>
+
+        <aside class="hidden lg:block">
+          <div class="sticky top-24 max-h-[calc(100vh-8rem)] overflow-y-auto pb-8">
+            <TableOfContents headings={headings} />
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    {
+      related.length > 0 && (
+        <section class="border-line mt-20 border-t pt-10">
+          <SectionHeader
+            index="—"
+            label="Keep reading"
+            title="Related notes"
+            href="/posts"
+            linkLabel="all"
+          />
+          <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {related.map((entry) => (
+              <PostCard post={entry} />
+            ))}
+          </div>
+        </section>
+      )
+    }
+  </article>
+</BaseLayout>
+
+<script>
+  const article = document.querySelector<HTMLElement>("[data-article]");
+  const bar = document.querySelector<HTMLElement>("[data-progress]");
+  const body = document.querySelector<HTMLElement>("[data-article-body]");
+
+  // --- reading progress ------------------------------------------------------
+  if (article && bar && body) {
+    const update = () => {
+      const start = body.offsetTop - 120;
+      const end = start + body.offsetHeight - window.innerHeight * 0.55;
+      const ratio = (window.scrollY - start) / Math.max(1, end - start);
+      bar.style.transform = `scaleX(${Math.min(1, Math.max(0, ratio))})`;
+    };
+    update();
+    window.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+  }
+
+  // --- copy code -------------------------------------------------------------
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
+    button.addEventListener("click", async () => {
+      const figure = button.closest("figure");
+      const code = figure?.querySelector("pre code");
+      if (!code) return;
+      try {
+        await navigator.clipboard.writeText(code.textContent ?? "");
+        button.dataset.copied = "true";
+        button.textContent = "copied";
+        setTimeout(() => {
+          button.dataset.copied = "false";
+          button.textContent = "copy";
+        }, 1600);
+      } catch {
+        button.textContent = "ctrl+c";
+      }
+    });
+  }
+
+  // --- line numbers ----------------------------------------------------------
+  const lineToggle = document.querySelector<HTMLButtonElement>("[data-line-toggle]");
+  lineToggle?.addEventListener("click", () => {
+    if (!article) return;
+    const on = article.dataset.lineNumbers === "on";
+    article.dataset.lineNumbers = on ? "off" : "on";
+    lineToggle.setAttribute("aria-pressed", String(!on));
+    const label = lineToggle.querySelector("[data-line-label]");
+    if (label) label.textContent = on ? "line numbers" : "hide numbers";
+  });
+
+  // --- mermaid (loaded only when a diagram is actually present) --------------
+  const diagrams = [...document.querySelectorAll<HTMLElement>("[data-mermaid]")];
+  if (diagrams.length) {
+    import("mermaid")
+      .then(async ({ default: mermaid }) => {
+        const styles = getComputedStyle(document.documentElement);
+        const theme = document.documentElement.dataset.theme;
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: theme === "daylight" ? "default" : "dark",
+          fontFamily: styles.getPropertyValue("--font-sans") || "Inter, sans-serif",
+          themeVariables: {
+            primaryColor: styles.getPropertyValue("--bg-elev").trim(),
+            primaryTextColor: styles.getPropertyValue("--fg").trim(),
+            lineColor: styles.getPropertyValue("--border-strong").trim(),
+          },
+        });
+        for (const node of diagrams) {
+          const source = node.textContent ?? "";
+          try {
+            const { svg } = await mermaid.render(
+              `m-${Math.random().toString(36).slice(2, 8)}`,
+              source
+            );
+            node.innerHTML = svg;
+            node.dataset.rendered = "true";
+          } catch {
+            node.dataset.rendered = "false";
+          }
+        }
+      })
+      .catch(() => {
+        /* offline or blocked: the raw diagram source stays visible */
+      });
+  }
+</script>

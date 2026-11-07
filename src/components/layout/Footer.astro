@@ -1,0 +1,91 @@
+---
+import { SITE } from "@/config";
+import { getPosts, getCategories } from "@/utils/posts";
+
+const posts = await getPosts();
+const categories = getCategories(posts);
+const year = new Date().getFullYear();
+const latest = posts[0];
+---
+
+<footer class="border-line bg-sunken/40 mt-24 border-t">
+  <div class="shell grid gap-10 py-14 md:grid-cols-[1.5fr_1fr_1fr] md:gap-8">
+    <div class="max-w-sm">
+      <a href="/" class="flex items-baseline gap-2.5">
+        <span class="text-primary/70 font-mono text-xs">~/</span>
+        <span class="font-display text-base font-extrabold tracking-[-0.03em]">
+          java<span class="text-primary">guru</span>
+        </span>
+      </a>
+      <p class="text-muted mt-3 text-sm leading-relaxed">
+        A personal engineering journal by {SITE.author.name} — {posts.length} essays on backend systems,
+        the JVM, infrastructure and the occasional production incident.
+      </p>
+      <p class="text-subtle mt-4 font-mono text-[0.65rem]">
+        {
+          latest
+            ? `Last entry ${latest.data.pubDatetime.toISOString().slice(0, 10)}`
+            : "No entries yet"
+        }
+      </p>
+    </div>
+
+    <nav aria-label="Footer">
+      <p class="label-mono mb-3">Journal</p>
+      <ul class="space-y-2 text-sm">
+        {
+          SITE.nav.map((item) => (
+            <li>
+              <a href={item.href} class="text-muted hover:text-primary transition-colors">
+                {item.label}
+              </a>
+            </li>
+          ))
+        }
+        <li>
+          <a href="/archives" class="text-muted hover:text-primary transition-colors">Archive</a>
+        </li>
+      </ul>
+    </nav>
+
+    <div>
+      <p class="label-mono mb-3">Elsewhere</p>
+      <ul class="space-y-2 text-sm">
+        {
+          SITE.socials.map((social) => (
+            <li>
+              <a
+                href={social.href}
+                class="group text-muted hover:text-primary inline-flex items-center gap-2 transition-colors"
+                rel={social.href.startsWith("http") ? "me noopener" : undefined}
+              >
+                {social.label}
+                <span class="text-subtle group-hover:text-primary/70 font-mono text-[0.6rem]">
+                  {social.note}
+                </span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+      <p class="text-subtle mt-5 font-mono text-[0.65rem] leading-relaxed">
+        {categories.length} topics · {posts.length} posts
+      </p>
+    </div>
+  </div>
+
+  <div
+    class="shell border-line text-subtle flex flex-col gap-3 border-t py-5 font-mono text-[0.65rem] sm:flex-row sm:items-center sm:justify-between"
+  >
+    <p>© {year} {SITE.author.name}. Words are mine; code is MIT.</p>
+    <p class="flex items-center gap-4">
+      <a href="/rss.xml" class="hover:text-primary transition-colors">rss</a>
+      <a
+        href="https://github.com/hungpt99-dev/java-guru"
+        class="hover:text-primary transition-colors"
+        rel="noopener">source</a
+      >
+      <a href="#top" class="hover:text-primary transition-colors">top ↑</a>
+    </p>
+  </div>
+</footer>

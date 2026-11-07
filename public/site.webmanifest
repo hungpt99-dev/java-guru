@@ -1,0 +1,21 @@
+{
+  "name": "Java Guru — engineering journal",
+  "short_name": "Java Guru",
+  "description": "Notes on backend engineering, distributed systems, Java and the JVM, security and AI.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1A1B26",
+  "theme_color": "#1A1B26",
+  "icons": [
+    {
+      "src": "/favicon/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

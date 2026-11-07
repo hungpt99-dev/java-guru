@@ -1,8 +1,15 @@
-# Ignore Astro files
-*.astro
-
-# Ignore node_modules directory
-node_modules/
-
-# Ignore build output
-dist/
+node_modules
+dist
+.git
+.github
+.astro
+.vscode
+.husky
+coverage
+*.log
+.env
+.env.*
+.DS_Store
+docs
+README.md
+AGENTS.md

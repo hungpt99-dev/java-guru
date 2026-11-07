@@ -1,0 +1,57 @@
+---
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import ProjectCard from "@/components/common/ProjectCard.astro";
+import { ArrowUpRight } from "@lucide/astro";
+import { PROJECTS } from "@/data/projects";
+import { SITE } from "@/config";
+
+const primary = PROJECTS.filter((p) => p.featured);
+const others = PROJECTS.filter((p) => !p.featured);
+---
+
+<BaseLayout
+  title="Projects"
+  description={`Things ${SITE.author.name} builds — Java platform templates, DDD labs, agent tooling and this site. Descriptions come from the repository metadata.`}
+>
+  <section class="shell pt-12 pb-10 md:pt-16">
+    <p class="eyebrow">Projects</p>
+    <h1 class="display-lg mt-4 max-w-[26ch]">
+      Software I actually run,<br /><span class="text-muted">not a portfolio of mockups.</span>
+    </h1>
+    <p class="text-muted mt-4 max-w-[42rem] text-[0.95rem] leading-relaxed">
+      Every card below is a real public repository. Names, descriptions, languages and topics are
+      taken from the repository metadata rather than written for the page.
+    </p>
+    <div class="mt-6 flex flex-wrap items-center gap-3 font-mono text-[0.68rem]">
+      <a
+        href="https://github.com/hungpt99-dev"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="btn"
+      >
+        GitHub profile
+        <ArrowUpRight size={12} stroke-width={2} />
+      </a>
+      <span class="text-subtle">28 public repositories at the time of writing</span>
+    </div>
+  </section>
+
+  <section class="shell pb-12">
+    <p class="label-mono mb-4">Primary</p>
+    <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      {primary.map((project) => <ProjectCard {...project} />)}
+    </div>
+  </section>
+
+  <section class="shell pb-20">
+    <p class="label-mono mb-4">Also maintained</p>
+    <div class="grid gap-4 md:grid-cols-2">
+      {others.map((project) => <ProjectCard {...project} />)}
+    </div>
+
+    <p class="text-subtle mt-8 max-w-[42rem] font-mono text-[0.65rem] leading-relaxed">
+      Some repositories on the profile are forks of upstream projects (agent runtimes, MCP servers).
+      They are deliberately left off this page so the showcase only lists original work.
+    </p>
+  </section>
+</BaseLayout>

@@ -1,0 +1,122 @@
+---
+import "@/styles/global.css";
+import { SITE } from "@/config";
+import Seo from "@/components/common/Seo.astro";
+import Header from "@/components/layout/Header.astro";
+import Footer from "@/components/layout/Footer.astro";
+import SearchDialog from "@/components/navigation/SearchDialog.astro";
+
+export interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+  type?: "website" | "article";
+  lang?: string;
+  noindex?: boolean;
+  publishedTime?: Date;
+  modifiedTime?: Date;
+  section?: string;
+  tags?: string[];
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
+}
+
+const {
+  title = SITE.title,
+  description = SITE.description,
+  image,
+  type = "website",
+  lang = SITE.locale,
+  noindex = false,
+  publishedTime,
+  modifiedTime,
+  section,
+  tags,
+  jsonLd,
+} = Astro.props;
+
+const website = {
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  name: SITE.title,
+  url: SITE.url,
+  description: SITE.description,
+  inLanguage: ["vi", "en"],
+  author: {
+    "@type": "Person",
+    name: SITE.author.name,
+    alternateName: SITE.author.handle,
+    url: SITE.url,
+  },
+};
+
+const graph = type === "website" ? [website, ...(jsonLd ? [jsonLd].flat() : [])] : jsonLd;
+---
+
+<!doctype html>
+<html lang={lang}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#1a1b26" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/favicon/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <link
+      rel="preload"
+      href="/fonts/bricolage-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+
+    <Seo
+      title={title}
+      description={description}
+      image={image}
+      type={type}
+      lang={lang}
+      noindex={noindex}
+      publishedTime={publishedTime}
+      modifiedTime={modifiedTime}
+      section={section}
+      tags={tags}
+      jsonLd={graph}
+    />
+
+    {/* Applies the stored theme before first paint, so no wrong-theme flash. */}
+    <script is:inline>
+      (function () {
+        const allowed = ["tokyo-night", "catppuccin-mocha", "nord", "gruvbox", "daylight"];
+        let stored = null;
+        try {
+          stored = localStorage.getItem("jg-theme");
+        } catch {
+          stored = null;
+        }
+        document.documentElement.dataset.theme =
+          stored && allowed.includes(stored) ? stored : "tokyo-night";
+      })();
+    </script>
+  </head>
+
+  <body id="top" class="flex min-h-dvh flex-col">
+    <a
+      href="#main"
+      class="focus:bg-elev focus:text-primary focus:border-primary sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[100] focus:rounded-md focus:border focus:px-4 focus:py-2 focus:font-mono focus:text-xs"
+    >
+      Skip to content
+    </a>
+
+    <Header />
+    <main id="main" class="flex-1">
+      <slot />
+    </main>
+    <Footer />
+    <SearchDialog />
+  </body>
+</html>

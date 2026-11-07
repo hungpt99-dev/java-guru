@@ -1,9 +1,40 @@
+# Production stack for java-guru: static Astro build served by Caddy.
+#
+#   docker compose up -d --build
+#
+# The container publishes only to the loopback interface by default, so an
+# existing host reverse proxy (Caddy/Nginx/Traefik) can own :80/:443 and TLS.
+# Nothing else on the host is touched.
+
 services:
-  app:
-    image: node:lts
+  web:
+    build:
+      context: .
+      args:
+        SITE_URL: ${SITE_URL:-https://java-guru.dev}
+    image: java-guru:latest
+    container_name: java-guru
+    restart: unless-stopped
     ports:
-      - 4321:4321
-    working_dir: /app
-    command: npm run dev -- --host 0.0.0.0
-    volumes:
-      - ./:/app
+      # Set BIND_ADDR=0.0.0.0 only when this container is the public edge.
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /config
+      - /data
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,13 +1,21 @@
-import type { APIRoute } from "astro";
+import type { APIContext } from "astro";
+import { SITE } from "@/config";
 
-const getRobotsTxt = (sitemapURL: URL) => `
-User-agent: *
-Allow: /
+export function GET(context: APIContext) {
+  const site = (context.site ?? SITE.url).toString().replace(/\/$/, "");
+  const body = [
+    "User-agent: *",
+    "Allow: /",
+    "",
+    "# Generated sitemap (index + per-page files)",
+    `Sitemap: ${site}/sitemap-index.xml`,
+    "",
+  ].join("\n");
 
-Sitemap: ${sitemapURL.href}
-`;
-
-export const GET: APIRoute = ({ site }) => {
-  const sitemapURL = new URL("sitemap-index.xml", site);
-  return new Response(getRobotsTxt(sitemapURL));
-};
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "public, max-age=86400",
+    },
+  });
+}

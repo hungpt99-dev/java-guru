@@ -1,0 +1,117 @@
+---
+import { Palette } from "@lucide/astro";
+
+export interface Props {
+  themes: ReadonlyArray<{ id: string; label: string; mode: string }>;
+}
+
+const { themes } = Astro.props;
+
+const swatches: Record<string, string[]> = {
+  "tokyo-night": ["#7AA2F7", "#7DCFFF", "#BB9AF7"],
+  "catppuccin-mocha": ["#89B4FA", "#CBA6F7", "#F5C2E7"],
+  nord: ["#81A1C1", "#88C0D0", "#A3BE8C"],
+  gruvbox: ["#FABD2F", "#FE8019", "#B8BB26"],
+  daylight: ["#2B5FD9", "#0B7285", "#7B3FE4"],
+};
+---
+
+<div class="relative" data-theme-root>
+  <button
+    type="button"
+    class="btn btn--ghost !min-h-9 !gap-2 !px-2.5"
+    data-theme-toggle
+    aria-haspopup="true"
+    aria-expanded="false"
+    aria-label="Change colour theme"
+  >
+    <Palette size={15} stroke-width={1.75} />
+    <span class="hidden items-center gap-[3px] sm:flex" aria-hidden="true">
+      <i class="bg-primary h-1.5 w-1.5 rounded-full"></i>
+      <i class="bg-secondary h-1.5 w-1.5 rounded-full"></i>
+      <i class="bg-accent h-1.5 w-1.5 rounded-full"></i>
+    </span>
+  </button>
+
+  <div class="theme-pop" role="radiogroup" aria-label="Colour theme" data-theme-pop hidden>
+    <p class="label-mono px-2 pt-1.5 pb-2">Theme</p>
+    {
+      themes.map((theme) => (
+        <button
+          type="button"
+          class="theme-option"
+          role="radio"
+          aria-checked="false"
+          data-theme-option={theme.id}
+        >
+          <span class="theme-dots" aria-hidden="true">
+            {(swatches[theme.id] ?? []).map((color) => (
+              <i style={`background:${color}`} />
+            ))}
+          </span>
+          <span class="flex-1">{theme.label}</span>
+          <span class="text-subtle font-mono text-[0.6rem]">{theme.mode}</span>
+        </button>
+      ))
+    }
+  </div>
+</div>
+
+<script>
+  const STORAGE_KEY = "jg-theme";
+  const root = document.documentElement;
+  const trigger = document.querySelector<HTMLButtonElement>("[data-theme-toggle]");
+  const pop = document.querySelector<HTMLElement>("[data-theme-pop]");
+  const options = [...document.querySelectorAll<HTMLButtonElement>("[data-theme-option]")];
+
+  const sync = (current: string) => {
+    for (const option of options) {
+      option.setAttribute("aria-checked", String(option.dataset.themeOption === current));
+    }
+  };
+
+  const apply = (theme: string) => {
+    root.dataset.theme = theme;
+    try {
+      localStorage.setItem(STORAGE_KEY, theme);
+    } catch {
+      /* storage disabled — theme still applies for this page */
+    }
+    sync(theme);
+    document.dispatchEvent(new CustomEvent("jg:themechange", { detail: theme }));
+  };
+
+  sync(root.dataset.theme ?? "tokyo-night");
+
+  trigger?.addEventListener("click", () => {
+    const willOpen = pop?.hidden ?? false;
+    if (pop) pop.hidden = !willOpen;
+    trigger.setAttribute("aria-expanded", String(willOpen));
+  });
+
+  for (const option of options) {
+    option.addEventListener("click", () => {
+      apply(option.dataset.themeOption ?? "tokyo-night");
+      if (pop) pop.hidden = true;
+      trigger?.setAttribute("aria-expanded", "false");
+      trigger?.focus();
+    });
+  }
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node)) return;
+    const host = trigger?.parentElement;
+    if (pop && !pop.hidden && host && !host.contains(event.target)) {
+      pop.hidden = true;
+      trigger?.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && pop && !pop.hidden) {
+      pop.hidden = true;
+      trigger?.setAttribute("aria-expanded", "false");
+      trigger?.focus();
+    }
+  });
+</script>

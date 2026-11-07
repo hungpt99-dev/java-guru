@@ -11,9 +11,7 @@ function getPreferTheme() {
   if (primaryColorScheme) return primaryColorScheme;
 
   // return user device's prefer color scheme
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 let themeValue = getPreferTheme();
@@ -40,9 +38,7 @@ function reflectPreference() {
     const bgColor = computedStyles.backgroundColor;
 
     // Set the background color in <meta theme-color ... />
-    document
-      .querySelector("meta[name='theme-color']")
-      ?.setAttribute("content", bgColor);
+    document.querySelector("meta[name='theme-color']")?.setAttribute("content", bgColor);
   }
 }
 
@@ -69,14 +65,10 @@ window.onload = () => {
 
 // Set theme-color value before page transition
 // to avoid navigation bar color flickering in Android dark mode
-document.addEventListener("astro:before-swap", event => {
-  const bgColor = document
-    .querySelector("meta[name='theme-color']")
-    ?.getAttribute("content");
+document.addEventListener("astro:before-swap", (event) => {
+  const bgColor = document.querySelector("meta[name='theme-color']")?.getAttribute("content");
 
-  event.newDocument
-    .querySelector("meta[name='theme-color']")
-    ?.setAttribute("content", bgColor);
+  event.newDocument.querySelector("meta[name='theme-color']")?.setAttribute("content", bgColor);
 });
 
 // sync with system changes

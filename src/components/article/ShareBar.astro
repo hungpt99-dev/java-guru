@@ -1,0 +1,64 @@
+---
+import { Link2, Check } from "@lucide/astro";
+
+export interface Props {
+  title: string;
+  url: string;
+}
+
+const { title, url } = Astro.props;
+const encodedUrl = encodeURIComponent(url);
+const encodedTitle = encodeURIComponent(title);
+
+const targets = [
+  { label: "X", href: `https://x.com/intent/tweet?text=${encodedTitle}&url=${encodedUrl}` },
+  { label: "LinkedIn", href: `https://www.linkedin.com/sharing/share-offsite/?url=${encodedUrl}` },
+  { label: "Facebook", href: `https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}` },
+];
+---
+
+<div class="flex flex-wrap items-center gap-2">
+  <span class="label-mono mr-1">Share</span>
+  {
+    targets.map((target) => (
+      <a
+        href={target.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="btn !min-h-8 !px-2.5 !text-[0.65rem]"
+      >
+        {target.label}
+      </a>
+    ))
+  }
+  <button type="button" class="btn !min-h-8 !px-2.5 !text-[0.65rem]" data-copy-link data-url={url}>
+    <Link2 size={12} stroke-width={2} data-copy-icon="link" />
+    <Check
+      size={12}
+      stroke-width={2}
+      class="hidden text-[var(--cat-devops)]"
+      data-copy-icon="done"
+    />
+    <span data-copy-label>Copy link</span>
+  </button>
+</div>
+
+<script>
+  const button = document.querySelector<HTMLButtonElement>("[data-copy-link]");
+  button?.addEventListener("click", async () => {
+    const url = button.dataset.url ?? window.location.href;
+    try {
+      await navigator.clipboard.writeText(url);
+      button.querySelector("[data-copy-label]")!.textContent = "Copied";
+      button.querySelector('[data-copy-icon="link"]')?.classList.add("hidden");
+      button.querySelector('[data-copy-icon="done"]')?.classList.remove("hidden");
+      setTimeout(() => {
+        button.querySelector("[data-copy-label]")!.textContent = "Copy link";
+        button.querySelector('[data-copy-icon="link"]')?.classList.remove("hidden");
+        button.querySelector('[data-copy-icon="done"]')?.classList.add("hidden");
+      }, 1800);
+    } catch {
+      button.querySelector("[data-copy-label]")!.textContent = "Press ⌘C";
+    }
+  });
+</script>

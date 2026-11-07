@@ -1,0 +1,63 @@
+---
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import { getPosts, getTags } from "@/utils/posts";
+import { SITE } from "@/config";
+
+const posts = await getPosts();
+const tags = getTags(posts);
+const max = tags[0]?.count ?? 1;
+
+/** Weight → type scale, so recurring tags read louder than one-offs. */
+const weight = (count: number) => {
+  const ratio = count / max;
+  if (ratio > 0.6) return "text-[1.35rem] text-fg";
+  if (ratio > 0.3) return "text-[1.1rem] text-fg/90";
+  if (ratio > 0.15) return "text-[0.95rem] text-muted";
+  return "text-[0.85rem] text-subtle";
+};
+---
+
+<BaseLayout
+  title="Tags"
+  description={`All ${tags.length} tags used across the ${posts.length} articles on ${SITE.title}, with the original tag names kept exactly as published.`}
+>
+  <section class="shell pt-12 pb-8 md:pt-16">
+    <p class="eyebrow">Tags</p>
+    <h1 class="display-lg mt-4 max-w-[26ch]">
+      {tags.length} tags,<br /><span class="text-muted">verbatim from the originals.</span>
+    </h1>
+    <p class="text-muted mt-4 max-w-[40rem] text-[0.95rem] leading-relaxed">
+      Tag names are preserved exactly as they were published on Viblo — including their original
+      casing and spelling. Size reflects how often a tag recurs.
+    </p>
+  </section>
+
+  <section class="shell pb-16">
+    <div class="panel p-6 md:p-8">
+      <div class="flex flex-wrap items-baseline gap-x-5 gap-y-3">
+        {
+          tags.map((tag) => (
+            <a
+              href={`/tags/${tag.slug}`}
+              class:list={[
+                "group font-display hover:text-primary inline-flex items-baseline gap-1.5 font-medium tracking-[-0.01em] transition-colors",
+                weight(tag.count),
+              ]}
+            >
+              <span>#{tag.name}</span>
+              <span class="text-subtle group-hover:text-primary/70 font-mono text-[0.6rem]">
+                {tag.count}
+              </span>
+            </a>
+          ))
+        }
+      </div>
+    </div>
+
+    <div class="text-subtle mt-8 flex flex-wrap items-center gap-3 font-mono text-[0.68rem]">
+      <a href="/categories" class="link">Browse by topic instead</a>
+      <span class="opacity-40">/</span>
+      <a href="/posts" class="link">All articles</a>
+    </div>
+  </section>
+</BaseLayout>

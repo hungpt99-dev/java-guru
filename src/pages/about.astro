@@ -1,0 +1,172 @@
+---
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import { ArrowUpRight, MapPin, Rss } from "@lucide/astro";
+import { SITE } from "@/config";
+import { getPosts, getCategories } from "@/utils/posts";
+import { formatDate } from "@/utils/slug";
+
+const posts = await getPosts();
+const categories = getCategories(posts);
+const first = posts[posts.length - 1];
+const latest = posts[0];
+
+/** Verified profile facts (GitHub bio + Viblo profile), quoted not embellished. */
+const stack = ["Java", "Spring Boot", "Kafka", "Redis", "PostgreSQL", "Astro", "TypeScript"];
+const principles = [
+  {
+    title: "Write from production, not from slides",
+    body: "Most essays start with something that broke: a retry storm, a shutdown that never happened, a config line nobody remembered. The theory comes after the incident.",
+  },
+  {
+    title: "Keep the original words",
+    body: "Articles are published in Vietnamese and mirrored here unchanged — including their original tags, typos and structure. Editing them for the web would erase what makes them useful.",
+  },
+  {
+    title: "Trade-offs over verdicts",
+    body: "Microservices, monoliths, virtual threads, agents: the interesting part is never the choice, it is the cost you accept when you make it.",
+  },
+];
+---
+
+<BaseLayout
+  title="About"
+  description={`${SITE.author.name} (${SITE.author.handle}) — software engineer writing about backend systems, the JVM, distributed systems, security and AI.`}
+>
+  <section class="shell pt-12 pb-10 md:pt-16">
+    <div class="grid gap-10 lg:grid-cols-[1fr_16rem] lg:gap-16">
+      <div class="max-w-[44rem]">
+        <p class="eyebrow">About</p>
+        <h1 class="display-lg mt-4">
+          I'm {SITE.author.name} —<br />
+          <span class="text-muted">backend-strong, systems-minded.</span>
+        </h1>
+
+        <div class="text-muted mt-7 space-y-4 text-[1rem] leading-relaxed">
+          <p>
+            <span class="text-fg">Fullstack software engineer, backend-strong (Java deepest).</span> I
+            make distributed systems behave — Spring Boot, Kafka, Redis, and frontend when it is needed.
+          </p>
+          <p>
+            I'm {SITE.author.intro} This site is {SITE.author.bio}
+          </p>
+          <p>
+            The journal currently holds {posts.length} articles across {categories.length} topics, first
+            published {first ? formatDate(first.data.pubDatetime) : ""} and last updated{" "}
+            {latest ? formatDate(latest.data.pubDatetime) : ""}. Everything here is the original
+            Vietnamese text, migrated unchanged from <a
+              href={SITE.socials[1].href}
+              class="link"
+              target="_blank"
+              rel="noopener noreferrer">Viblo</a
+            >.
+          </p>
+        </div>
+
+        <div class="mt-8 flex flex-wrap gap-2">
+          {stack.map((item) => <span class="chip chip--neutral">{item}</span>)}
+        </div>
+      </div>
+
+      <aside class="lg:pt-2">
+        <img
+          src={SITE.author.avatar}
+          alt={`${SITE.author.name} portrait`}
+          width="320"
+          height="320"
+          class="border-line aspect-square w-full max-w-[11rem] rounded-xl border object-cover"
+        />
+        <dl class="mt-5 space-y-2 font-mono text-[0.68rem]">
+          <div class="border-line flex justify-between gap-3 border-b pb-2">
+            <dt class="text-subtle">handle</dt>
+            <dd class="text-muted">{SITE.author.handle}</dd>
+          </div>
+          <div class="border-line flex justify-between gap-3 border-b pb-2">
+            <dt class="text-subtle">alias</dt>
+            <dd class="text-muted">{SITE.author.alias}</dd>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <dt class="text-subtle">based in</dt>
+            <dd class="text-muted flex items-center gap-1">
+              <MapPin size={10} stroke-width={2} />
+              {SITE.author.location}
+            </dd>
+          </div>
+        </dl>
+      </aside>
+    </div>
+  </section>
+
+  <section class="shell pb-12">
+    <div class="hairline pt-8">
+      <p class="eyebrow">How I write</p>
+      <div class="mt-5 grid gap-4 md:grid-cols-3">
+        {
+          principles.map((principle) => (
+            <div class="panel p-5">
+              <h2 class="font-display text-[1.02rem] font-semibold tracking-[-0.01em]">
+                {principle.title}
+              </h2>
+              <p class="text-muted mt-2 text-[0.86rem] leading-relaxed">{principle.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="shell pb-20">
+    <div class="hairline grid gap-8 pt-8 md:grid-cols-2">
+      <div>
+        <p class="eyebrow">Reading paths</p>
+        <ul class="mt-4 space-y-2">
+          {
+            categories.slice(0, 5).map((category) => (
+              <li>
+                <a
+                  href={`/categories/${category.slug}`}
+                  class="group border-line flex items-baseline justify-between gap-4 border-b py-2"
+                >
+                  <span class="text-muted group-hover:text-primary text-[0.92rem] transition-colors">
+                    {category.name}
+                  </span>
+                  <span class="text-subtle font-mono text-[0.62rem]">{category.count}</span>
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
+
+      <div>
+        <p class="eyebrow">Elsewhere</p>
+        <ul class="mt-4 space-y-2">
+          {
+            SITE.socials.map((social) => (
+              <li>
+                <a
+                  href={social.href}
+                  target={social.href.startsWith("http") ? "_blank" : undefined}
+                  rel="me noopener noreferrer"
+                  class="group border-line flex items-center justify-between gap-4 border-b py-2"
+                >
+                  <span class="text-muted group-hover:text-primary text-[0.92rem] transition-colors">
+                    {social.label}
+                  </span>
+                  <ArrowUpRight
+                    size={12}
+                    stroke-width={2}
+                    class="text-subtle group-hover:text-primary"
+                  />
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+        <p class="text-subtle mt-6 flex items-center gap-2 font-mono text-[0.62rem]">
+          <Rss size={11} stroke-width={2} />
+          <a href="/rss.xml" class="hover:text-primary">Subscribe to the feed</a>
+        </p>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

@@ -1,0 +1,70 @@
+---
+import { Image } from "astro:assets";
+import { ArrowUpRight } from "@lucide/astro";
+import type { Post } from "@/utils/posts";
+import { postHref } from "@/utils/posts";
+import { formatDate, readingLabel } from "@/utils/slug";
+import { CATEGORY_ACCENTS } from "@/config";
+
+export interface Props {
+  post: Post;
+  priority?: boolean;
+  size?: "default" | "wide";
+}
+
+const { post, priority = false, size = "default" } = Astro.props;
+const { data } = post;
+const accent = CATEGORY_ACCENTS[data.category] ?? "practices";
+const href = postHref(post);
+---
+
+<article class:list={["card group", size === "wide" && "md:flex-row"]}>
+  <a href={href} class="absolute inset-0 z-10" aria-label={data.title}></a>
+
+  {
+    data.coverImage && (
+      <div class:list={["card__media", size === "wide" && "md:aspect-auto md:w-1/2 md:shrink-0"]}>
+        <Image
+          src={data.coverImage}
+          alt=""
+          widths={[420, 720, 960]}
+          sizes="(min-width: 1024px) 480px, (min-width: 640px) 45vw, 92vw"
+          loading={priority ? "eager" : "lazy"}
+          fetchpriority={priority ? "high" : "auto"}
+          class="object-cover"
+        />
+        <div class="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/35 via-transparent to-transparent" />
+      </div>
+    )
+  }
+
+  <div class="flex flex-1 flex-col gap-3 p-5">
+    <div class="flex flex-wrap items-center gap-2">
+      <span class:list={["chip", `cat-${accent}`]}>{data.category}</span>
+      {data.series && <span class="chip chip--neutral chip--sm">{data.series}</span>}
+    </div>
+
+    <h3
+      class="font-display group-hover:text-primary text-[1.22rem] leading-[1.22] font-semibold tracking-[-0.02em] text-balance transition-colors"
+    >
+      {data.title}
+    </h3>
+
+    <p class="text-muted line-clamp-3 text-[0.9rem] leading-relaxed">{data.description}</p>
+
+    <div
+      class="text-subtle mt-auto flex items-center justify-between gap-3 pt-2 font-mono text-[0.65rem]"
+    >
+      <span class="flex items-center gap-2">
+        <time datetime={data.pubDatetime.toISOString()}>{formatDate(data.pubDatetime)}</time>
+        <span aria-hidden="true">·</span>
+        <span>{readingLabel(data.readingTime ?? 5)}</span>
+      </span>
+      <ArrowUpRight
+        size={14}
+        stroke-width={1.75}
+        class="group-hover:text-primary transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+      />
+    </div>
+  </div>
+</article>

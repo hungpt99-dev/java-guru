@@ -1,7 +1,6 @@
-# Ignore everything
-/*
+# Ignore everything…
 
-# Except these files & folders
+# …except these files & folders
 !/src
 !/public
 !/.github
@@ -9,6 +8,19 @@
 !astro.config.ts
 !.prettierrc.mjs
 !package.json
-!.prettierrc
 !eslint.config.js
 !README.md
+!docker-compose.yml
+!Dockerfile
+!Caddyfile
+!scripts
+
+# Migrated article bodies and source snapshots are never reformatted: they must
+# stay byte-identical to what was published on Viblo.
+/src/content/blog
+/src/assets/articles
+/scripts/migration/source
+/migration-report
+/dist
+/.astro
+/public/fonts

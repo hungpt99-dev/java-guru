@@ -1,68 +1,34 @@
-import { defineConfig, envField } from "astro/config";
+import { defineConfig } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import sitemap from "@astrojs/sitemap";
-import remarkToc from "remark-toc";
-import remarkCollapse from "remark-collapse";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeCode from "./src/utils/rehype-code";
+import rehypeProse from "./src/utils/rehype-prose";
 import { SITE } from "./src/config";
-import {
-  DEFAULT_LOCALE,
-  LOCALES_TO_LANG,
-  SUPPORTED_LOCALES,
-} from "./src/i18n/config";
 
 // https://astro.build/config
 export default defineConfig({
-  site: SITE.website,
-  i18n: {
-    locales: SUPPORTED_LOCALES,
-    defaultLocale: DEFAULT_LOCALE,
-  },
+  site: SITE.url,
   integrations: [
     sitemap({
-      filter: page => SITE.showArchives || !page.endsWith("/archives"),
-      i18n: {
-        defaultLocale: DEFAULT_LOCALE,
-        locales: LOCALES_TO_LANG,
-      },
+      filter: (page) => !page.includes("/search"),
+      changefreq: "weekly",
+      lastmod: new Date(),
     }),
   ],
   markdown: {
-    remarkPlugins: [
-      [
-        remarkToc,
-        {
-          heading:
-            "(table[ -]of[ -])?contents?|toc|mục lục|محتويات|المحتويات|جدول المحتويات",
-        },
-      ],
-      [remarkCollapse, { test: "Table of contents" }],
-    ],
-    shikiConfig: {
-      // For more themes, visit https://shiki.style/themes
-      themes: { light: "min-light", dark: "night-owl" },
-      wrap: true,
-    },
+    // Shiki is driven by src/utils/rehype-code.ts so that every theme gets its
+    // own token colours instead of Astro's built-in light/dark pair.
+    syntaxHighlight: false,
+    smartypants: false,
+    remarkPlugins: [remarkMath],
+    rehypePlugins: [[rehypeProse, SITE.url], rehypeCode, [rehypeKatex, { strict: false }]],
   },
   vite: {
     plugins: [tailwindcss()],
-    optimizeDeps: {
-      exclude: ["@resvg/resvg-js"],
-    },
   },
-  image: {
-    responsiveStyles: true,
-    layout: "constrained",
-  },
-  env: {
-    schema: {
-      PUBLIC_GOOGLE_SITE_VERIFICATION: envField.string({
-        access: "public",
-        context: "client",
-        optional: true,
-      }),
-    },
-  },
-  experimental: {
-    preserveScriptOrder: true,
+  build: {
+    inlineStylesheets: "auto",
   },
 });

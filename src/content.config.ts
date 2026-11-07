@@ -1,34 +1,33 @@
 import { defineCollection, z } from "astro:content";
 import { glob } from "astro/loaders";
-import { SITE } from "@/config";
 
-export const BLOG_PATH = "src/data/blog";
-
+/**
+ * One collection, one language per entry. Articles keep the language they were
+ * published in (`lang`), which drives <html lang>, the Open Graph locale and
+ * the `inLanguage` field of the article's structured data.
+ */
 const blog = defineCollection({
-  loader: glob({ pattern: "**/[^_]*.md", base: `./${BLOG_PATH}` }),
+  loader: glob({ pattern: "**/[^_]*.md", base: "./src/content/blog" }),
   schema: ({ image }) =>
     z.object({
-      author: z.string().default(SITE.author),
-      pubDatetime: z.date(),
-      modDatetime: z.date().optional().nullable(),
       title: z.string(),
-      featured: z.boolean().optional(),
-      draft: z.boolean().optional(),
-      tags: z.array(z.string()).default(["others"]),
-      ogImage: image().or(z.string()).optional(),
       description: z.string(),
-      canonicalURL: z.string().optional(),
-      hideEditPost: z.boolean().optional(),
-      timezone: z.string().optional(),
+      pubDatetime: z.coerce.date(),
+      modDatetime: z.coerce.date().nullable().optional(),
+      category: z.string(),
+      tags: z.array(z.string()).default([]),
+      lang: z.string().default("vi"),
+      featured: z.boolean().default(false),
+      draft: z.boolean().default(false),
+      readingTime: z.number().int().nonnegative().optional(),
+      coverImage: image().optional().nullable(),
+      series: z.string().nullable().optional(),
+      /** Original publication, kept for provenance and "read the original" links. */
+      sourceUrl: z.string().url().optional(),
+      sourceReleasedAt: z.string().optional(),
+      sourceUpdatedAt: z.string().optional(),
+      sourceTags: z.array(z.string()).default([]),
     }),
 });
 
-const about = defineCollection({
-  loader: glob({ pattern: "**/*.md", base: "./src/data/about" }),
-  schema: z.object({
-    title: z.string(),
-    description: z.string().optional(),
-  }),
-});
-
-export const collections = { blog, about };
+export const collections = { blog };

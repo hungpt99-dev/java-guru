@@ -1,0 +1,16 @@
+---
+export interface Props {
+  label?: string;
+  note?: string;
+}
+
+const {
+  label = "placeholder",
+  note = "Not documented yet — this section will be filled in from the actual setup, not guessed.",
+} = Astro.props;
+---
+
+<div class="border-line-strong/70 bg-sunken/30 rounded-lg border border-dashed p-4">
+  <p class="text-subtle font-mono text-[0.6rem] tracking-[0.16em] uppercase">[{label}]</p>
+  <p class="text-subtle mt-1.5 text-[0.82rem] leading-relaxed">{note}</p>
+</div>

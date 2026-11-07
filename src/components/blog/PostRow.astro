@@ -1,0 +1,64 @@
+---
+import type { Post } from "@/utils/posts";
+import { postHref, postTags } from "@/utils/posts";
+import { formatDate, readingLabel, categorySlug } from "@/utils/slug";
+import { CATEGORY_ACCENTS } from "@/config";
+
+export interface Props {
+  post: Post;
+  index?: number;
+  showTags?: boolean;
+}
+
+const { post, index, showTags = true } = Astro.props;
+const { data } = post;
+const accent = CATEGORY_ACCENTS[data.category] ?? "practices";
+const tags = postTags(post).slice(0, 3);
+const number = typeof index === "number" ? String(index + 1).padStart(2, "0") : null;
+---
+
+<article class="post-row group">
+  {
+    number && (
+      <span class="post-row__index" aria-hidden="true">
+        {number}
+      </span>
+    )
+  }
+
+  <div class="min-w-0">
+    <h3 class="post-row__title">
+      <a href={postHref(post)} class="relative z-10">{data.title}</a>
+    </h3>
+    <div
+      class="text-subtle mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[0.65rem]"
+    >
+      <a
+        href={`/categories/${categorySlug(data.category)}`}
+        class:list={["chip chip--sm relative z-20", `cat-${accent}`]}
+      >
+        {data.category}
+      </a>
+      {
+        showTags && tags.length > 0 && (
+          <span class="hidden items-center gap-2 sm:flex">
+            {tags.map((tag) => (
+              <a
+                href={`/tags/${tag.slug}`}
+                class="text-subtle hover:text-primary relative z-20 transition-colors"
+              >
+                #{tag.name}
+              </a>
+            ))}
+          </span>
+        )
+      }
+    </div>
+  </div>
+
+  <div class="post-row__meta">
+    <time datetime={data.pubDatetime.toISOString()}>{formatDate(data.pubDatetime)}</time>
+    <span aria-hidden="true" class="opacity-40">/</span>
+    <span>{readingLabel(data.readingTime ?? 5)}</span>
+  </div>
+</article>

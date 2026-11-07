@@ -1,0 +1,78 @@
+---
+import type { GetStaticPaths, Page } from "astro";
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import PostRow from "@/components/blog/PostRow.astro";
+import Pagination from "@/components/navigation/Pagination.astro";
+import { getPosts, getTags, postsByTag } from "@/utils/posts";
+import { SITE } from "@/config";
+
+export const getStaticPaths = (async ({ paginate }) => {
+  const posts = await getPosts();
+  const tags = getTags(posts);
+  return tags.flatMap((tag) =>
+    paginate(postsByTag(posts, tag.slug), {
+      params: { tag: tag.slug },
+      props: { tag, allTags: tags },
+      pageSize: SITE.postsPerPage,
+    })
+  );
+}) satisfies GetStaticPaths;
+
+const { tag, allTags, page } = Astro.props as {
+  tag: { name: string; slug: string; count: number };
+  allTags: Array<{ name: string; slug: string; count: number }>;
+  page: Page<Awaited<ReturnType<typeof getPosts>>[number]>;
+};
+
+const related = allTags.filter((t) => t.slug !== tag.slug).slice(0, 10);
+const offset = (page.currentPage - 1) * SITE.postsPerPage;
+---
+
+<BaseLayout
+  title={`#${tag.name}`}
+  description={`${tag.count} articles tagged “${tag.name}” on ${SITE.title}.`}
+  noindex={tag.count < 2}
+>
+  <section class="shell pt-12 pb-8 md:pt-16">
+    <nav
+      class="text-subtle mb-6 flex items-center gap-2 font-mono text-[0.65rem]"
+      aria-label="Breadcrumb"
+    >
+      <a href="/" class="hover:text-primary">home</a>
+      <span aria-hidden="true">/</span>
+      <a href="/tags" class="hover:text-primary">tags</a>
+    </nav>
+
+    <p class="eyebrow">Tag · {tag.count} {tag.count === 1 ? "article" : "articles"}</p>
+    <h1 class="display-lg mt-4">#{tag.name}</h1>
+
+    <div class="mt-6 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <span class="label-mono mr-1">Neighbours</span>
+      {
+        related.map((other) => (
+          <a
+            href={`/tags/${other.slug}`}
+            class="text-subtle hover:text-primary font-mono text-[0.68rem]"
+          >
+            #{other.name}
+          </a>
+        ))
+      }
+    </div>
+  </section>
+
+  <section class="shell pb-16">
+    <div class="border-line flex items-center justify-between border-b pb-2">
+      <p class="label-mono">
+        {page.currentPage === 1 ? "newest first" : `page ${page.currentPage} of ${page.lastPage}`}
+      </p>
+      <a href="/tags" class="label-mono hover:text-primary">all tags →</a>
+    </div>
+
+    <div class="border-line border-b">
+      {page.data.map((post, i) => <PostRow post={post} index={offset + i} />)}
+    </div>
+
+    <Pagination current={page.currentPage} total={page.lastPage} base={`/tags/${tag.slug}`} />
+  </section>
+</BaseLayout>
