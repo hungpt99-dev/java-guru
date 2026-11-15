@@ -1,6 +1,6 @@
 ---
 title: "Building My Own Homelab on an Ubuntu VPS – A Small Corner to Self-Host and Explore Technology"
-description: "A personal Homelab on an Ubuntu VPS for self-hosting services and learning about Linux, networking and infrastructure: Ansible for infrastructure as code, Docker Compose, Tailscale for private networking, UFW, Fail2ban and CrowdSec for security, Hermes Agent, Bield for server management and monitoring, LogDeck for Docker logs, Grafito for system logs, Restic for backup, all kept in Git."
+description: "A personal Homelab on an Ubuntu VPS for self-hosting services and learning about Linux, networking and infrastructure: Ansible for infrastructure as code, Docker Compose, Tailscale for private networking, UFW and Gately for security, Hermes Agent, Bield for server management and monitoring, LogDeck for Docker logs, Grafito for system logs, Restic for backup, all kept in Git."
 slug: "tu-xay-dung-homelab-tren-ubuntu-vps-goc-nho-de-self-host-va-kham-pha-cong-nghe"
 locale: "en"
 translationKey: "tu-xay-dung-homelab-tren-ubuntu-vps-goc-nho-de-self-host-va-kham-pha-cong-nghe"
