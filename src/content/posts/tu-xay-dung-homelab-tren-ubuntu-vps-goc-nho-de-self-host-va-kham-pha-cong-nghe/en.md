@@ -1,6 +1,6 @@
 ---
 title: "Building My Own Homelab on an Ubuntu VPS – A Small Corner to Self-Host and Explore Technology"
-description: "A personal Homelab on an Ubuntu VPS for self-hosting services and learning about Linux, networking and infrastructure: Ansible for infrastructure as code, Docker Compose, Tailscale for private networking, UFW, Fail2ban and CrowdSec for security, Hermes Agent, Prometheus/Grafana and Loki for monitoring and logging, Restic for backup, all kept in Git."
+description: "A personal Homelab on an Ubuntu VPS for self-hosting services and learning about Linux, networking and infrastructure: Ansible for infrastructure as code, Docker Compose, Tailscale for private networking, UFW, Fail2ban and CrowdSec for security, Hermes Agent, Bield for server management and monitoring, LogDeck for Docker logs, Grafito for system logs, Restic for backup, all kept in Git."
 slug: "tu-xay-dung-homelab-tren-ubuntu-vps-goc-nho-de-self-host-va-kham-pha-cong-nghe"
 locale: "en"
 translationKey: "tu-xay-dung-homelab-tren-ubuntu-vps-goc-nho-de-self-host-va-kham-pha-cong-nghe"
@@ -11,7 +11,7 @@ featured: false
 draft: false
 series: null
 coverImage: "./cover.png"
-readingTime: 5
+readingTime: 6
 ---
 
 Lately I've been spending time building a Homelab on a personal VPS.
@@ -24,7 +24,7 @@ It's also a fairly interesting way to learn more about DevOps and System Adminis
 
 I've kept all the configuration and the setup process in a repository:
 
-**GitHub:** https://github.com/hungpt99-dev/vps-harden
+**GitHub:** [https://github.com/hungpt99-dev/vps-harden](https://github.com/hungpt99-dev/vps-harden)
 
 ## 1. Homelab Overview
 
@@ -38,12 +38,14 @@ Some of the main components:
 | Infrastructure Automation | Ansible |
 | Container Runtime | Docker |
 | Container Management | Docker Compose |
+| Server Management & Monitoring | [Bield](https://github.com/manasseh-fikadu/bield) |
+| Network Gateway | [Gately](https://github.com/wangwanjie/gately) |
 | Private Networking | Tailscale |
 | Firewall | UFW |
-| Intrusion Prevention | Fail2ban, CrowdSec |
+| Intrusion Prevention | Gately |
 | AI Agent | Hermes Agent |
-| Monitoring | Prometheus, Grafana |
-| Logging | Grafana Alloy, Loki |
+| Docker Logging | [LogDeck](https://github.com/AmoabaKelvin/logdeck) |
+| System Logging | [Grafito](https://github.com/ralsina/grafito) |
 | Backup | Restic |
 | Source Control | Git |
 
@@ -94,7 +96,10 @@ Tailscale builds a private network on top of WireGuard, letting authenticated de
 Some administrative services can be reachable only through the private network:
 
 - SSH.
-- Grafana.
+- Bield.
+- Gately management interface.
+- LogDeck.
+- Grafito.
 - Hermes Agent.
 - Other internal services.
 
@@ -106,19 +111,15 @@ This is the part I wanted to focus on when building the Homelab.
 
 Even though it's just a personal VPS, the server can still become a target for automated scans, SSH brute-force attempts or exploitation of common vulnerabilities on the Internet.
 
-Some of the tools I use:
+Some of the tools and solutions I use:
 
 **UFW**
 
 Manages the firewall and controls connections to the server. By default it restricts inbound traffic and only opens the ports that are genuinely needed.
 
-**Fail2ban**
+**Gately**
 
-Watches logs and automatically bans IPs with too many failed login attempts.
-
-**CrowdSec**
-
-Analyzes logs to detect suspicious behavior and supports remediation through appropriate components.
+Uses the network protection and application gateway features, helping detect and handle suspicious behaviour.
 
 **SSH Hardening**
 
@@ -126,6 +127,8 @@ Analyzes logs to detect suspicious behavior and supports remediation through app
 - Disable root login.
 - Restrict password authentication after verifying that SSH keys work.
 - Grant only the permissions each user needs.
+
+Beyond that, I also pay attention to limiting access to the management interfaces and preferring the private network where possible.
 
 One thing to keep in mind is that Docker has its own network and firewall management. So turning on UFW doesn't mean every container is properly protected.
 
@@ -148,25 +151,76 @@ I see this as a supporting tool for operations, not something that fully replace
 
 A system running stably doesn't mean I know it's actually healthy.
 
-So I added some monitoring tools:
+So I picked a few separate monitoring and logging tools to watch server health and to help with troubleshooting when something goes wrong.
 
-- **Prometheus:** Collects metrics.
-- **Node Exporter:** Provides Linux resource information.
-- **Grafana:** Visualizes metrics and dashboards.
-- **Grafana Alloy:** Collects logs.
-- **Loki:** Centralized log storage and querying.
+**Bield – Server Management & Monitoring**
 
-The information I care about includes:
+Bield provides a central management interface for the machines in the Tailscale tailnet.
 
-- CPU usage.
-- Memory usage.
-- Disk usage.
-- Network traffic.
-- Container health.
-- Service availability.
-- Security events.
+Some of the features I care about:
 
-On a VPS with limited resources, the monitoring stack also needs to be configured sensibly so it doesn't become a resource drain itself.
+- Watching CPU, RAM, disk and network.
+- Watching the metrics history.
+- Checking the status of the devices.
+- Health checks for websites, ports and DNS.
+- Alerts when a server goes offline or a disk is nearly full.
+- Watching Docker containers.
+- Terminal access and file management from the browser.
+
+Instead of having to SSH into each server to check its status, I can watch the machines in the system from a single interface.
+
+Repository: [https://github.com/manasseh-fikadu/bield](https://github.com/manasseh-fikadu/bield)
+
+**LogDeck – Docker Logging**
+
+For Docker containers, I chose LogDeck to manage logs.
+
+Some features:
+
+- View Docker logs in realtime.
+- Store logs so they can be read again after a container restarts or is deleted.
+- Search and filter logs.
+- Follow logs per container or per Compose project.
+- Detect containers that crash or get OOM-killed.
+- Configure alerts when certain log patterns appear.
+- Manage Docker containers from the web interface.
+
+What I like is that LogDeck has its own log storage built on SQLite, rather than just showing Docker's realtime output.
+
+Thanks to that, when an application fails or a container restarts, I can still find the earlier logs for troubleshooting.
+
+Repository: [https://github.com/AmoabaKelvin/logdeck](https://github.com/AmoabaKelvin/logdeck)
+
+**Grafito – System Logging**
+
+Besides Docker logs, I also wanted an interface to watch logs straight from the Ubuntu Server.
+
+I chose Grafito for that.
+
+Grafito provides a web interface to query and follow the systemd journal.
+
+Some features:
+
+- View system logs in realtime.
+- Filter logs by service, priority and time.
+- Search log content.
+- Follow systemd services.
+- Check the status of system services.
+- Look at the history of system activity.
+
+Beyond logging, Grafito also has some extras such as a system dashboard, process monitoring and a Docker Compose overview.
+
+For my current needs, I mainly use Grafito to read and troubleshoot Ubuntu system logs.
+
+Repository: [https://github.com/ralsina/grafito](https://github.com/ralsina/grafito)
+
+So monitoring and logging are split by purpose:
+
+- **Bield:** Watching server health and managing the system.
+- **LogDeck:** Managing Docker container logs.
+- **Grafito:** Watching Ubuntu system logs.
+
+Instead of deploying a fairly large observability stack with Prometheus, Grafana, Alloy and Loki, I wanted to start with small, focused tools that each have their own interface and match what the Homelab actually needs.
 
 ## 8. Backup and Recovery
 
@@ -181,6 +235,7 @@ What needs backing up:
 - Application data.
 - Database backups.
 - Hermes Agent configuration.
+- LogDeck data and configuration.
 - Other important data.
 
 Backups should be encrypted, have a retention policy, and be stored somewhere independent of the VPS.
@@ -195,7 +250,9 @@ The goal is to be able to look at the repository and understand how the VPS is c
 
 The repository is organized in a modular way, splitting components into separate Ansible Roles and Playbooks so it's easy to maintain, extend and reuse.
 
-**Repository:** https://github.com/hungpt99-dev/vps-harden
+The important configuration is all managed with Git so changes can be tracked and redeployed when needed.
+
+**Repository:** [https://github.com/hungpt99-dev/vps-harden](https://github.com/hungpt99-dev/vps-harden)
 
 You can look at the source code, the Ansible structure and the configuration there.
 
@@ -203,7 +260,7 @@ You can look at the source code, the Ansible structure and the configuration the
 
 To me, a Homelab doesn't have to mean a physical server, a Kubernetes cluster or a massive infrastructure setup.
 
-A small VPS running Ubuntu is enough to start exploring a lot of things: Linux, networking, security, Docker, monitoring, automation and self-hosted services.
+A small VPS running Ubuntu is enough to start exploring a lot of things: Linux, networking, security, Docker, monitoring, logging, automation and self-hosted services.
 
 The most interesting part isn't just having another place to run applications, but understanding better what goes on underneath the systems I use every day.
 
