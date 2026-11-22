@@ -1,30 +1,50 @@
-# Java Guru
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg">
+    <img src="docs/assets/banner-dark.svg" alt="Java Guru — bilingual engineering journal" width="100%">
+  </picture>
+</p>
 
-A bilingual personal engineering journal — backend engineering, system design,
-distributed systems, the Java and JVM ecosystem, security and AI.
+<h1 align="center">Java Guru</h1>
 
-Every article is published in **Vietnamese and English**. Both versions share one
-slug and one `translationKey`, so switching language keeps the reader on the same
-article.
+<p align="center">
+  <strong>Bilingual notes on Java, distributed systems and AI.</strong><br>
+  Every article is published in Vietnamese and English — static, self-hosted, no tracking, no backend.
+</p>
 
-- Live: <https://java-guru.pages.dev>
-- Author: Hưng Phạm ([@lowkey_dev](https://github.com/hungpt99-dev))
+<p align="center">
+  <img src="https://img.shields.io/badge/deploy-Cloudflare%20Pages-orange" alt="Deployed on Cloudflare Pages">
+  <img src="https://img.shields.io/badge/Astro-5-black" alt="Astro 5">
+  <img src="https://img.shields.io/badge/TypeScript-strict-blue" alt="TypeScript strict">
+  <img src="https://img.shields.io/badge/Tailwind-v4-38bdf8" alt="Tailwind CSS v4">
+  <img src="https://img.shields.io/badge/highlighting-Shiki-brightgreen" alt="Shiki syntax highlighting">
+  <img src="https://img.shields.io/badge/search-Pagefind-brightgreen" alt="Pagefind search">
+  <img src="https://img.shields.io/badge/static-export-orange" alt="Static export">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
+</p>
+
+<p align="center">
+  <a href="https://java-guru.pages.dev/"><strong>Live demo</strong></a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#design-system">Design system</a> ·
+  <a href="#documentation">Documentation</a>
+</p>
 
 ---
 
 ## Stack
 
-| Concern      | Choice                                                            |
-| ------------ | ----------------------------------------------------------------- |
-| Framework    | [Astro](https://astro.build) 5, fully static                      |
-| Language     | TypeScript (strict)                                               |
-| Styling      | Tailwind CSS 4 + a hand-written prose layer                       |
-| Content      | Content Collections — `src/content/posts/<slug>/{vi,en}.md`       |
-| Highlighting | [Shiki](https://shiki.style) — five themes in one payload         |
-| Search       | [Pagefind](https://pagefind.app) — one index, filtered by locale  |
-| Icons        | [Lucide](https://lucide.dev) (`@lucide/astro`)                    |
-| Fonts        | Self-hosted: Bricolage Grotesque, Inter, JetBrains Mono, Fraunces |
-| Deployment   | Cloudflare Pages (primary) · Docker + Caddy (alternative)         |
+| Concern      | Choice                                                           |
+| ------------ | ---------------------------------------------------------------- |
+| Framework    | [Astro](https://astro.build) 5, fully static                     |
+| Language     | TypeScript (strict)                                              |
+| Styling      | Tailwind CSS 4 + a hand-written prose layer                      |
+| Content      | Content Collections — `src/content/posts/<slug>/{vi,en}.md`      |
+| Highlighting | [Shiki](https://shiki.style) — one custom palette token set      |
+| Search       | [Pagefind](https://pagefind.app) — one index, filtered by locale |
+| Icons        | [Lucide](https://lucide.dev) (`@lucide/astro`)                   |
+| Fonts        | Self-hosted Geist + Geist Mono, with Inter/JetBrains fallbacks   |
+| Deployment   | Cloudflare Pages (primary) · Docker + Caddy (alternative)        |
 
 No database, no runtime server, no client framework.
 
@@ -62,7 +82,7 @@ java-guru/
 ├── docs/deployment.md            # Cloudflare Pages, Docker, TLS, rollback
 ├── public/
 │   ├── _redirects                # legacy URL → /en/… (Cloudflare Pages)
-│   ├── fonts/                    # self-hosted woff2 (latin + vietnamese)
+│   ├── fonts/                    # self-hosted Geist + fallback woff2
 │   ├── images/articles/<slug>/   # inline figures
 │   └── favicon/, favicon.svg, site.webmanifest
 ├── scripts/
@@ -172,31 +192,35 @@ Rules enforced by the schema and the validator:
 
 ## Design system
 
-Five themes, driven by CSS custom properties in `src/styles/global.css`:
+A flat black-and-white palette with one lime accent, shared with DevShelf. The
+five existing theme IDs are kept for stored preferences; the four dark themes use
+the dark token set and `daylight` uses the light token set.
 
-| Theme                 | Mode  | Background | Primary   |
+| Theme                 | Mode  | Background | Accent    |
 | --------------------- | ----- | ---------- | --------- |
-| Tokyo Night (default) | dark  | `#1A1B26`  | `#7AA2F7` |
-| Catppuccin Mocha      | dark  | `#1E1E2E`  | `#89B4FA` |
-| Nord                  | dark  | `#2E3440`  | `#81A1C1` |
-| Gruvbox               | dark  | `#282828`  | `#FABD2F` |
-| Daylight              | light | `#FAF9F6`  | `#2B5FD9` |
+| Tokyo Night (default) | dark  | `#0e0e0e`  | `#c8f542` |
+| Catppuccin Mocha      | dark  | `#0e0e0e`  | `#c8f542` |
+| Nord                  | dark  | `#0e0e0e`  | `#c8f542` |
+| Gruvbox               | dark  | `#0e0e0e`  | `#c8f542` |
+| Daylight              | light | `#fafaf7`  | `#4d7c0f` |
 
+- Fonts are self-hosted Geist (UI/headings) and Geist Mono (labels/code), with
+  Inter and JetBrains Mono as Vietnamese/glyph fallbacks.
+- Surfaces use 1px `#262626`/`#e7e7e2` borders and 12–16px radii; no shadows,
+  gradients or glow. Selection and focus use the lime accent.
 - The theme is applied by an inline script **before first paint** (no flash) and
-  stored in `localStorage` under `jg-theme`.
-- Topic accents use nine OKLCH hues (`--cat-java`, `--cat-system`, …) whose
-  lightness/chroma adapt per theme, so chips stay legible everywhere.
-- `src/utils/rehype-code.ts` renders each code block once for **all five themes**
-  into `--shiki-<theme>` custom properties; CSS maps the active theme to its own
-  variable — one payload, five correct palettes, no client highlighter.
+  stored in `localStorage` under `jg-theme`. `<meta name="theme-color">` and the
+  web manifest follow the active palette.
+- `src/utils/rehype-code.ts` renders each code block once with a custom Shiki
+  theme whose token colours match the accent palette; CSS maps the theme
+  variables onto the active surface. No client highlighter.
 
 ### Adding a theme
 
 1. Append to `THEMES` in `src/config.ts`.
 2. Add an `html[data-theme="<id>"]` block in `src/styles/global.css` with the full
-   token contract (`--bg`, `--fg`, `--primary`, `--cat-l`, `--cat-c`, …).
-3. Add the theme to `THEMES` in `src/utils/rehype-code.ts`.
-4. Add swatches in `src/components/navigation/ThemePicker.astro` and the allowed
+   token contract (`--bg`, `--fg`, `--primary`, `--lime`, `--selection`, …).
+3. Add swatches in `src/components/navigation/ThemePicker.astro` and the allowed
    list in `src/layouts/BaseLayout.astro`.
 
 ## Interface localisation
@@ -295,6 +319,14 @@ docker compose up -d --build
 
 Full instructions — TLS with a host Caddy/Nginx, health checks, rollback,
 troubleshooting — are in [`docs/deployment.md`](docs/deployment.md).
+
+## Documentation
+
+|                  |                                                                                                                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Using it**     | [Live demo](https://java-guru.pages.dev/) · [Content & translations](#content) · [Design system](#design-system) · [Interface localisation](#interface-localisation) |
+| **Running it**   | [Deployment](docs/deployment.md) · [Quick start](#quick-start) · [URL structure](#url-structure)                                                                     |
+| **Extending it** | [Engineering Collection](#engineering-collection) · [Adding a theme](#adding-a-theme) · [Scripts](#scripts)                                                          |
 
 ## Licence
 

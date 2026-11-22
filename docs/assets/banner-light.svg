@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="300" viewBox="0 0 1280 300" role="img" aria-label="Java Guru — bilingual engineering journal">
+  <rect width="1280" height="300" fill="#fafaf7"/>
+  <rect width="1280" height="4" fill="#111111"/>
+  <g transform="translate(70 62)">
+    <rect width="176" height="176" rx="28" fill="#111111"/>
+    <text x="88" y="118" text-anchor="middle" font-family="Geist Mono, ui-monospace, monospace" font-size="70" font-weight="600" fill="#fafaf7">{ }</text>
+    <path d="M40 142h96" stroke="#fafaf7" stroke-width="6" stroke-linecap="round" opacity="0.55"/>
+  </g>
+  <text x="304" y="104" font-family="Geist, Inter, system-ui, sans-serif" font-size="46" font-weight="500" letter-spacing="-1.4" fill="#111111">Java Guru</text>
+  <text x="306" y="150" font-family="Geist, Inter, system-ui, sans-serif" font-size="22" fill="#6b6b66">Bilingual notes on Java, distributed systems and AI.</text>
+  <g font-family="Geist, Inter, system-ui, sans-serif" font-size="15" fill="#111111">
+    <rect x="304" y="184" width="196" height="42" rx="12" fill="#ffffff" stroke="#e7e7e2" stroke-width="1"/>
+    <text x="320" y="211">EN / VI bilingual</text>
+    <rect x="512" y="184" width="188" height="42" rx="12" fill="#ffffff" stroke="#e7e7e2" stroke-width="1"/>
+    <text x="528" y="211">Java · JVM · Spring</text>
+    <rect x="712" y="184" width="226" height="42" rx="12" fill="#ffffff" stroke="#e7e7e2" stroke-width="1"/>
+    <text x="728" y="211">Systems · AI · Security</text>
+  </g>
+  <text x="304" y="266" font-family="Geist Mono, ui-monospace, monospace" font-size="13" fill="#6b6b66">Astro · TypeScript · Shiki · Pagefind · Static</text>
+</svg>

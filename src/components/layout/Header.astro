@@ -1,5 +1,5 @@
 ---
-import { Search, Menu, X } from "@lucide/astro";
+import { Braces, Search, Menu, X } from "@lucide/astro";
 import { SITE, THEMES } from "@/config";
 import { type Locale } from "@/i18n/config";
 import { useTranslations } from "@/i18n/ui";
@@ -24,18 +24,15 @@ const isActive = (route: string) => {
 };
 ---
 
-<header
-  class="border-line sticky top-0 z-50 border-b backdrop-blur-md"
-  style="background-color: color-mix(in oklab, var(--bg) 86%, transparent)"
->
+<header class="border-line bg-background sticky top-0 z-50 border-b">
   <div class="shell flex h-16 items-center justify-between gap-3">
     <a
       href={home}
-      class="group flex items-baseline gap-2.5"
+      class="group flex items-center gap-2.5"
       aria-label={`${SITE.title} — ${t("nav.journal")}`}
     >
-      <span class="text-primary/70 group-hover:text-primary font-mono text-xs transition">~/</span>
-      <span class="font-display text-[1.05rem] font-extrabold tracking-[-0.03em]">
+      <span class="brand-mark" aria-hidden="true"><Braces size={16} stroke-width={2} /></span>
+      <span class="brand-name">
         java<span class="text-primary">guru</span>
       </span>
     </a>

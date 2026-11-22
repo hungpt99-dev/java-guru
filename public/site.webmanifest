@@ -4,8 +4,8 @@
   "description": "Notes on backend engineering, distributed systems, Java and the JVM, security and AI.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#1A1B26",
-  "theme_color": "#1A1B26",
+  "background_color": "#0e0e0e",
+  "theme_color": "#0e0e0e",
   "icons": [
     {
       "src": "/favicon/icon-192.png",

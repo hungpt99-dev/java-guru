@@ -1,22 +1,50 @@
 /**
- * rehype plugin: highlight fenced code with Shiki for *all* site themes and
- * wrap each block in a figure carrying the language label and copy button.
+ * rehype plugin: highlight fenced code with Shiki and wrap each block in a
+ * figure carrying the language label and copy button.
  *
- * Shiki is asked for five themes at once; because `defaultColor` is false every
- * token gets `--shiki-<theme>` custom properties instead of a hardcoded colour,
- * and global.css maps the active theme to its own variable. One HTML payload,
- * five correct palettes.
+ * One custom TextMate theme carries DevShelf's exact highlight palette; the
+ * tokens are emitted as `--shiki-*` custom properties (`defaultColor: false`)
+ * and global.css maps them onto the active palette.
  */
-import { createHighlighter, type Highlighter } from "shiki";
+import { createHighlighter, type Highlighter, type ThemeRegistration } from "shiki";
 import type { Element, ElementContent, Root, Text } from "hast";
 
-const THEMES: Record<string, string> = {
-  "tokyo-night": "tokyo-night",
-  "catppuccin-mocha": "catppuccin-mocha",
-  nord: "nord",
-  gruvbox: "gruvbox-dark-medium",
-  daylight: "min-light",
-};
+const DEVSHELF_THEME = {
+  name: "devshelf",
+  type: "dark",
+  colors: {
+    "editor.background": "#171717",
+    "editor.foreground": "#f4f4f0",
+  },
+  tokenColors: [
+    {
+      scope: ["comment", "punctuation.definition.comment"],
+      settings: { foreground: "#8a8a82", fontStyle: "italic" },
+    },
+    {
+      scope: ["keyword", "keyword.control", "storage", "entity.name.tag"],
+      settings: { foreground: "#c8f542", fontStyle: "bold" },
+    },
+    {
+      scope: ["string", "string.quoted", "constant.character"],
+      settings: { foreground: "#a7d68a" },
+    },
+    {
+      scope: ["constant.numeric", "constant.language", "constant.other"],
+      settings: { foreground: "#d8b47a" },
+    },
+    {
+      scope: [
+        "entity.name",
+        "entity.name.function",
+        "entity.name.type",
+        "support.type",
+        "support.class",
+      ],
+      settings: { foreground: "#9ec9e8" },
+    },
+  ],
+} as const;
 
 const ALIASES: Record<string, string> = {
   sh: "bash",
@@ -37,7 +65,10 @@ const ALIASES: Record<string, string> = {
 let highlighterPromise: Promise<Highlighter> | undefined;
 
 function getHighlighter(): Promise<Highlighter> {
-  highlighterPromise ??= createHighlighter({ themes: Object.values(THEMES), langs: [] });
+  highlighterPromise ??= createHighlighter({
+    themes: [DEVSHELF_THEME as unknown as ThemeRegistration],
+    langs: [],
+  });
   return highlighterPromise;
 }
 
@@ -115,7 +146,7 @@ export default function rehypeCode() {
       if (loaded) {
         const hast = highlighter.codeToHast(raw.replace(/\n$/, ""), {
           lang,
-          themes: THEMES,
+          themes: { dark: "devshelf", light: "devshelf" },
           defaultColor: false,
         });
         pre = hast.children[0] as Element;

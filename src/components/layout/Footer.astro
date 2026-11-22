@@ -18,12 +18,12 @@ const year = new Date().getFullYear();
 const latest = posts[0];
 ---
 
-<footer class="border-line bg-sunken/40 mt-24 border-t">
+<footer class="border-line mt-24 border-t">
   <div class="shell grid gap-10 py-14 md:grid-cols-[1.5fr_1fr_1fr] md:gap-8">
     <div class="max-w-sm">
-      <a href={localePath(locale, "/")} class="flex items-baseline gap-2.5">
-        <span class="text-primary/70 font-mono text-xs">~/</span>
-        <span class="font-display text-base font-extrabold tracking-[-0.03em]">
+      <a href={localePath(locale, "/")} class="flex items-center gap-2.5">
+        <span class="bg-lime size-2 rounded-full" aria-hidden="true"></span>
+        <span class="brand-name">
           java<span class="text-primary">guru</span>
         </span>
       </a>
