@@ -33,7 +33,10 @@ const target = new URL(`/${DEFAULT_LOCALE}/`, origin).href;
     }
     <link rel="alternate" hreflang="x-default" href={target} />
     <meta http-equiv="refresh" content={`0; url=/${DEFAULT_LOCALE}/`} />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico?v=2" sizes="32x32" type="image/x-icon" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2" />
+    <link rel="manifest" href="/site.webmanifest?v=2" />
     <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
     <script is:inline>
       (function () {

@@ -8,14 +8,20 @@
   "theme_color": "#0e0e0e",
   "icons": [
     {
-      "src": "/favicon/icon-192.png",
+      "src": "/icon-192.png?v=2",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "/favicon/icon-512.png",
+      "src": "/icon-512.png?v=2",
       "sizes": "512x512",
       "type": "image/png"
+    },
+    {
+      "src": "/icon-512-maskable.png?v=2",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

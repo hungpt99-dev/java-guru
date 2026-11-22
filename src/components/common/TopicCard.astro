@@ -1,0 +1,41 @@
+---
+import type { Locale } from "@/i18n/config";
+import { useTranslations } from "@/i18n/ui";
+import { formatDate, localePath } from "@/utils/i18n";
+
+export interface Props {
+  label: string;
+  slug: string;
+  blurb: string;
+  count: number;
+  latest?: Date;
+  locale: Locale;
+}
+
+const { label, slug, blurb, count, latest, locale } = Astro.props;
+const t = useTranslations(locale);
+const href = localePath(locale, `/categories/${slug}/`);
+---
+
+<article class="topic-card">
+  <div class="topic-card__head">
+    <h2 class="topic-card__title">
+      <span class="topic-card__bar" aria-hidden="true"></span>
+      <a href={href} class="topic-card__link">{label}</a>
+    </h2>
+    <span class="topic-card__count">{t("categories.count", { count })}</span>
+  </div>
+
+  <p class="topic-card__desc">{blurb}</p>
+
+  <div class="topic-card__foot">
+    <span>
+      {
+        latest
+          ? t("categories.latest", { date: formatDate(latest, locale) })
+          : t("categories.empty")
+      }
+    </span>
+    <span class="topic-card__arrow" aria-hidden="true">→</span>
+  </div>
+</article>

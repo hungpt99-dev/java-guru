@@ -105,7 +105,7 @@ const en = {
   "categories.lede":
     "Every article is filed under the topic it is actually about. Counts are live — they come from the published collection.",
   "categories.count": "{count} articles",
-  "categories.latest": "latest · {date}",
+  "categories.latest": "Latest: {date}",
   "categories.allTags": "Browse all {count} tags",
   "categories.empty": "No articles in this topic yet.",
 
@@ -347,7 +347,7 @@ const vi: Record<UIKey, string> = {
   "categories.lede":
     "Mỗi bài được xếp vào đúng chủ đề chính của nó. Số lượng là số thật, lấy từ tập bài viết đã xuất bản.",
   "categories.count": "{count} bài viết",
-  "categories.latest": "mới nhất · {date}",
+  "categories.latest": "Mới nhất: {date}",
   "categories.allTags": "Xem tất cả {count} thẻ",
   "categories.empty": "Chủ đề này chưa có bài nào.",
 

@@ -1514,3 +1514,109 @@ html[data-theme="daylight"] .brand-mark {
   font-weight: 500;
   letter-spacing: -0.03em;
 }
+
+/* ============================================================================
+   Topic cards (Topics index only — the homepage topic tiles are unchanged)
+   ========================================================================= */
+
+.topic-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+.topic-card:hover {
+  border-color: var(--lime);
+  background: var(--secondary);
+}
+
+.topic-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.topic-card__title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+.topic-card__bar {
+  flex: none;
+  width: 2px;
+  height: 24px;
+  border-radius: 2px;
+  background: var(--lime);
+}
+.topic-card__link {
+  color: inherit;
+}
+.topic-card__link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+.topic-card__count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  color: var(--muted);
+}
+
+.topic-card__desc {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.topic-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  color: var(--muted);
+}
+.topic-card__arrow {
+  color: var(--lime-text);
+  font-size: 0.875rem;
+  line-height: 1;
+  transition: transform 150ms ease;
+}
+.topic-card:hover .topic-card__arrow,
+.topic-card:focus-within .topic-card__arrow {
+  transform: translateX(4px);
+}
+
+.topic-card:has(.topic-card__link:focus-visible) {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+@supports not selector(:has(*)) {
+  .topic-card__link:focus-visible {
+    outline: 2px solid var(--lime);
+    outline-offset: 2px;
+  }
+}

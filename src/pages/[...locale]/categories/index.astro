@@ -2,8 +2,9 @@
 import type { GetStaticPaths } from "astro";
 import BaseLayout from "@/layouts/BaseLayout.astro";
 import { ArrowRight } from "@lucide/astro";
+import TopicCard from "@/components/common/TopicCard.astro";
 import { getPosts, getCategories, getTags } from "@/utils/posts";
-import { formatDate, localePath } from "@/utils/i18n";
+import { localePath } from "@/utils/i18n";
 import { LOCALES, type Locale } from "@/i18n/config";
 import { useTranslations } from "@/i18n/ui";
 
@@ -16,19 +17,6 @@ const t = useTranslations(locale);
 const posts = await getPosts(locale);
 const categories = getCategories(posts, locale);
 const tags = getTags(posts);
-
-/** Most frequent tags inside one category — no invented taxonomy. */
-function leadingTags(categoryName: string, limit = 4): string[] {
-  const counts = new Map<string, number>();
-  for (const post of posts.filter((p) => p.data.category === categoryName)) {
-    for (const tag of post.data.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, limit)
-    .map(([name]) => name);
-}
-
 const latestIn = (categoryName: string) => posts.filter((p) => p.data.category === categoryName)[0];
 ---
 
@@ -53,38 +41,17 @@ const latestIn = (categoryName: string) => posts.filter((p) => p.data.category =
   </section>
 
   <section class="shell pb-16">
-    <div class="grid gap-4 sm:grid-cols-2">
+    <div class="grid gap-3 md:grid-cols-2">
       {
         categories.map((category) => (
-          <article class:list={["panel relative overflow-hidden p-5", `cat-${category.accent}`]}>
-            <div class="absolute inset-x-0 top-0 h-0.5 bg-[var(--chip-color)] opacity-60" />
-            <div class="flex items-baseline justify-between gap-3">
-              <h2 class="font-display text-xl font-semibold tracking-[-0.02em]">
-                <a
-                  href={localePath(locale, `/categories/${category.slug}/`)}
-                  class="hover:text-primary after:absolute after:inset-0"
-                >
-                  {category.label}
-                </a>
-              </h2>
-              <span class="text-subtle font-mono text-[0.62rem]">
-                {String(category.count).padStart(2, "0")}
-              </span>
-            </div>
-            <p class="text-muted mt-2 text-[0.88rem] leading-relaxed">{category.blurb}</p>
-            <div class="text-subtle mt-4 flex flex-wrap items-center gap-2 font-mono text-[0.62rem]">
-              {leadingTags(category.name).map((tag) => (
-                <span>#{tag}</span>
-              ))}
-            </div>
-            <p class="border-line text-subtle mt-3 border-t pt-3 font-mono text-[0.62rem]">
-              {latestIn(category.name)
-                ? t("categories.latest", {
-                    date: formatDate(latestIn(category.name)!.data.pubDate, locale),
-                  })
-                : t("categories.empty")}
-            </p>
-          </article>
+          <TopicCard
+            locale={locale}
+            label={category.label}
+            slug={category.slug}
+            blurb={category.blurb ?? ""}
+            count={category.count}
+            latest={latestIn(category.name)?.data.pubDate}
+          />
         ))
       }
     </div>
